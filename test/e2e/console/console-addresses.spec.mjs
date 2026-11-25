@@ -73,11 +73,12 @@ test('每个页面都有地址，旧看板与任务地址原地重定向；全�
     const context = await browser.newContext(), member = await context.newPage(); await member.goto(h.admin + '/#/settings/users');
     await member.getByLabel('用户名', { exact: true }).fill('member'); await member.getByLabel('密码', { exact: true }).fill(memberPassword); await member.getByRole('button', { name: '登录', exact: true }).click();
     await expect(member.locator('#tabs [aria-current=page]')).toHaveText('项目'); await expect(member.locator('#settings-panel')).toBeHidden();
-    // #549: 存储 leaves the project administrator's sidebar; the address still opens (permissions unchanged).
+    // #549, #1369: 存储 is no sidebar entry but a 个人设置 category; the address still opens (permissions unchanged).
     await expect(member.locator('#tabs').getByRole('link', { name: '全局设置', exact: true })).toBeHidden();
     await expect(member.locator('#tabs').getByRole('button', { name: '存储', exact: true })).toBeHidden();
     await member.goto(h.admin + '/#/settings/storage'); await expect(member.locator('#settings-panel')).toBeVisible();
-    await expect(member.locator('.project-nav').getByRole('link')).toHaveText(['存储']);
+    await expect(member.locator('.project-nav').getByRole('link', { name: '存储', exact: true })).toHaveAttribute('aria-current', 'page');
+    await expect(member.locator('.project-nav')).toHaveAccessibleName('个人设置类别');
     // A project administrator sees its projects' trajectories and computers, nothing of the host (#671).
     await expect.poll(() => member.locator('#settings-panel .side-card > :is(h2,h3)').allInnerTexts()).toEqual(['存储', '按项目', '项目电脑']);
     await expect(member.locator('#settings-panel')).toContainText('fixture/project-101'); await context.close();

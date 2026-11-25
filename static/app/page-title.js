@@ -4,7 +4,7 @@
 const pageTitleKeys = {
   projects: 'nav.projects', costs: 'nav.costs', management: 'nav.management',
   settings: 'nav.settings', inbox: 'nav.inbox', conversations: 'nav.conversations', 'new-task': 'nav.new_task',
-  more: 'nav.more', external: 'nav.external', design: 'page.design', identity: 'identity.title', preferences: 'nav.preferences'
+  external: 'nav.external', design: 'page.design', identity: 'identity.title', preferences: 'nav.preferences'
 };
 // The project page a reader is on: #/projects/<id>/<section> shows the project name and the section caption, and an
 // address that names no section of the project is the not-found page inside it.

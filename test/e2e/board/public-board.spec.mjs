@@ -211,7 +211,7 @@ test('a public-board choice cannot write after leaving the page that opened it',
     let writes = 0; page.on('request', request => { if (request.method() === 'PATCH' && request.url().endsWith('/api/installations/101/board')) writes++; });
     await page.getByRole('switch', { name: 'octo/hello 看板', exact: true }).click();
     const dialog = page.getByRole('dialog', { name: '开启公开看板？', exact: true }); await expect(dialog).toBeVisible();
-    await page.evaluate(() => { location.hash = '#/more'; }); await expect(page).toHaveURL(/#\/more$/);
+    await page.evaluate(() => { location.hash = '#/costs'; }); await expect(page).toHaveURL(/#\/costs$/);
     await dialog.getByRole('button', { name: '开启公开看板', exact: true }).click(); await expect(dialog).toHaveCount(0);
     expect(writes).toBe(0); expect((await f.get('/boards/octo/hello/data/snapshot.json')).status).toBe(404);
   } finally { for (const fn of cleanup.reverse()) await fn(); }

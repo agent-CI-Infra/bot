@@ -137,7 +137,7 @@ test('all console route families keep location and permission content in the sin
     await page.setViewportSize({ width: 1440, height: 900 });
     await login(page, h, password);
     const routes = [
-      '#/projects', '#/board', '#/inbox', '#/costs', '#/identity', '#/more', '#/design', '#/management',
+      '#/projects', '#/board', '#/inbox', '#/costs', '#/identity', '#/design', '#/management',
       '#/settings/work-computers', '#/settings/models', '#/settings/projects', '#/settings/users',
       '#/projects/101/overview', '#/projects/101/board', '#/projects/101/inbox', '#/projects/101/new-task',
       '#/projects/101/release', '#/projects/101/knowledge', '#/projects/101/activity', '#/projects/101/costs',

@@ -117,8 +117,9 @@ test('the tool volume page installs a CLI, reports a refused download and keeps 
       await fill(memberPage, h.admin + '/#/settings/agent-tools', 'member', memberPassword);
       // Signing in opens the project list; the one settings category this role may open has no tool entry.
       await memberPage.goto(h.admin + '/#/settings/storage');
-      const settingsNav = memberPage.getByRole('navigation', { name: '设置类别' });
-      await expect(settingsNav.getByRole('link')).toHaveText(['存储']);
+      // #1369: that category is 存储 under 个人设置.
+      const settingsNav = memberPage.getByRole('navigation', { name: '个人设置类别' });
+      await expect(settingsNav.getByRole('link', { name: '存储', exact: true })).toHaveAttribute('aria-current', 'page');
       await expect(settingsNav).not.toContainText('Agent CLI 工具卷');
     } finally { await memberPage.close(); }
     expect(errors).toEqual([]);

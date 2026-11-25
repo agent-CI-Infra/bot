@@ -149,11 +149,6 @@ body:has(#console-scope-picker:modal) { overflow: hidden; }
 .console-page-head h1 { font-size: var(--font-size-5); font-weight: 650; margin: 8px 0; letter-spacing: -.02em; line-height: var(--line-height-tight); }
 .console-page-head .eyebrow { color: var(--color-brand); font-weight: 650; font-size: var(--font-size-1); }
 .console-page-head .muted { max-width: 40em; font-size: var(--font-size-2); line-height: var(--line-height-relaxed); }
-.console-groups { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-6); align-items: stretch; }
-.console-group { display: flex; flex-direction: column; background: var(--color-surface); padding: var(--space-6); border: 1px solid var(--color-border); border-radius: var(--radius-card); min-width: 0; height: 100%; }
-.console-group-wide { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 var(--space-6); height: auto; }
-.console-group-wide > h2 { grid-column: 1 / -1; }
-.console-group h2 { font-size: var(--font-size-touch); margin: 0 0 var(--space-5); }
 .console-link { display: flex; flex-direction: column; justify-content: center; gap: 4px; color: var(--color-text); text-decoration: none; min-height: 52px; padding: 12px; border-radius: var(--radius-control); }
 .console-link:hover { background: var(--color-brand-weak); color: var(--color-brand); }
 .console-link > span { font-weight: 550; }
@@ -162,10 +157,6 @@ body:has(#console-scope-picker:modal) { overflow: hidden; }
 .console-icon { width: 22px; height: 22px; flex-shrink: 0; display: block; }
 .console-nav-icon { width: 22px; height: 22px; line-height: 0; }
 #console-sidebar #tabs button, #console-sidebar .console-link { gap: 10px; }
-.console-link-with-icon { flex-direction: row; justify-content: flex-start; align-items: flex-start; gap: 12px; }
-.console-link-with-icon .console-icon { margin-top: 2px; color: var(--color-brand); }
-.console-link-copy { display: flex; flex-direction: column; justify-content: center; gap: 4px; min-width: 0; }
-.console-link-copy > span { overflow-wrap: anywhere; font-weight: 550; }
 /* Empty / error state: a quiet tray or alert mark, decorative only. It is an inline SVG from consoleIcon():
    the console CSP (img-src 'self') blocks data: mask images. */
 .console-state-icon { width: 32px; height: 32px; color: var(--color-brand); }
@@ -214,7 +205,6 @@ body:has(#console-scope-picker:modal) { overflow: hidden; }
 .console-inbox-paging { display: flex; justify-content: flex-end; gap: 12px; border: 0; }
 body.console-ready .management-page { left: var(--console-rail); }
 @media (min-width:768px) and (max-width:1439px) {
-  .console-groups { grid-template-columns: repeat(2, minmax(0,1fr)); gap: var(--space-6); align-items: stretch; }
   body.console-ready main { padding-left: var(--space-6); padding-right: var(--space-6); }
   /* One row of project section links: scroll sideways instead of wrapping onto a second row. */
   #console-secondary-nav .project-nav {
@@ -224,7 +214,6 @@ body.console-ready .management-page { left: var(--console-rail); }
   #console-secondary-nav .project-nav .console-nav-label { flex: 0 0 auto; }
   /* #707: the project settings categories wrap instead, so at 768 every one of them stays one click away on screen. */
   #console-secondary-nav .project-nav.project-settings-nav { flex-wrap: wrap; overflow: visible; }
-  .console-group-wide { grid-template-columns: repeat(2, minmax(0,1fr)); }
 }
 @media (max-width:1023px) and (min-width:768px) {
   :root { --console-rail: 192px; }
@@ -276,9 +265,6 @@ body.console-ready .management-page { left: var(--console-rail); }
   .management-panel .console-state-icon { display: none; }
   .console-page-head { margin-top: 0; margin-bottom: var(--space-6); }
   .console-page-head h1 { font-size: var(--font-size-display); }
-  .console-groups { grid-template-columns: minmax(0,1fr); gap: var(--space-5); }
-  .console-group { padding: var(--space-5); }
-  .console-group-wide { grid-template-columns: minmax(0,1fr); }
   .console-inbox-filters { align-items: end; }
   .console-inbox-filters label { min-width: 0; }
   .console-attention-row { grid-template-columns: minmax(0,1fr); padding: 16px; gap: 10px; }
@@ -315,9 +301,6 @@ html { scroll-padding-bottom: calc(var(--console-mobile-height,0px) + 100px); }
   .console-ready .project-head { padding: 12px; }
   /* The header actions take their own row and wrap there, so a fourth action (#707 设置) is never cut off at 390. */
   .console-ready .project-head .actions { flex: 1 1 100%; min-width: 0; }
-  .console-groups { gap: var(--space-4); }
-  .console-group { padding: 12px; }
-  .console-group .console-link { padding: 8px 10px; min-height: var(--control-min); }
 }
 @media (min-width: 1440px) {
   .settings-body .project-content, .console-ready .project-content { max-width: none; width: 100%; }
@@ -350,6 +333,7 @@ button.linkish { border: 0; background: none; padding: 0; min-height: 0; color: 
 .console-account-login { font-weight: 650; }
 .console-account-role { color: var(--color-text-muted); font-size: 12px; padding-bottom: 4px; border-bottom: 1px solid var(--color-border); }
 .console-account-menu .console-link { min-height: 44px; padding: 10px 8px; }
+.console-account-menu .console-link[hidden] { display: none; }
 .console-account-signout { justify-content: flex-start; min-height: 44px; padding: 10px 8px; text-align: left; }
 @media (max-width:767px) {
   #identity #who, #identity #logout { display: none; }
@@ -429,7 +413,7 @@ body:not(.console-ready) header .locale-switch { background: #fff; }
 #who { overflow-wrap: normal; }
 .current-user-name, .current-user-role { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row-title, .console-ready .row strong, .console-ready .project-head h1,
-.console-ready .toolbar h1, .console-page-head h1, .console-group h2 {
+.console-ready .toolbar h1, .console-page-head h1 {
   display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; max-width: 100%;
 }
 .console-link-title {

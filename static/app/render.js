@@ -9,7 +9,7 @@ function redrawFailedList(version, card) {
 }
 async function render(quiet = false) {
   // The list renderer never owns a console page. This is the second line of defence for #365: even when a stale route
-  // reaches here after `tab` has moved to #/more, it must not turn that tab name into an API path.
+  // reaches here after `tab` has moved to a console page such as #/inbox, it must not turn that tab name into an API path.
   if (consoleTabs.includes(tab)) return;
   // The list this call belongs to. A hash change can land while a read below is still in flight; the call must finish
   // the list it started for, or step aside, and never re-point its own address at whatever `tab` became (#365).

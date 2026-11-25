@@ -94,7 +94,7 @@ test('a lost create response is reconciled with the original key across page nav
     await page.getByRole('button', { name: '提交任务', exact: true }).click();
     await expect(page.getByRole('heading', { name: '提交结果待核实', exact: true })).toBeVisible();
     await expect(page.getByLabel('原始需求', { exact: true })).toBeDisabled();
-    await page.evaluate(() => { location.hash = '#/more'; }); await expect(page.getByRole('heading', { name: '更多功能' })).toBeVisible();
+    await page.evaluate(() => { location.hash = '#/costs'; }); await expect(page.getByRole('heading', { name: '用量与成本', exact: true })).toBeVisible();
     await page.evaluate(() => { location.hash = '#/projects/101/new-task'; });
     await page.getByRole('button', { name: '核对同一次提交', exact: true }).click();
     await expect(page.getByRole('heading', { name: '任务已创建', exact: true })).toBeVisible();

@@ -9,8 +9,10 @@ async function renderSettings(request) {
     if (groups.length > 1) nav.append(element('p', groupTitle, 'console-nav-label'));
     for (const [key, caption] of items) { const item = element('a', caption); item.href = '#/settings/' + key; if (key === section) item.setAttribute('aria-current', 'page'); nav.append(item); }
   }
+  // #1369: 存储 of a project administrator belongs to 个人设置, whose category bar the shell draws; this one stays out.
+  const personal = typeof personalSettingsNav === 'function' && storageInPersonalSettings();
   // The categories are drawn at once; the chosen category's cards follow when their data arrives.
-  $('count').textContent = ''; content.append(element('p', '正在加载…', 'muted')); body.append(nav, content); $('settings-panel').replaceChildren(body);
+  $('count').textContent = ''; content.append(element('p', '正在加载…', 'muted')); body.append(...(personal ? [] : [nav]), content); $('settings-panel').replaceChildren(body);
   if (typeof syncConsoleShell === 'function') syncConsoleShell();
   if (typeof refreshFeedbackNavBadge === 'function' && section !== 'feedback') void refreshFeedbackNavBadge(request);
   // The hash may only choose among the declared sections: never let a user-written name reach the prototype chain, and

@@ -1,9 +1,9 @@
 import { test, expect } from '@playwright/test';
 import { identityFixture } from '../../fixtures/identity-fixture.mjs';
 
-// #799: a project administrator reaches #/settings/storage from 更多功能, but the shell used to call it
-// 平台管理 / 全局设置. The page names its own category now; the platform keeps its path, and both roles read plain table
-// headers at 1440 and 390.
+// #799: a project administrator opens #/settings/storage too, but the shell used to call it 平台管理 / 全局设置. The page
+// names its own category now; the platform keeps its path, a project administrator reads it under 个人设置 (#1369), and
+// both roles read plain table headers at 1440 and 390.
 // The control plane harness has no project computer yet; a scanned volume is enough for the second table's headers,
 // which are the ones this page has to rename. The response is the real one with that one field added.
 const withComputer = async route => {
@@ -47,7 +47,7 @@ test('the storage page names itself for both roles and drops the jargon from its
       await page.waitForTimeout(200);
     }
 
-    // The project administrator reaches the same address with a workspace path and a plain category bar.
+    // The project administrator reaches the same address under 个人设置, with that category bar.
     const context = await browser.newContext(), member = await context.newPage();
     member.on('pageerror', error => errors.push(error.message));
     try {
@@ -56,17 +56,17 @@ test('the storage page names itself for both roles and drops the jargon from its
       const memberPanel = member.locator('#settings-panel');
       await expect(memberPanel).toContainText('这里统计');
       await expect(member.locator('#page-title')).toHaveText('存储');
-      await expect(member.locator('#console-area')).toHaveText('工作区');
+      await expect(member.locator('#console-area')).toHaveText('个人设置');
       await expect(member.locator('#console-context')).toHaveText('存储');
       await expect(member).toHaveTitle(/^存储 · /);
-      await expect(member.getByRole('navigation', { name: '设置类别' })).toBeVisible();
+      await expect(member.getByRole('navigation', { name: '个人设置类别' }).getByRole('link', { name: '存储', exact: true })).toHaveAttribute('aria-current', 'page');
       await expect(member.getByRole('navigation', { name: '全局设置类别' })).toHaveCount(0);
       for (const row of await memberPanel.locator('.storage-projects thead').all()) await expect(row).not.toContainText('runner journal');
       await expect(memberPanel.locator('th', { hasText: '工作目录缓存' })).toHaveAttribute('title', 'HOME 缓存');
-      // The phone control mirrors the same single category, and the address does not overflow.
+      // The phone control mirrors the same categories with 存储 chosen, and the address does not overflow.
       await member.setViewportSize({ width: 390, height: 844 });
       await expect(member.locator('#console-section')).toHaveAccessibleName('当前页面');
-      await expect(member.locator('#console-section option')).toHaveText(['存储']);
+      await expect(member.locator('#console-section')).toHaveValue('#/settings/storage');
       expect(await member.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       for (const width of [1440, 390]) {
         await member.setViewportSize({ width, height: width === 390 ? 844 : 900 });

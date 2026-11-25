@@ -36,7 +36,8 @@ function syncConsoleScope() {
   try { localStorage.setItem(consoleLastScopeKey(), consoleRetainedScope || 'all'); } catch { /* Navigation works with storage disabled. */ }
 }
 function restoreConsoleStart(rows) {
-  if (location.hash && location.hash !== '#/') return;
+  // #1369: a saved #/more names no page any more, so it starts like a bare address, in the remembered scope.
+  if (location.hash && location.hash !== '#/' && location.hash !== '#/more') return;
   let scope;
   try { scope = localStorage.getItem(consoleLastScopeKey()); } catch { /* Use All projects when storage is unavailable. */ }
   const project = rows.find(row => String(row.id) === scope);

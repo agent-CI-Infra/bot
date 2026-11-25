@@ -13,8 +13,8 @@ test('shared desktop rail and mobile navigation expose real destinations across 
     const {admin,password}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
     await login(page,h,password);
     for(const width of [320,390,768,1024,1440,1920]) {
-      await page.setViewportSize({width,height:900});await page.goto(h.admin+'/#/more');
-      await expect(page.getByRole('heading',{name:'更多功能',exact:true})).toBeVisible();
+      await page.setViewportSize({width,height:900});await page.goto(h.admin+'/#/projects');
+      await expect(page.locator('#rows .row')).toHaveCount(1);
       expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
       if(width>=768) {
         await expect(page.locator('#console-sidebar')).toBeVisible();
@@ -25,7 +25,8 @@ test('shared desktop rail and mobile navigation expose real destinations across 
       } else await expect(page.locator('#console-sidebar')).toBeHidden();
       if(width<768){
         await expect(page.locator('#console-mobile-nav')).toBeVisible();
-        await expect(page.locator('#console-mobile-nav a')).toHaveText(['项目','待处理','助手','更多']);
+        // #1369: no 更多 on the phone either; the bar carries the sidebar's all-projects pages.
+        await expect(page.locator('#console-mobile-nav a')).toHaveText(['项目','待处理','助手','用量与成本']);
         await expect(page.locator('#console-mobile-nav a svg.console-icon')).toHaveCount(4);
         const boxes=await page.locator('#console-mobile-nav a').evaluateAll(nodes=>nodes.map(n=>({width:n.getBoundingClientRect().width,height:n.getBoundingClientRect().height})));
         expect(boxes.every(b=>b.width>=44&&b.height>=44)).toBe(true);
@@ -44,11 +45,14 @@ test('shared desktop rail and mobile navigation expose real destinations across 
     await page.setViewportSize({width:390,height:844});
     await page.getByLabel('当前页面',{exact:true}).selectOption('#/projects/101/knowledge');
     await expect(page).toHaveURL(/#\/projects\/101\/knowledge$/);
-    await page.locator('#console-mobile-nav').getByRole('link',{name:'更多',exact:true}).click();
-    // #481: 更多 is the short supplement behind the bar — the project's own pages, the analysis entries and one way into
-    // personal and platform settings (whose sections the 当前页面 picker carries).
-    await expect(page.locator('.console-group').filter({has:page.getByRole('heading',{name:'当前项目',exact:true})})).toContainText('项目设置');
-    await expect(page.locator('#console-page a[href="#/settings/work-computers"]')).toBeVisible();
+    // #1369: the 当前页面 picker carries every page of the project, and the account menu both settings entries.
+    const picker=page.getByLabel('当前页面',{exact:true});
+    for(const key of ['release','activity','costs','basic','members']) await expect(picker.locator(`option[value="#/projects/101/${key}"]`)).toHaveCount(1);
+    await page.locator('#console-account').click();
+    await expect(page.locator('#console-account-menu .console-link:visible')).toHaveText(['个人设置','全局设置']);
+    await page.locator('#console-account-menu').getByRole('link',{name:'全局设置',exact:true}).click();
+    await expect(page).toHaveURL(/#\/settings\/work-computers$/);await expect(page.locator('#console-account-menu')).toBeHidden();
+    await expect(picker.locator('option[value="#/settings/onboarding"]')).toHaveCount(1);
     // A short desktop keeps settings visible while a long category list scrolls above them.
     await page.setViewportSize({width:1440,height:360});await page.goto(h.admin+'/#/settings/users');
     await expect(page.locator('#settings-panel')).toContainText('administrator');
@@ -95,18 +99,20 @@ test('permissions, in-flight navigation, keyboard and history keep their boundar
   try {
     const {admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');await repository(admin,a.id,'202');
     const password=testPassword();await admin('/api/users','POST',{username:'member-shell',password,repository_ids:['101']});
+    // #1369: a saved #/more opens the console home instead of the retired 更多功能 page.
     await page.setViewportSize({width:390,height:844});await login(page,h,password,'member-shell','#/more');
+    await expect(page).toHaveURL(/#\/projects$/);await expect(page.locator('#rows .row')).toHaveCount(1);
     await expect(page.getByRole('heading',{name:'全局设置',exact:true})).toHaveCount(0);
     await expect(page.getByRole('link',{name:'飞书连接',exact:false})).toHaveCount(0);
     await page.setViewportSize({width:1440,height:900});
-    // #1204: both roles get the fixed 个人设置 entry; only 全局设置 remains super-admin-only.
+    // #1204, #1369: both roles get the same entries and the fixed 个人设置; only 全局设置 remains super-admin-only.
     const prefs=page.locator('.console-settings-nav').getByRole('link',{name:'个人设置',exact:true});
     await expect(prefs).toBeVisible();
     await prefs.click();
     await expect(page.locator('#identity-panel')).toBeVisible();
     await expect(prefs).toHaveAttribute('aria-current','page');
     await expect(page.locator('.console-settings-nav').getByRole('link',{name:'全局设置',exact:true})).toBeHidden();
-    await expect(page.locator('#tabs').getByRole('link',{name:'用量与成本',exact:true})).toBeHidden();
+    await expect(page.locator('#tabs').getByRole('link',{name:'用量与成本',exact:true})).toBeVisible();
     await expect(page.locator('#tabs').getByRole('button',{name:'仓库事件',exact:true})).toHaveCount(0);
     await page.setViewportSize({width:390,height:844});
     await expect(page.locator('#console-scope-projects [data-project-id="202"]')).toHaveCount(0);
@@ -115,14 +121,16 @@ test('permissions, in-flight navigation, keyboard and history keep their boundar
     let release;const gate=new Promise(resolve=>{release=resolve;});
     await page.route('**/api/tasks?attention=*',async route=>{await gate;await route.continue();});
     await page.goto(h.admin+'/#/inbox');await expect(page.getByRole('heading',{name:'正在读取待处理事项'})).toBeVisible();
-    await page.locator('#console-mobile-nav').getByRole('link',{name:'更多',exact:true}).click();
-    release();await expect(page.getByRole('heading',{name:'更多功能',exact:true})).toBeVisible();
+    await page.locator('#console-mobile-nav').getByRole('link',{name:'用量与成本',exact:true}).click();
+    release();await expect(page.getByRole('heading',{name:'用量与成本',exact:true})).toBeVisible();
     await expect(page.locator('.console-attention-row')).toHaveCount(0);
     await page.emulateMedia({reducedMotion:'reduce'});await page.setViewportSize({width:320,height:500});
     expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
     await page.keyboard.press('Tab');
-    await page.getByRole('link',{name:'身份与权限',exact:false}).click();await expect(page.locator('#identity-panel')).toBeVisible();
-    await page.goBack();await expect(page.getByRole('heading',{name:'更多功能',exact:true})).toBeVisible();
+    // The account menu holds 个人设置 alone for a project administrator.
+    await page.locator('#console-account').click();await expect(page.locator('#console-account-menu .console-link:visible')).toHaveText(['个人设置']);
+    await page.locator('#console-account-menu').getByRole('link',{name:'个人设置',exact:true}).click();await expect(page.locator('#identity-panel')).toBeVisible();
+    await page.goBack();await expect(page.getByRole('heading',{name:'用量与成本',exact:true})).toBeVisible();
     await page.locator('#console-account').click();await page.locator('#console-account-menu').getByRole('button',{name:'退出登录',exact:true}).click();await expect(page.locator('#console-mobile-nav')).toBeHidden();await expect(page.locator('#console-sidebar')).toBeHidden();
   }finally{await h.stop();}
 });

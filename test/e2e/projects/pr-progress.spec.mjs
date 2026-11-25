@@ -128,7 +128,7 @@ test('PR Progress panel, retired board redirects, and simplified navigation work
     await expect(page.locator('#rows')).toContainText('fixture/project-101');
     await expect(page.locator('#tabs').getByRole('link', { name: '任务看板', exact: true })).toHaveCount(0);
     await page.setViewportSize({ width: 390, height: 844 });
-    await expect(page.locator('#console-mobile-nav a')).toHaveText(['项目', '待处理', '助手', '更多']);
+    await expect(page.locator('#console-mobile-nav a')).toHaveText(['项目', '待处理', '助手', '用量与成本']);
     await page.setViewportSize({ width: 1440, height: 900 });
 
     // Legacy global routes redirect cleanly to #/projects
@@ -209,7 +209,7 @@ test('PR Progress panel, retired board redirects, and simplified navigation work
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     }
     await page.setViewportSize({ width: 390, height: 844 });
-    await expect(page.locator('#console-mobile-nav a')).toHaveText(['项目', '待处理', '助手', '更多']);
+    await expect(page.locator('#console-mobile-nav a')).toHaveText(['项目', '待处理', '助手', '用量与成本']);
     for (const link of await page.locator('#console-mobile-nav a').all()) {
       const box = await link.boundingBox();
       expect(box.height).toBeGreaterThanOrEqual(44);

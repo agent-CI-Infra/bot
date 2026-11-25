@@ -12,11 +12,11 @@ const projectSettingsSections = [
   ['external', '外部执行', '外部执行端'],
   ['members', '成员', '项目成员与权限']
 ];
-// One source for the scope sidebar, phone page picker and the current-project group in More.
+// One source for the scope sidebar and the phone page picker; the same for every role (#1369).
 function projectWorkSections() {
   return [['overview', t('nav.project_overview')], ['inbox', t('nav.inbox')], ['management', t('nav.management')],
     ['release', t('nav.project_release')], ['knowledge', t('nav.project_knowledge')], ['activity', t('nav.project_activity')],
-    ...(me.role === 'super_admin' ? [['costs', t('nav.costs')]] : [])];
+    ['costs', t('nav.costs')]];
 }
 function projectNavigationGroups() { return [[t('nav.project_work'), projectWorkSections()], [t('nav.project_settings_group'), projectSettingsSections]]; }
 // Older addresses open the Manager page: the workflows page it replaced, the task overview and the review, development and rule pages.

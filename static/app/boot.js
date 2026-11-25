@@ -94,7 +94,6 @@ async function start() {
   if (!me) return;
   renderCurrentUser();
   document.querySelectorAll('[data-super]').forEach(el => el.hidden = me.role !== 'super_admin');
-  // #549: do not put 存储 back on a project administrator's sidebar. The address still opens; the management area is #550.
   // #873: this is the read that decides whether the signed-in console has anything to show. Before #873 a failure here
   // left the shell open on an empty list and only reached the message strip; it now stops like the signed-out boot does,
   // with the same card and retry, and the session header stays so the reader can see they are still signed in.

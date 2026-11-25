@@ -84,9 +84,9 @@ test('a late inbox refresh after closing cannot replace a new page or steal its 
     // Bounded instead of an unbounded `await`: a refresh that never comes must fail here, by name, rather than
     // starving the remainder of the test of its budget.
     await expect.poll(() => entered, { timeout: 30000, message: 'closing the task must request the inbox again' }).toBeGreaterThan(0);
-    await page.locator('#console-mobile-nav').getByRole('link', { name: '更多', exact: true }).click();
-    const heading = page.getByRole('heading', { name: '更多功能', exact: true }); await expect(heading).toBeVisible();
-    const focus = page.getByRole('link', { name: '身份与权限', exact: false }); await focus.focus();
+    await page.locator('#console-mobile-nav').getByRole('link', { name: '用量与成本', exact: true }).click();
+    const heading = page.getByRole('heading', { name: '用量与成本', exact: true }); await expect(heading).toBeVisible();
+    const focus = page.locator('#console-mobile-nav').getByRole('link', { name: '待处理', exact: true }); await focus.focus();
     release(); await page.unrouteAll({ behavior: 'wait' });
     await expect(heading).toBeVisible(); await expect(focus).toBeFocused(); await expect(item(page)).toHaveCount(0);
   } finally { release?.(); await h.stop(); }

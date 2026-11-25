@@ -94,8 +94,8 @@ test('overview deep links, live permissions and late responses retain scope acro
     await expect(page.locator('[data-task-id=blocked] button')).toBeFocused();
     let release;const gate=new Promise(resolve=>{release=resolve;});
     await page.route('**/api/tasks?*',async route=>{await gate;await route.continue();});
-    await page.getByRole('button',{name:'刷新总览'}).click();await page.locator('#console-mobile-nav').getByRole('link',{name:'更多',exact:true}).click();release();
-    await expect(page.getByRole('heading',{name:'更多功能',exact:true})).toBeVisible();await expect(page.locator('.workspace-overview')).toHaveCount(0);
+    await page.getByRole('button',{name:'刷新总览'}).click();await page.locator('#console-mobile-nav').getByRole('link',{name:'用量与成本',exact:true}).click();release();
+    await expect(page.getByRole('heading',{name:'用量与成本',exact:true})).toBeVisible();await expect(page.locator('.workspace-overview')).toHaveCount(0);
     await page.unroute('**/api/tasks?*');await page.goto(h.admin+'/#/projects/202/overview');await expect(page.locator('#project-page')).toContainText('403');
     await page.goto(h.admin+'/#/projects/101/overview/active');await expect(metric(page,'active')).toHaveText('2');
     const user=h.store.get("SELECT id FROM users WHERE username='overview-member'");await admin('/api/project-admin-assignments','PUT',{user_id:user.id,repository_ids:[]});
