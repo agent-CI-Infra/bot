@@ -57,3 +57,13 @@ for (const [name, bounds] of commandBounds) {
     }
   });
 }
+
+// #1371: test-sets.mjs stops a set after BOT_TEST_SET_TIMEOUT seconds and SIGKILLs it 10 s later. On CI that has to
+// happen before the outer SIGKILL of the step, or the log never says which set hung (the default 1800 s would not).
+test('checks.yml stops a hung test set before the npm test bound', () => {
+  const step = Object.values(read('checks').jobs).flatMap(steps).find(candidate => candidate.run?.includes('npm test'));
+  const bound = Number(/^timeout --signal=KILL (\d+) /.exec(step.run.trim())[1]);
+  const limit = Number(step.env?.BOT_TEST_SET_TIMEOUT);
+  assert.ok(limit > 0, 'checks.yml: the npm test step must set BOT_TEST_SET_TIMEOUT');
+  assert.ok(limit + 10 < bound, `checks.yml: BOT_TEST_SET_TIMEOUT ${limit}s plus the 10 s SIGKILL grace must end before the ${bound}s bound`);
+});
