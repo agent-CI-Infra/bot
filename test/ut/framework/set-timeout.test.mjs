@@ -28,15 +28,19 @@ await new Promise(() => setInterval(() => {}, 1000));
 }
 
 // The runner works in the fixture directory, so its .tmp/ (timings, run directories) stays out of the checkout's own.
+// If the limit under test stops working, the nested runner never ends, and waiting for it would keep this file's
+// process alive past the test's own timeout, hanging the outer set just like #1371. So the runner gets its own process
+// group and a deadline that SIGKILLs the whole group: the test then fails on its assertions within a minute.
 function start({ dir, files }, timeout) {
   const env = { ...process.env, BOT_TEST_SET_TIMEOUT: String(timeout), BOT_TEST_JOBS: '2' };
   // A nested runner must not inherit the outer node --test context, or the fixtures are reported as skipped.
   delete env.NODE_TEST_CONTEXT; delete env.NODE_OPTIONS; delete env.BOT_TEST_REPORT; delete env.BOT_TEST_SUMMARY; delete env.BOT_TEST_SHARD;
-  const child = spawn(process.execPath, [runner, ...files], { cwd: dir, env, stdio: ['ignore', 'pipe', 'pipe'] }), output = [];
+  const child = spawn(process.execPath, [runner, ...files], { cwd: dir, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] }), output = [];
+  const deadline = setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} }, 45_000);
   child.stdout.on('data', chunk => output.push(chunk)); child.stderr.on('data', chunk => output.push(chunk));
   const ended = new Promise((resolve, reject) => {
-    child.on('error', reject);
-    child.on('close', code => resolve({ code, output: Buffer.concat(output).toString() }));
+    child.on('error', error => { clearTimeout(deadline); reject(error); });
+    child.on('close', code => { clearTimeout(deadline); resolve({ code, output: Buffer.concat(output).toString() }); });
   });
   return { child, ended };
 }
