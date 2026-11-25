@@ -6,6 +6,7 @@ import { HttpError, randomId } from '../core/security.js';
 import { stop, TaskError, type Redactor } from '../agent/common.js';
 import type { AgentSpec, ToolImageBlock } from '../agent/runtime.js';
 import { traceEvent } from '../tasks/trace.js';
+import { RUNNER_TRANSFER_CHUNK_BYTES } from '../../runner/command-policy.mjs';
 
 export interface TaskToolCallInput {
   id: string;
@@ -217,9 +218,9 @@ export async function deliverMailboxToolReply(
   failureDetail = '发送工具结果时中断。'
 ): Promise<boolean> {
   const bytes = Buffer.from(JSON.stringify(value ?? null));
-  for (let at = 0; at < bytes.length || at === 0; at += 30000) {
-    const part = bytes.subarray(at, at + 30000);
-    const sent = await sendChunk({ type: 'workspace_agent_tool', request_id: requestId, base64: part.toString('base64'), offset: at, final: at + 30000 >= bytes.length });
+  for (let at = 0; at < bytes.length || at === 0; at += RUNNER_TRANSFER_CHUNK_BYTES) {
+    const part = bytes.subarray(at, at + RUNNER_TRANSFER_CHUNK_BYTES);
+    const sent = await sendChunk({ type: 'workspace_agent_tool', request_id: requestId, base64: part.toString('base64'), offset: at, final: at + RUNNER_TRANSFER_CHUNK_BYTES >= bytes.length });
     if (abandonedToolReply(sent)) return false;
     if (sent?.error) stop('execution_interrupted', 'waiting_environment', failureDetail);
     if (bytes.length === 0) break;

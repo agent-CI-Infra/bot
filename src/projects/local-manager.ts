@@ -31,23 +31,27 @@ export class LocalManager implements Manager {
     if (!/^[a-f0-9]{48}$/.test(input.operation_id || '')) fail(400, 'invalid_operation_id');
     return new Promise((resolveResult, reject) => {
       // Deliberately do not inherit the control plane's environment or credentials.
-      const child = spawn(process.execPath, [this.runner, Buffer.from(JSON.stringify(input)).toString('base64url')], {
+      // Deliver payload over stdin (`--stdin`) instead of argv so requests up to runnerRequestLimit (8 MiB) never hit Linux MAX_ARG_STRLEN.
+      const child = spawn(process.execPath, [this.runner, '--stdin'], {
         env: {
           PATH: dirname(process.execPath) + ':/usr/local/bin:/usr/bin:/bin',
           LANG: 'C.UTF-8',
           BOT_LOCAL_EXECUTION: 'true',
           BOT_LOCAL_WORKSPACE: this.root,
+          BOT_OPERATION_ID: input.operation_id,
           ...(process.env.BOT_AGENT_TOOLS_DIR ? { BOT_AGENT_TOOLS_DIR: process.env.BOT_AGENT_TOOLS_DIR } : {}),
           ...(process.env.BOT_SKILL_STORE_DIR ? { BOT_SKILL_STORE_DIR: process.env.BOT_SKILL_STORE_DIR } : {}),
           ...(process.env.BOT_REAL_GH_BIN ? { BOT_REAL_GH_BIN: process.env.BOT_REAL_GH_BIN } : {}),
           ...(process.env.BOT_BROWSER_EXECUTABLE ? { BOT_BROWSER_EXECUTABLE: process.env.BOT_BROWSER_EXECUTABLE } : {}),
           ...(process.env.PLAYWRIGHT_BROWSERS_PATH ? { PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH } : {}),
         },
-        stdio: ['ignore','pipe','pipe'] });
+        stdio: ['pipe', 'pipe', 'pipe'] });
       let out = '', err = '';
       const timer = timeoutMs ? setTimeout(() => { child.kill('SIGKILL'); reject(new Error('local_runner_timeout')); }, timeoutMs) : undefined;
       child.stdout.setEncoding('utf8');child.stderr.setEncoding('utf8');
-      child.stdout.on('data', chunk => { out += chunk; if (out.length > 8 * 1024 * 1024) child.kill('SIGKILL'); });
+      child.stdin.on('error', () => {});
+      child.stdin.end(JSON.stringify(input));
+      child.stdout.on('data', chunk => { out += chunk; if (out.length > 16 * 1024 * 1024) child.kill('SIGKILL'); });
       child.stderr.on('data', chunk => { err = (err + chunk).slice(-1000); });
       child.on('error', error => { clearTimeout(timer); reject(error); });
       child.on('close', code => { clearTimeout(timer); if (code !== 0) { reject(new Error('local_runner_failed:' + code + ':' + err)); return; }

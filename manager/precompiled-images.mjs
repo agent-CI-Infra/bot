@@ -81,7 +81,7 @@ export function generateLayerDockerfile({ fromImageId, packages = [], hasSetupSc
   lines.push(
     'USER 10001:10001',
     'WORKDIR /workspace',
-    'CMD ["node", "/opt/runner/idle.mjs"]',
+    'CMD ["node", "/opt/runner/daemon.mjs"]',
   );
   return lines.join('\n') + '\n';
 }

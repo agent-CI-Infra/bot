@@ -1,10 +1,9 @@
 import { storageFootprint, managerLocations } from './storage-footprint.mjs';
 import { computerResultOwner } from '../runner/result-owner.mjs';
-import { lstat } from 'node:fs/promises';
+import { chmod, lstat, mkdir, rm, unlink, writeFile } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { lstatSync, mkdirSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { rm } from 'node:fs/promises';
 import { randomBytes, createHash } from 'node:crypto';
 import { ManagerError } from './docker.mjs';
 import { CONSERVATIVE_FALLBACK_CPUS, CONSERVATIVE_FALLBACK_MEMORY_MB, clampMemoryToHost, hostMemoryCap, resourceBounds, validResource } from './computer-resources.mjs';
@@ -90,11 +89,11 @@ export function sanitizeTrajectoryResult(type, result) {
 export const walSizeLimit = 512 * 1024 * 1024;
 
 export class Projects {
-  constructor({ database, docker, deployment, image, egress = true, tools = '/opt/agent-tools', projectTools = null, skillStore = null, modelGateway = null, results = null }) {
+  constructor({ database, docker, deployment, image, egress = true, tools = '/opt/agent-tools', projectTools = null, skillStore = null, modelGateway = null, runnerSockets = null, results = null }) {
     // background: repository -> task workspaces whose kept processes may outlive a command.
     // gates: repository -> runner calls running now, whether a lifecycle action holds the computer, and who waits.
     // restarting: computers with a restart queued under the exclusive lock (restartAlone).
-    this.resultsMount = results; this.egress = egress; this.toolsMount = tools; this.projectToolsMount = projectTools; this.skillStoreMount = skillStore; this.modelGatewayMount = modelGateway; this.background = new Map(); this.usage = new Map(); this.gates = new Map(); this.pending = new Set(); this.restarting = new Set();
+    this.resultsMount = results; this.egress = egress; this.toolsMount = tools; this.projectToolsMount = projectTools; this.skillStoreMount = skillStore; this.modelGatewayMount = modelGateway; this.runnerSocketsMount = runnerSockets; this.background = new Map(); this.usage = new Map(); this.gates = new Map(); this.pending = new Set(); this.restarting = new Set();
     // pruned: when each computer's journal was last pruned; pruning: computers with a prune running now.
     this.pruned = new Map(); this.pruning = new Set();
     // scanning: the work volume scan running now (one computer at a time); dockerUsageAt: when Docker's usage was read.
@@ -344,7 +343,7 @@ export class Projects {
     return { ...spec, memory_mb: effectiveMemoryMb, tmp_mb: effectiveTmpMb };
   }
   // Active working memory of projects currently executing tasks/commands (state === 'busy').
-  // Idle ('ready') project containers only run node /opt/runner/idle.mjs (~7.5 MiB RSS) and Docker --memory is a
+  // Idle ('ready') project containers only run node /opt/runner/daemon.mjs (~15 MiB RSS) and Docker --memory is a
   // per-container cgroup ceiling, not pre-allocated RAM, so idle containers are excluded from assistant admission subtraction.
   busyMemoryMb(host = this.effectiveHost()) {
     let total = 0;
@@ -882,6 +881,60 @@ export class Projects {
     if (!volume || !trusted) throw new ManagerError('model_gateway_volume_invalid', 503);
     return name;
   }
+  async runnerSocketsVolume() {
+    if (!this.runnerSocketsMount) return null;
+    const name = await this.docker.volumeName(this.runnerSocketsMount);
+    if (!name) return null;
+    const volume = await this.docker.request('GET', '/volumes/' + encodeURIComponent(name));
+    const labels = volume?.Labels;
+    const trusted = typeof name === 'string' && /^(?:[a-z0-9][a-z0-9._-]*[_-])?runner-sockets$/i.test(name) &&
+      labels && typeof labels === 'object' &&
+      (labels['com.docker.compose.volume'] === 'runner-sockets' || labels['department.bot.kind'] === 'runner-sockets');
+    if (!volume || !trusted) throw new ManagerError('runner_sockets_volume_invalid', 503);
+    return name;
+  }
+  runnerSocketKey(containerName) {
+    return createHash('sha256').update(String(containerName)).digest('hex').slice(0, 24);
+  }
+  async expectedRunnerSocketMount(containerName) {
+    const volume = await this.runnerSocketsVolume();
+    if (!volume) return null;
+    const key = this.runnerSocketKey(containerName);
+    const dir = `${this.runnerSocketsMount}/${key}`;
+    return {
+      key,
+      dir,
+      socketPath: `${dir}/runner.sock`,
+      mount: {
+        Type: 'volume',
+        Source: volume,
+        Target: '/run/bot-runner',
+        ReadOnly: false,
+        VolumeOptions: { NoCopy: true, Subpath: key },
+      },
+    };
+  }
+  async prepareRunnerSocketDir(info) {
+    await mkdir(info.dir, { recursive: true, mode: 0o770 });
+    await chmod(info.dir, 0o770);
+    await unlink(info.socketPath).catch(() => {});
+    const token = randomBytes(32).toString('hex');
+    const tokenPath = `${info.dir}/.token`;
+    await writeFile(tokenPath, token + '\n', { mode: 0o640 });
+    await chmod(tokenPath, 0o640);
+    return { ...info, token };
+  }
+  async prepareRunnerSocket(containerName) {
+    const info = await this.expectedRunnerSocketMount(containerName);
+    if (!info) return null;
+    return this.prepareRunnerSocketDir(info);
+  }
+  async cleanupRunnerSocket(containerName) {
+    this.docker.unregisterRunnerEndpoint?.(containerName);
+    if (!this.runnerSocketsMount) return;
+    const dir = `${this.runnerSocketsMount}/${this.runnerSocketKey(containerName)}`;
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
   async projectToolsSpecMount(repo, revision) {
     this.validate(repo);
     if (!Number.isSafeInteger(revision) || revision < 1) throw new ManagerError('invalid_tools_revision', 400);
@@ -985,9 +1038,11 @@ export class Projects {
     this.db.prepare('UPDATE projects SET state=?,desired=?,error=?,started_at=?,revision=revision+1 WHERE repository_id=?').run(state, desired, error, started, repo);
   }
   async stopGeneration(repo, generation) {
+    const containerName = this.names(repo, generation).container;
+    this.docker.unregisterRunnerEndpoint?.(containerName);
     const container = await this.inspect(repo, generation, 'container');
     if (container?.State.Running) {
-      await this.docker.request('POST', `/containers/${this.names(repo, generation).container}/stop?t=2`);
+      await this.docker.request('POST', `/containers/${containerName}/stop?t=2`);
       if ((await this.inspect(repo, generation, 'container'))?.State.Running) throw new ManagerError('container_not_stopped');
     }
   }
@@ -1016,14 +1071,16 @@ export class Projects {
     await this.notesVolume(repo);
     const toolsVolume = await this.agentToolsVolume();
     const modelGatewayVolume = await this.modelGatewayVolume();
+    const runnerSocketInfo = await this.expectedRunnerSocketMount(names.container);
     const desiredToolsRevision = Number.isSafeInteger(project.tools_revision) && project.tools_revision >= 1 ? project.tools_revision : null;
     const projectToolsMounts = desiredToolsRevision ? [await this.projectToolsSpecMount(repo, desiredToolsRevision)] : [];
     const projectSkillsMounts = await this.projectSkillsMount(repo);
     const resultMounts = await this.resultMount(computerResultOwner('project',repo));
     let network = await this.inspect(repo, generation, 'network'), container = await this.inspect(repo, generation, 'container');
-    // A container whose template or spec differs (approved image, init, resources, network policy) is replaced in place when
+    // A container whose template or spec differs (approved image, init, resources, network policy, daemon cmd, mounts) is replaced in place when
     // provisioned; the work volume and generation stay. This never happens in the middle of a command.
     const networkStale = network && network.Internal !== !spec.egress, host = container?.HostConfig;
+    const cmdStale = container && JSON.stringify(container.Config?.Cmd) !== JSON.stringify(['node', '/opt/runner/daemon.mjs']);
     // Compare only the variables the manager sets (the image adds its own, such as PATH); old names come from BOT_PROJECT_ENV_KEYS.
     const current = container?.Config?.Env || [], listed = current.find(e => e.startsWith('BOT_PROJECT_ENV_KEYS='))?.slice(21).split(',').filter(Boolean) || [];
     const managed = new Set(['HOME', 'LANG', 'BOT_PROJECT_ENV_KEYS', ...Object.keys(spec.env), ...listed]);
@@ -1034,16 +1091,21 @@ export class Projects {
     const modelGatewayMountStale = modelGatewayVolume
       ? !host?.Mounts?.some(m => m.Type === 'volume' && m.Source === modelGatewayVolume && m.Target === '/run/model-gateway' && m.ReadOnly === true)
       : !!host?.Mounts?.some(m => m.Target === '/run/model-gateway');
+    const existingRunnerMounts = host?.Mounts?.filter(m => m.Target === '/run/bot-runner') ?? [];
+    const runnerSocketMountStale = runnerSocketInfo
+      ? existingRunnerMounts.length !== 1 || !existingRunnerMounts.some(m => m.Type === 'volume' && m.Source === runnerSocketInfo.mount.Source && m.ReadOnly === false && m.VolumeOptions?.Subpath === runnerSocketInfo.key)
+      : existingRunnerMounts.length > 0;
     const existingProjectToolsMounts = host?.Mounts?.filter(m => m.Target === '/opt/project-tools') ?? [];
     const projectToolsMountStale = existingProjectToolsMounts.length !== projectToolsMounts.length
       || projectToolsMounts.some(expected => !existingProjectToolsMounts.some(m => m.Type === expected.Type && m.Source === expected.Source && m.ReadOnly === true && m.VolumeOptions?.Subpath === expected.VolumeOptions.Subpath));
     const existingSkillsMounts = host?.Mounts?.filter(m => m.Target === '/opt/bot-skills') ?? [];
     const skillsMountStale = existingSkillsMounts.length !== projectSkillsMounts.length
       || projectSkillsMounts.some(expected => !existingSkillsMounts.some(m => m.Type === expected.Type && m.Source === expected.Source && m.ReadOnly === true && m.VolumeOptions?.Subpath === expected.VolumeOptions.Subpath));
-    if (container && (container.Image !== approved.Id || host?.Init !== true || networkStale || envStale || host?.Memory !== memory || host?.MemorySwap !== memory
+    if (container && (container.Image !== approved.Id || host?.Init !== true || networkStale || cmdStale || envStale || host?.Memory !== memory || host?.MemorySwap !== memory
       || host?.NanoCpus !== Math.round(spec.cpus * 1e9) || host?.PidsLimit !== spec.pids || host?.Tmpfs?.['/tmp'] !== tmpfs
       || !host?.Mounts?.some(m => m.Type === 'volume' && m.Source === this.notesName(repo) && m.Target === '/workspace/project-notes' && !m.ReadOnly)
-      || toolsMountStale || modelGatewayMountStale || projectToolsMountStale || skillsMountStale || (host?.Mounts?.filter(m => m.Target === '/results').length ?? 0) !== resultMounts.length || resultMounts.some(expected => !host?.Mounts?.some(m => m.Target === '/results' && m.Type === expected.Type && m.Source === expected.Source && m.ReadOnly === true && m.VolumeOptions?.Subpath === expected.VolumeOptions.Subpath)))) {
+      || toolsMountStale || modelGatewayMountStale || runnerSocketMountStale || projectToolsMountStale || skillsMountStale || (host?.Mounts?.filter(m => m.Target === '/results').length ?? 0) !== resultMounts.length || resultMounts.some(expected => !host?.Mounts?.some(m => m.Target === '/results' && m.Type === expected.Type && m.Source === expected.Source && m.ReadOnly === true && m.VolumeOptions?.Subpath === expected.VolumeOptions.Subpath)))) {
+      this.docker.unregisterRunnerEndpoint?.(names.container);
       if (container.State.Running) await this.docker.request('POST', `/containers/${names.container}/stop?t=2`);
       await this.docker.request('DELETE', `/containers/${names.container}?force=true`); container = null;
     }
@@ -1060,9 +1122,10 @@ export class Projects {
         ...projectToolsMounts,
         ...projectSkillsMounts,
         ...resultMounts,
+        ...(runnerSocketInfo ? [runnerSocketInfo.mount] : []),
       ];
       await this.docker.request('POST', `/containers/create?name=${names.container}`, { Image: resource.image, User: '10001:10001', WorkingDir: '/workspace',
-        Cmd: ['node', '/opt/runner/idle.mjs'], Env: env, Labels: this.labels(repo, generation, 'container'),
+        Cmd: ['node', '/opt/runner/daemon.mjs'], Env: env, Labels: this.labels(repo, generation, 'container'),
         HostConfig: { ReadonlyRootfs: true, CapDrop: ['ALL'], SecurityOpt: ['no-new-privileges:true'], Privileged: false,
           Memory: memory, MemorySwap: memory, NanoCpus: Math.round(spec.cpus * 1e9), PidsLimit: spec.pids, NetworkMode: names.network,
           Init: true, RestartPolicy: { Name: 'no' }, Tmpfs: { '/tmp': tmpfs },
@@ -1070,10 +1133,34 @@ export class Projects {
       container = await this.inspect(repo, generation, 'container');
     }
     this.db.prepare('UPDATE projects SET applied=?,applied_tools_revision=?,applied_skills_mounted=? WHERE repository_id=?').run(JSON.stringify(resources(effectiveSpec)), desiredToolsRevision, projectSkillsMounts.length > 0 ? 1 : 0, repo);
-    if (!container.State.Running) await this.docker.request('POST', `/containers/${names.container}/start`);
+    if (!container.State.Running) {
+      if (runnerSocketInfo) {
+        const prepared = await this.prepareRunnerSocketDir(runnerSocketInfo);
+        this.docker.registerRunnerEndpoint?.(names.container, { socketPath: prepared.socketPath, token: prepared.token });
+      }
+      try {
+        await this.docker.request('POST', `/containers/${names.container}/start`);
+      } catch (error) {
+        this.docker.unregisterRunnerEndpoint?.(names.container);
+        throw error;
+      }
+    }
     // Readiness is a protocol and journal check, not a Docker running flag.
-    const health = await this.docker.runner(names.container, { operation_id: randomId(), type: 'health' });
-    if (!health.ok || !health.result.ready) throw new ManagerError('runner_not_ready');
+    let health;
+    try {
+      health = typeof this.docker.waitForRunner === 'function'
+        ? await this.docker.waitForRunner(names.container, {
+          isAlive: async () => Boolean((await this.inspect(repo, generation, 'container').catch(() => null))?.State?.Running),
+        })
+        : await this.docker.runner(names.container, { operation_id: randomId(), type: 'health' });
+    } catch (error) {
+      if (!container.State.Running) this.docker.unregisterRunnerEndpoint?.(names.container);
+      throw error;
+    }
+    if (!health?.ok || !health.result?.ready) {
+      if (!container.State.Running) this.docker.unregisterRunnerEndpoint?.(names.container);
+      throw new ManagerError('runner_not_ready');
+    }
     container = await this.inspect(repo, generation, 'container');
     this.update(repo, 'ready', 'ready', null, container.State.StartedAt);
     this.prune(repo, true);
@@ -1421,6 +1508,50 @@ export class Projects {
     if (!result.ok) throw new ManagerError('output_unavailable', 503);
     return result.result;
   }
+  async _activeRunnerClient(repo, expectedGeneration = null) {
+    this.validate(repo);
+    const project = this.get(repo);
+    if (!project) throw new ManagerError('project_not_registered', 404);
+    if (expectedGeneration !== null && project.generation !== expectedGeneration) throw new ManagerError('stale_generation');
+    if (!['ready', 'busy'].includes(project.state)) throw new ManagerError('environment_not_ready');
+    const container = await this.inspect(repo, project.generation, 'container');
+    if (!container?.State.Running || container.State.StartedAt !== project.started_at) {
+      this.restartAlone(repo, project.generation, 'its container stopped or restarted outside the manager');
+      throw new ManagerError('recovery_required');
+    }
+    const name = this.names(repo, project.generation).container;
+    const client = this.docker.runnerClient?.(name);
+    if (!client) throw new ManagerError('runner_async_unsupported', 501);
+    return { project, client };
+  }
+  async startCommand(repo, input) {
+    if (!/^[a-f0-9]{48}$/.test(input?.operation_id || '') || !Number.isSafeInteger(input?.generation)) throw new ManagerError('invalid_operation', 400);
+    validateCall(input.request);
+    if (!commandTypes.includes(input.request.type)) throw new ManagerError('invalid_runner_request', 400);
+    const { client } = await this._activeRunnerClient(repo, input.generation);
+    const limit = input.request.timeout_ms == null ? null : Math.max(input.request.timeout_ms, 100);
+    return client.startCommand({ ...input.request, timeout_ms: limit, operation_id: input.operation_id });
+  }
+  async commandStatus(repo, operation) {
+    if (!/^[a-f0-9]{48}$/.test(operation || '')) throw new ManagerError('invalid_operation', 400);
+    const { client } = await this._activeRunnerClient(repo);
+    const status = await client.commandStatus(operation);
+    if (!status) throw new ManagerError('operation_not_found', 404);
+    return status;
+  }
+  async waitCommand(repo, operation, { offset = 0, timeoutMs = 25_000 } = {}) {
+    if (!/^[a-f0-9]{48}$/.test(operation || '') || !Number.isSafeInteger(offset) || offset < 0) throw new ManagerError('invalid_operation', 400);
+    const { client } = await this._activeRunnerClient(repo);
+    const res = await client.waitCommand(operation, { offset, timeoutMs });
+    if (res.status === 404) throw new ManagerError('operation_not_found', 404);
+    if (res.status !== 200 || !res.body?.ok) throw new ManagerError('runner_failed', 503);
+    return res.body;
+  }
+  async cancelCommand(repo, operation) {
+    if (!/^[a-f0-9]{48}$/.test(operation || '')) throw new ManagerError('invalid_operation', 400);
+    const { client } = await this._activeRunnerClient(repo);
+    return client.cancelCommand(operation);
+  }
   async executeHarnessPoll(repo, input) {
     const project = this.get(repo);
     if (!project) throw new ManagerError('project_not_registered', 404);
@@ -1580,7 +1711,9 @@ export class Projects {
           else {
             if (action === 'delete') {
               for (const { generation } of this.db.prepare('SELECT generation FROM resources WHERE repository_id=?').all(repo)) {
-                if (await this.inspect(repo, generation, 'container')) await this.docker.request('DELETE', `/containers/${this.names(repo, generation).container}`);
+                const cname = this.names(repo, generation).container;
+                if (await this.inspect(repo, generation, 'container')) await this.docker.request('DELETE', `/containers/${cname}`);
+                await this.cleanupRunnerSocket(cname);
                 if (await this.inspect(repo, generation, 'network')) await this.docker.request('DELETE', `/networks/${this.names(repo, generation).network}`);
               }
               // Deleting just a computer keeps project notes; only the project-removal flow requests their deletion.

@@ -1,8 +1,10 @@
 import { createServer } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
-import { ManagerError } from './docker.mjs';
+import { ManagerError, runnerRequestLimit } from './docker.mjs';
 import { logFailure } from './projects.mjs';
 import { diskFull } from './disk.mjs';
+
+const EXECUTE_BODY_LIMIT = runnerRequestLimit + 256 * 1024;
 
 // Listen during recovery so callers can distinguish startup from an unreachable manager. Project APIs stay fenced
 // until every saved project has stopped uncertain work and been recovered according to its desired state.
@@ -31,6 +33,7 @@ export function createManagerServer({ projects, token, assistants = null }) {
       if (auth.length !== expected.length || !timingSafeEqual(auth, expected)) throw new ManagerError('unauthorized', 401);
       if (!ready) throw new ManagerError('manager_not_ready', 503);
       const output = /^\/v1\/projects\/([1-9]\d{0,19})\/output\/([a-f0-9]{48})$/.exec(path);
+      const asyncCmd = /^\/v1\/projects\/([1-9]\d{0,19})\/commands(?:\/([a-f0-9]{48})(?:\/(wait|cancel))?)?$/.exec(path);
       let result;
       if (req.method === 'GET' && path === '/v1/projects') result = projects.list();
       else if (req.method === 'GET' && path === '/v1/defaults') result = await projects.defaultsView();
@@ -67,6 +70,23 @@ export function createManagerServer({ projects, token, assistants = null }) {
       }
       else if (req.method === 'POST' && /^\/v1\/projects\/[1-9]\d{0,19}\/build\/cancel$/.test(path)) result = projects.cancelBuild(path.split('/')[3]);
       else if (req.method === 'GET' && output) result = await projects.output(output[1], output[2], Number(url.searchParams.get('offset') || 0));
+      else if (asyncCmd && req.method === 'POST' && !asyncCmd[2]) {
+        const input = await json(req, EXECUTE_BODY_LIMIT);
+        if (Object.keys(input).some(k => !['operation_id', 'generation', 'request'].includes(k))) throw new ManagerError('invalid_input', 400);
+        result = await projects.startCommand(asyncCmd[1], input);
+      }
+      else if (asyncCmd && req.method === 'GET' && asyncCmd[2] && !asyncCmd[3]) {
+        result = await projects.commandStatus(asyncCmd[1], asyncCmd[2]);
+      }
+      else if (asyncCmd && req.method === 'GET' && asyncCmd[2] && asyncCmd[3] === 'wait') {
+        result = await projects.waitCommand(asyncCmd[1], asyncCmd[2], {
+          offset: Number(url.searchParams.get('offset') || 0),
+          timeoutMs: Number(url.searchParams.get('timeout_ms') || 25_000),
+        });
+      }
+      else if (asyncCmd && req.method === 'POST' && asyncCmd[2] && asyncCmd[3] === 'cancel') {
+        result = await projects.cancelCommand(asyncCmd[1], asyncCmd[2]);
+      }
       else if (req.method === 'POST' && /^\/v1\/projects\/[1-9]\d{0,19}\/file-tree\/prune$/.test(path)) {
         result = await projects.pruneFileTree(path.split('/')[3], await json(req));
       }
@@ -103,7 +123,7 @@ export function createManagerServer({ projects, token, assistants = null }) {
         else if (req.method === 'GET' && !action) { const container = await assistants.inspect(owner); result = { owner, container: assistants.facts(container) }; }
         else if (req.method === 'DELETE' && !action) result = await assistants.remove(owner);
         else if (req.method === 'POST' && action === 'output') result = await assistants.output(owner,await json(req));
-        else if (req.method === 'POST' && action === 'execute') result = await assistants.execute(owner, await json(req));
+        else if (req.method === 'POST' && action === 'execute') result = await assistants.execute(owner, await json(req, EXECUTE_BODY_LIMIT));
         else if (req.method === 'POST' && action === 'renew') result = assistants.renew(owner, await json(req));
         else if (req.method === 'POST' && action === 'release') result = await assistants.release(owner, await json(req));
         else throw new ManagerError('not_found', 404);
@@ -113,7 +133,7 @@ export function createManagerServer({ projects, token, assistants = null }) {
         if (req.method === 'GET' && !match[2]) result = projects.describe(match[1]);
         else if (req.method === 'PUT' && !match[2]) result = await projects.register(match[1]);
         else if (req.method === 'POST' && match[2]) {
-          const input = await json(req);
+          const input = await json(req, match[2] === 'execute' ? EXECUTE_BODY_LIMIT : undefined);
           if (Object.keys(input).some(k => !['operation_id','generation','request'].includes(k))) throw new ManagerError('invalid_input', 400);
           result = await projects.operate(match[1], match[2], input);
         } else throw new ManagerError('not_found', 404);
@@ -127,6 +147,6 @@ export function createManagerServer({ projects, token, assistants = null }) {
       res.statusCode = known ? known.status : 503; res.end(JSON.stringify({ error: known ? known.message : 'manager_unavailable' }));
     }
   });
-  server.requestTimeout = 10000; server.headersTimeout = 5000;
+  server.requestTimeout = 30000; server.headersTimeout = 5000;
   return { server, recovered };
 }

@@ -8,6 +8,28 @@ import {volume} from './disk.mjs';
 import {acpLeaseFile,acpRunHome,reapAcpDescendants} from './acp-lease.mjs';
 import {releaseWorkSwarmPorts} from './workswarm.mjs';
 import {requiresAcpRunHome,workswarmProductId} from './acp-products.mjs';
+import {watchMailbox} from './mailbox-watch.mjs';
+
+function openPollWaiter(dir){
+  let dirty=false,wake=null;
+  const unwatch=watchMailbox(dir,()=>{dirty=true;if(wake){const fn=wake;wake=null;fn();}});
+  return {
+    reset(){dirty=false;},
+    wait(ms){
+      if(dirty)return Promise.resolve();
+      return new Promise(resolve=>{
+        const timer=setTimeout(()=>{if(wake===done)wake=null;resolve();},Math.max(1,ms));
+        const done=()=>{clearTimeout(timer);resolve();};
+        wake=done;
+      });
+    },
+    close(){if(wake){const fn=wake;wake=null;fn();}unwatch();},
+  };
+}
+
+const MAX_MAILBOX_CHUNK_BYTES = 4 * 1024 * 1024;
+const MAX_MAILBOX_BASE64_CHARS = 6 * 1024 * 1024;
+const MAX_HARNESS_STDOUT_READ_BYTES = 512 * 1024;
 
 async function currentRequestFile(path){
   return readFile(path,'utf8').then(JSON.parse).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
@@ -250,13 +272,13 @@ export async function agentOperation(input,root){
     if(!/^[a-f0-9]{48}$/.test(input.request_id||''))throw new Error('invalid_agent_boundary');
     const current=JSON.parse(await readFile(dir+'/boundary.json','utf8'));if(current.id!==input.request_id)throw new Error('agent_request_changed');
     const bytes=Buffer.from(input.base64||'','base64');
-    if(bytes.length>45000||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>32*1024*1024)throw new Error('invalid_boundary_reply');
+    if(bytes.length>MAX_MAILBOX_CHUNK_BYTES||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>32*1024*1024)throw new Error('invalid_boundary_reply');
     const path=dir+'/boundary-reply-'+input.request_id,file=await open(path+'.tmp',input.offset===0?'w':'r+',0o600);
     try{if((await file.stat()).size!==input.offset)throw new Error('boundary_reply_offset');await file.write(bytes,0,bytes.length,input.offset);}finally{await file.close();}
     if(input.final)await rename(path+'.tmp',path+'.json');return {written:true};
   }
   if(input.type==='workspace_agent_config'){
-    if(typeof input.base64!=='string'||input.base64.length>48000||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>2*1024*1024)throw new Error('invalid_agent_config');
+    if(typeof input.base64!=='string'||input.base64.length>MAX_MAILBOX_BASE64_CHARS||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>2*1024*1024)throw new Error('invalid_agent_config');
     // The last piece may also start the session (#1277), saving the runtime query and the start call. A runtime that is
     // not the one the control plane pinned stops it before anything is written, as that query did; the answer always
     // carries the runtime, which tells the control plane this runner started the session itself.
@@ -286,19 +308,24 @@ export async function agentOperation(input,root){
     const waitMs=Number.isSafeInteger(input.wait_ms)&&input.wait_ms>0?Math.min(input.wait_ms,agentPollWaitLimit):0;
     // Without wait_ms (an older control plane, a probe) the poll answers at once, as before.
     if(!waitMs)return readAgentPoll(dir,boot,offset,known);
-    // A long poll (#1277) holds until the session has something the control plane has not seen, checking every 50 ms, or
-    // until wait_ms runs out. New events alone answer no sooner than 200 ms after the poll began, so streamed text (written
-    // every 200 ms) does not cost a call each time. long_poll tells the control plane not to wait before the next poll.
+    // Event-driven long poll (#1277, #1378): wakes immediately via inotify mailbox-watch when a tool/token request,
+    // boundary, state transition or full event page arrives, with a bounded fallback tick for PID exit detection.
+    // New events alone still wait at least agentEventInterval (200 ms) so rapid event appends batch cleanly.
     const began=Date.now(),deadline=began+waitMs,watch={eventsSize:-1,events:false};
-    for(;;){
-      const seen=await unseenAgentWork(dir,boot,offset,known,watch);
-      if(seen==='urgent'||Date.now()>=deadline||seen==='events'&&Date.now()-began>=agentEventInterval)break;
-      await delay(Math.max(1,Math.min(agentPollCheck,deadline-Date.now(),seen==='events'?began+agentEventInterval-Date.now():Infinity)));
-    }
+    const waiter=openPollWaiter(dir);
+    try{
+      for(;;){
+        waiter.reset();
+        const seen=await unseenAgentWork(dir,boot,offset,known,watch);
+        if(seen==='urgent'||Date.now()>=deadline||seen==='events'&&Date.now()-began>=agentEventInterval)break;
+        const step=Math.max(1,Math.min(deadline-Date.now(),seen==='events'?began+agentEventInterval-Date.now():250));
+        await waiter.wait(step);
+      }
+    }finally{waiter.close();}
     return {...await readAgentPoll(dir,boot,offset,known),long_poll:true};
   }
   if(input.type==='workspace_agent_gateway'){
-    if(typeof input.base64!=='string'||input.base64.length>8192)throw new Error('invalid_agent_gateway');
+    if(typeof input.base64!=='string'||input.base64.length>65536)throw new Error('invalid_agent_gateway');
     await mkdir(dir,{recursive:true,mode:0o700});
     const bytes=Buffer.from(input.base64,'base64');
     await writeFile(dir+'/gateway.tmp',bytes,{mode:0o600});
@@ -307,7 +334,7 @@ export async function agentOperation(input,root){
   }
   // The answer to a github_read_token request in token-requests/<id>.json: a read-only token, or the reason there is none.
   if(input.type==='workspace_agent_token'){
-    if(!/^[a-f0-9]{48}$/.test(input.request_id||'')||typeof input.base64!=='string'||input.base64.length>48000)throw new Error('invalid_agent_token');
+    if(!/^[a-f0-9]{48}$/.test(input.request_id||'')||typeof input.base64!=='string'||input.base64.length>512*1024)throw new Error('invalid_agent_token');
     const reqPath=dir+'/token-requests/'+input.request_id+'.json';
     const current=await currentRequestFile(reqPath);if(current?.id!==input.request_id)throw new Error('agent_request_changed');
     await mkdir(dir+'/token-replies',{recursive:true,mode:0o700});
@@ -324,7 +351,7 @@ export async function agentOperation(input,root){
   }
   if(input.type==='workspace_agent_runtime')return piRuntime();
   if(input.type==='workspace_agent_tool'){
-    if(!/^[a-f0-9]{48}$/.test(input.request_id||'')||typeof input.base64!=='string'||input.base64.length>48000||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>24*1024*1024)throw new Error('invalid_agent_reply');
+    if(!/^[a-f0-9]{48}$/.test(input.request_id||'')||typeof input.base64!=='string'||input.base64.length>MAX_MAILBOX_BASE64_CHARS||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>24*1024*1024)throw new Error('invalid_agent_reply');
     const reqPath=dir+'/tool-requests/'+input.request_id+'.json';
     const current=await currentRequestFile(reqPath);if(current?.id!==input.request_id)throw new Error('agent_request_changed');
     await mkdir(dir+'/tool-replies',{recursive:true,mode:0o700});
@@ -342,7 +369,7 @@ export async function agentOperation(input,root){
     throw new Error('agent_request_changed');
   }
   if(input.type==='workspace_harness_config'){
-    if(typeof input.base64!=='string'||input.base64.length>48000||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>2*1024*1024)throw new Error('invalid_harness_config');
+    if(typeof input.base64!=='string'||input.base64.length>MAX_MAILBOX_BASE64_CHARS||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>2*1024*1024)throw new Error('invalid_harness_config');
     const path=dir+'/harness.tmp',file=await open(path,input.offset===0?'w':'r+',0o600);
     try{if((await file.stat()).size!==input.offset)throw new Error('harness_config_offset');const bytes=Buffer.from(input.base64,'base64');await file.write(bytes,0,bytes.length,input.offset);}finally{await file.close();}
     if(input.final){
@@ -422,7 +449,7 @@ export async function agentOperation(input,root){
   }
   if(input.type==='workspace_harness_stdin'){
     const hasBytes=typeof input.base64==='string'&&input.base64.length>0;
-    if(input.base64!==undefined&&(typeof input.base64!=='string'||input.base64.length>65536))throw new Error('invalid_harness_stdin');
+    if(input.base64!==undefined&&(typeof input.base64!=='string'||input.base64.length>MAX_MAILBOX_BASE64_CHARS))throw new Error('invalid_harness_stdin');
     const expectedInstanceId=/^[a-f0-9]{48}$/.test(input.instance_id||'')?input.instance_id:null;
     if(expectedInstanceId){
       const state=await readFile(dir+'/harness-state.json','utf8').then(JSON.parse).catch(()=>null);
@@ -461,7 +488,7 @@ export async function agentOperation(input,root){
       if(stdoutHandle){
         try{
           stdout_size=(await stdoutHandle.stat()).size;
-          const readLen=Math.max(0,Math.min(65536,stdout_size-offset));
+          const readLen=Math.max(0,Math.min(MAX_HARNESS_STDOUT_READ_BYTES,stdout_size-offset));
           if(readLen>0){
             const buf=Buffer.alloc(readLen);
             const {bytesRead}=await stdoutHandle.read(buf,0,readLen,offset);
@@ -484,17 +511,23 @@ export async function agentOperation(input,root){
       }
     }
     const deadline=Date.now()+waitMs;
-    for(;;){
-      const snapshot=await readOnce();
-      const hasActivity=
-        !['starting','running'].includes(snapshot.state)||
-        snapshot.next_offset>offset||
-        snapshot.has_more||
-        snapshot.token_requests.some(r=>!r.stub)||
-        snapshot.tool_requests.some(r=>!r.stub);
-      if(hasActivity||Date.now()>=deadline)return snapshot;
-      await delay(Math.min(25,Math.max(1,deadline-Date.now())));
-    }
+    if(waitMs<=0)return readOnce();
+    const waiter=openPollWaiter(dir);
+    try{
+      for(;;){
+        waiter.reset();
+        const snapshot=await readOnce();
+        const hasActivity=
+          !['starting','running'].includes(snapshot.state)||
+          snapshot.next_offset>offset||
+          snapshot.has_more||
+          snapshot.token_requests.some(r=>!r.stub)||
+          snapshot.tool_requests.some(r=>!r.stub);
+        if(hasActivity||Date.now()>=deadline)return snapshot;
+        const step=Math.max(1,Math.min(50,deadline-Date.now()));
+        await waiter.wait(step);
+      }
+    }finally{waiter.close();}
   }
   if(input.type==='workspace_harness_interrupt'){
     const mode=input.mode==='kill'?'kill':'graceful';

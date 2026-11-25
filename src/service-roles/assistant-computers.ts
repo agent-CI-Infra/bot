@@ -8,7 +8,7 @@ import type { Store, Row } from '../storage/database.js';
 import type { Manager } from '../projects/service.js';
 import { digest, fail, fields, HttpError, randomId, text, type Json } from '../core/security.js';
 import { superAdmin, type Actor } from '../app/auth.js';
-import { commandFailure, commandLengthNotice, commandTimeoutLimit, commandTooLong, requestTooLarge } from '../agent/command.js';
+import { RUNNER_TRANSFER_CHUNK_BYTES, commandFailure, commandLengthNotice, commandTimeoutLimit, commandTooLong, requestTooLarge } from '../agent/command.js';
 import { readFileChunks } from './checkout.js';
 import type { ProjectToolMountSpec } from '../projects/tools.js';
 
@@ -23,7 +23,7 @@ import type { ProjectToolMountSpec } from '../projects/tools.js';
  * temporary areas. It never names an owner, container, volume or host path.
  */
 export const assistantHome = '/home/assistant';
-const gib = 1024 ** 3, readLimit = 1024 * 1024, chunk = 40_000;
+const gib = 1024 ** 3, readLimit = 1024 * 1024, chunk = RUNNER_TRANSFER_CHUNK_BYTES;
 // #534: one ceiling for every entry. The assistant computer reads the same deployment setting as the task workspace
 // tools, so a deployment that raises BOT_COMMAND_TIMEOUT_MAX_SECONDS no longer has to patch this file; the default stays 600.
 const commandSecondsLimit = commandTimeoutLimit();

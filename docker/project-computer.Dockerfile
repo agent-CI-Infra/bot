@@ -14,8 +14,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && mkdir -p /opt/bot && mv /tmp/image-packages /opt/bot/image-packages \
     && rm -rf /var/lib/apt/lists/*
 RUN groupadd --gid 10001 project && useradd --uid 10001 --gid project --no-create-home project \
-    && mkdir -p /workspace /workspace/home /opt/agent-tools /opt/project-tools /opt/bot-skills /run/model-gateway /opt/preinstalled/bin /opt/preinstalled/home/.local/bin /opt/preinstalled/npm-global /opt/preinstalled/uv-tools /opt/preinstalled/python /opt/preinstalled/cargo /opt/preinstalled/go /opt/preinstalled/cache \
-    && chown -R project:project /workspace /opt/agent-tools /opt/project-tools /opt/bot-skills /run/model-gateway /opt/preinstalled && chmod 700 /workspace /workspace/home && chmod 755 /opt/agent-tools /opt/project-tools /opt/bot-skills /run/model-gateway /opt/preinstalled
+    && mkdir -p /workspace /workspace/home /opt/agent-tools /opt/project-tools /opt/bot-skills /run/model-gateway /run/bot-runner /opt/preinstalled/bin /opt/preinstalled/home/.local/bin /opt/preinstalled/npm-global /opt/preinstalled/uv-tools /opt/preinstalled/python /opt/preinstalled/cargo /opt/preinstalled/go /opt/preinstalled/cache \
+    && chown -R project:project /workspace /opt/agent-tools /opt/project-tools /opt/bot-skills /run/model-gateway /run/bot-runner /opt/preinstalled && chmod 700 /workspace /workspace/home && chmod 755 /opt/agent-tools /opt/project-tools /opt/bot-skills /run/model-gateway /opt/preinstalled && chmod 770 /run/bot-runner
 COPY runner/package.json runner/package-lock.json /opt/runner/
 RUN cd /opt/runner && npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY runner /opt/runner
@@ -33,4 +33,4 @@ ENV BOT_BROWSER_EXECUTABLE=/usr/local/bin/bot-chromium \
 LABEL department.bot.toolchain="Node.js 22 (npm, corepack: pnpm/yarn), Python 3.11 (pip, venv, uv, Pillow), ImageMagick, gcc/g++/make, git, git-lfs, gh, curl, wget, jq, ripgrep, sqlite3, zip/unzip, chromium, xvfb, openbox, xdotool, wmctrl, xclip, scrot, ffmpeg"
 USER 10001:10001
 WORKDIR /workspace
-CMD ["node", "/opt/runner/idle.mjs"]
+CMD ["node", "/opt/runner/daemon.mjs"]

@@ -17,6 +17,7 @@ import {randomWorkspaceId} from '../../../fixtures/helpers.mjs';
 import {loadConsole} from '../../../fixtures/console-page.mjs';
 import {workspace as runnerWorkspace} from '../../../../runner/workspace.mjs';
 import {environment} from '../../../../runner/command.mjs';
+import {RUNNER_TRANSFER_CHUNK_BYTES} from '../../../../runner/command-policy.mjs';
 
 const commit='a'.repeat(40);
 const entry=(path,data,mode='100644')=>({path,mode,type:'blob',sha:blobSha(data),size:data.length});
@@ -62,7 +63,7 @@ test('prepare writes blobs over 1 MiB and totals over 32 MiB with the original c
   const summary=f.logs.find(log=>log.type==='snapshot');
   assert.equal(snapshot.files.length,8);assert.equal(summary.bytes,7*binary.length+text.length);
   assert.ok(summary.bytes>32*1024*1024);assert.ok(f.writes.some(write=>write.offset>1024*1024));
-  assert.ok(f.writes.every(write=>write.bytes<=30000));assert.equal(snapshot.materials[0].content.length,12000);
+  assert.ok(f.writes.every(write=>write.bytes<=RUNNER_TRANSFER_CHUNK_BYTES));assert.ok(f.writes.some(write=>write.bytes>30000));assert.equal(snapshot.materials[0].content.length,12000);
   assert.equal(snapshot.materials.length,1);assert.equal(snapshot.materials[0].truncated,true);
 });
 

@@ -23,7 +23,7 @@ flowchart LR
 | --- | --- | --- |
 | `bot`（控制面） | `src/`、`static/`、`public-board/` | 单一业务端口 `8791` 统一承接管理 API、控制台静态页、OAuth/App 回调、GitHub/飞书 Webhook、外部执行端与公开看板；承担全部认证授权、事件分派、任务调度、模型网关、GitHub 发布与存储持久化。 |
 | `manager` | `manager/` | **唯一挂载 Docker socket 的服务**；按部署 ID 和受控操作接口管理项目电脑、助手电脑与笔记卷，不对外暴露宿主端口，也不接触上游凭据或控制面数据库。 |
-| `runner` | `runner/` | 预装在项目/助手电脑镜像内的一次性固定执行入口，经 `docker exec` 接收校验后的命令/文件/Git/Harness 请求并维护本地 journal。 |
+| `runner` | `runner/` | 预装在项目/助手电脑镜像内的常驻守护进程（`runner/daemon.mjs`），经每容器私有 UDS（`/run/bot-runner/runner.sock`，带一次性 Bearer 令牌鉴权）提供统一 HTTP/1.1 + WebSocket 线协议，进程内直接执行命令（异步流式 + 心跳 + HTTP 长轮询降级）、文件/二进制流、Git、Harness 与 inotify 邮箱唤醒，并维护本地 journal；`runner/runner.mjs --stdin` 保留供本地开发与兼容回退使用。 |
 | `webhook`、`tunnel` | `webhook/`、`tunnel/` | 边界转发网关与可选 Cloudflare Tunnel；`tunnel` 仅位于 `edge` 网络，只能经 `webhook` 到达 `bot:8791`，无法触及 `manager`。 |
 
 > 四个核心常驻服务（`bot`、`manager`、`webhook`、`tunnel`）在 `docker/compose.yaml` 中统一启用 `init: true`，且各进程在收到 `SIGTERM`/`SIGINT` 后立即关闭空闲 HTTP keep-alive 连接、经有限排空后主动收口并在 `stop_grace_period` 之前自主退出，避免升级重建时因连接滞留触发 Docker `SIGKILL`。
@@ -47,9 +47,9 @@ flowchart LR
 - **项目电脑（每仓库一台长期容器）**：
   - 非特权用户 UID `10001`、只读根文件系统、`cap_drop: [ALL]`、`no-new-privileges`、`init` 回收僵尸进程、禁宿主 swap。
   - 每个仓库独立 bridge 网络，项目间互不可达，与控制面 `control` 网络隔离；默认开启外网（可按部署或项目关闭）。
-  - 通过共享工作卷（`/workspace`）、独立持久笔记卷（`/workspace/project-notes`）、只读工具卷（`/opt/agent-tools`）、只读项目工具卷（`/opt/project-tools`）、只读 Skill 卷（`/opt/bot-skills`，`skill-store` 子路径 `projects/<repository_id>`）、只读工具结果卷（`/results`）与只读模型网关套接字卷（`/run/model-gateway`）划分数据边界。
+  - 通过共享工作卷（`/workspace`）、独立持久笔记卷（`/workspace/project-notes`）、每容器私有 Runner 套接字子路径（`/run/bot-runner`，`runner-sockets` 卷隔离挂载，与 `egress=false` / `NetworkMode: none` 兼容）、只读工具卷（`/opt/agent-tools`）、只读项目工具卷（`/opt/project-tools`）、只读 Skill 卷（`/opt/bot-skills`，`skill-store` 子路径 `projects/<repository_id>`）、只读工具结果卷（`/results`）与只读模型网关套接字卷（`/run/model-gateway`）划分数据边界。
 - **助手电脑（按对话归属短时容器）**：
-  - 按飞书群或个人归属隔离，仅经 Docker volume subpath 挂载自身当前代次的持久 HOME 目录（`assistant-homes`）以及公共服务 Skill 只读子路径（`/opt/bot-skills`，`skill-store` 子路径 `service`），并只读挂载模型网关套接字卷（`/run/model-gateway`）；`/workspace` 与 `/tmp` 为随容器生命周期自动创建与回收的临时磁盘卷（默认各 20 GB，不计入 16 GB 内存上限）。
+  - 按飞书群或个人归属隔离，仅经 Docker volume subpath 挂载自身当前代次的持久 HOME 目录（`assistant-homes`）、自身私有 Runner 套接字子路径（`/run/bot-runner`）以及公共服务 Skill 只读子路径（`/opt/bot-skills`，`skill-store` 子路径 `service`），并只读挂载模型网关套接字卷（`/run/model-gateway`）；`/workspace` 与 `/tmp` 为随容器生命周期自动创建与回收的临时磁盘卷（默认各 20 GB，不计入 16 GB 内存上限）。
   - 默认连接关闭容器间通信（`enable_icc=false`）的独立外网 bridge 网络，与 `control` 及其他助手容器隔离；全局关闭外网时切换为 `NetworkMode: none`。
 - **可信与不可信代码检出区分**：
   - PR 检视、续修未合入 bot PR 属于非受信任检出：控制面禁止任何后端从该检出自动加载 `.agents/skills/`、`.pi/skills/`、`.codex/skills/`、根目录 `AGENTS.md`/`CLAUDE.md` 或任何本地 hooks/MCP，仅从受控基准分支注入可信配置并将可信 Skill 物化至只读 `/opt/bot-skills` 卷。

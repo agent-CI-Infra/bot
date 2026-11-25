@@ -280,7 +280,7 @@ export async function assistantFile(input, options = {}) {
     } finally { await handle.close(); }
   }
   if (input.type === 'assistant_write') {
-    if (typeof input.base64 !== 'string' || input.base64.length > 56000 || !Number.isSafeInteger(input.offset) || input.offset < 0) throw new Error('invalid_content');
+    if (typeof input.base64 !== 'string' || input.base64.length > 6 * 1024 * 1024 || !Number.isSafeInteger(input.offset) || input.offset < 0) throw new Error('invalid_content');
     const data = Buffer.from(input.base64, 'base64');
     const located = await target(input.path, true, { workspaceRoot, allowedRoots: allRoots });
     const volumeState = (options.volume || readVolume)(located.root);
@@ -327,7 +327,7 @@ export async function assistantFile(input, options = {}) {
     return { deleted: true, directory: info.isDirectory() };
   }
   if (input.type === 'assistant_archive_stage') {
-    if (typeof input.base64 !== 'string' || input.base64.length > 65536 || !Number.isSafeInteger(input.offset) || input.offset < 0) throw new Error('invalid_content');
+    if (typeof input.base64 !== 'string' || input.base64.length > 6 * 1024 * 1024 || !Number.isSafeInteger(input.offset) || input.offset < 0) throw new Error('invalid_content');
     const data = Buffer.from(input.base64, 'base64');
     if (input.offset + data.length > MAX_ASSISTANT_ARCHIVE_COMPRESSED_BYTES) throw new Error('archive_too_large');
     const tmpVolume = (options.volume || readVolume)(tmpRoot);

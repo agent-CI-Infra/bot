@@ -1,21 +1,45 @@
 import http from 'node:http';
 import { posix } from 'node:path';
 import { hostname } from 'node:os';
+import { randomBytes } from 'node:crypto';
 
-import { requestTooLarge, runnerRequestLimit } from '../runner/command-policy.mjs';
+import { legacyExecRequestLimit, requestTooLarge, runnerRequestLimit } from '../runner/command-policy.mjs';
+import { RunnerClient } from './runner-client.mjs';
 
 const defaultMaxResponseBytes = 4 * 1024 * 1024;
-// A runner request is handed to `docker exec` as one base64url argument, and Linux refuses a single argument at 131072
-// bytes (MAX_ARG_STRLEN). 95 KiB of JSON encodes to ~127 KiB, so a command at the 64 KiB limit (runner/command-policy.mjs)
-// still reaches the computer; a larger request would need the request delivered over stdin instead. The bound and the
-// predicate live in runner/command-policy.mjs so the control plane answers the same refusal by name.
+// Runner transport bound (8 MiB over HTTP/1.1 + WebSocket to resident `runner/daemon.mjs`); legacy `docker exec`
+// fallback retains the Linux MAX_ARG_STRLEN 95 KiB cap (`legacyExecRequestLimit`). Both live in runner/command-policy.mjs.
 export { runnerRequestLimit };
 
 export class ManagerError extends Error {
   constructor(code, status = 409) { super(code); this.status = status; }
 }
 export class Docker {
-  constructor(socketPath = '/var/run/docker.sock') { this.socketPath = socketPath; }
+  constructor(socketPath = '/var/run/docker.sock') {
+    this.socketPath = socketPath;
+    this.runnerClients = new Map();
+  }
+  registerRunnerEndpoint(container, config) {
+    this.unregisterRunnerEndpoint(container);
+    const client = config instanceof RunnerClient ? config : new RunnerClient(config);
+    this.runnerClients.set(container, client);
+    return client;
+  }
+  unregisterRunnerEndpoint(container) {
+    const existing = this.runnerClients.get(container);
+    if (existing) {
+      this.runnerClients.delete(container);
+      try { existing.close(); } catch {}
+    }
+  }
+  runnerClient(container) {
+    return this.runnerClients.get(container) || null;
+  }
+  async waitForRunner(container, { timeoutMs = 15_000, isAlive = null } = {}) {
+    const client = this.runnerClients.get(container);
+    if (client) return client.waitReady({ timeoutMs, isAlive });
+    return this.runner(container, { operation_id: randomBytes(24).toString('hex'), type: 'health' }, timeoutMs);
+  }
   // Resolve a directory on the manager's persistent mount to the Docker host's path. A local bind-backed named
   // volume exposes those same bytes to project computers; the manager never starts a helper container to edit notes.
   async volumeSource(directory) {
@@ -148,6 +172,13 @@ export class Docker {
   }
   async runner(container, input, timeout = 90000, extraEnv = []) {
     const tooLarge = requestTooLarge(input);
+    if (tooLarge) throw Object.assign(new ManagerError(tooLarge.error, 413), tooLarge);
+    const client = this.runnerClients.get(container);
+    if (client) return client.execute(input, { timeoutMs: timeout, extraEnv });
+    return this.execRunner(container, input, timeout, extraEnv);
+  }
+  async execRunner(container, input, timeout = 90000, extraEnv = []) {
+    const tooLarge = requestTooLarge(input, legacyExecRequestLimit);
     if (tooLarge) throw Object.assign(new ManagerError(tooLarge.error, 413), tooLarge);
     const exec = await this.request('POST', `/containers/${encodeURIComponent(container)}/exec`, { AttachStdout: true, AttachStderr: true,
       User: '10001:10001', WorkingDir: '/workspace', Env: [`BOT_OPERATION_ID=${input.operation_id}`, ...(Array.isArray(extraEnv) ? extraEnv : [])],

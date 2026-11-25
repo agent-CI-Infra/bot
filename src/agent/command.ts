@@ -3,14 +3,14 @@ import type { Workspace } from './workspace.js';
 
 // The command length contract and its transport backstop are shared with the manager (runner/command-policy.mjs), so
 // the schema, the runner, the control plane and the manager always state and enforce the same numbers.
-export { commandFailure, commandLimit, commandTooLong, requestTooLarge, runnerRequestLimit } from '../../runner/command-policy.mjs';
+export { RUNNER_TRANSFER_CHUNK_BYTES, commandFailure, commandLimit, commandTooLong, requestTooLarge, runnerRequestLimit } from '../../runner/command-policy.mjs';
 
 const maxTimerSeconds = Math.floor((2147483647 - 120000) / 1000);
 
 // The command length contract, stated where the model reads it. maxLength is deliberately not used: Pi and other
 // harnesses would then reject an over-long command at the schema with a generic validation error, before the runner can
 // answer command_too_long with the limit and the actual length.
-export const commandLengthNotice = `The /bin/sh command to run, as UTF-8: at most ${commandLimit} bytes (64 KiB). A longer command is refused with command_too_long; write the script to a file and run the file instead.`;
+export const commandLengthNotice = `The /bin/sh command to run, as UTF-8: at most ${commandLimit} bytes (1 MiB). A longer command is refused with command_too_long; write the script to a file and run the file instead.`;
 
 export function commandTimeoutLimit() {
   const seconds = Number(process.env.BOT_COMMAND_TIMEOUT_MAX_SECONDS ?? 600);

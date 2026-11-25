@@ -5,6 +5,7 @@ import type { Workspace } from '../agent/workspace.js';
 import { publicText, registeredRedactor } from '../core/redaction.js';
 import type { GitHub } from './client.js';
 import { hostedMediaOrigin, hostedMediaType, registerHostedMedia, type HostedPullRequestMedia } from './hosted-pr-media.js';
+import { RUNNER_TRANSFER_CHUNK_BYTES } from '../../runner/command-policy.mjs';
 
 const maxFiles = 8;
 const MiB = 1024 * 1024;
@@ -163,12 +164,14 @@ async function readWorkspaceMedia(workspace: Workspace, source: string, maxBytes
   if (file.size < 1 || file.size > maxBytes)
     throw new MediaInputError(`Media size limit exceeded for ${JSON.stringify(source)}. Limits are 5 MiB per image, 20 MiB per video and 30 MiB total.`);
   const bytes = Buffer.alloc(file.size);
-  for (let offset = 0; offset < bytes.length; offset += 30000) {
-    const part = await workspace.deliver({ type: 'workspace_blob', sha: file.sha, offset });
+  let offset = 0;
+  while (offset < bytes.length) {
+    const part = await workspace.deliver({ type: 'workspace_blob', sha: file.sha, offset, limit: RUNNER_TRANSFER_CHUNK_BYTES });
     const data = Buffer.from(typeof part?.base64 === 'string' ? part.base64 : '', 'base64');
-    if (part?.size !== file.size || data.length !== Math.min(30000, bytes.length - offset))
+    if (part?.size !== file.size || data.length < 1 || offset + data.length > bytes.length)
       throw new MediaInputError(`Workspace media ${JSON.stringify(source)} changed or could not be read completely.`);
     data.copy(bytes, offset);
+    offset += data.length;
   }
   if (blobSha(bytes) !== file.sha)
     throw new MediaInputError(`Workspace media ${JSON.stringify(source)} does not match its snapshot.`);

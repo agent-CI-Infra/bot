@@ -1,4 +1,5 @@
 import { acpProductExecutable, icodeProductId, workswarmProductId, type AcpProductManifest } from '../../runner/acp-products.mjs';
+import { RUNNER_TRANSFER_CHUNK_BYTES } from '../../runner/command-policy.mjs';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
@@ -129,23 +130,26 @@ function createDirectLocalRunner(root: string) {
   return (input: Record<string, unknown>, timeoutMs = 90_000): Promise<any> =>
     new Promise((resolveResult, reject) => {
       const payload = { operation_id: randomId(), ...input };
-      const child = spawn(process.execPath, [runnerScript, Buffer.from(JSON.stringify(payload)).toString('base64url')], {
+      const child = spawn(process.execPath, [runnerScript, '--stdin'], {
         env: {
           PATH: dirname(process.execPath) + ':/usr/local/bin:/usr/bin:/bin',
           LANG: 'C.UTF-8',
           BOT_LOCAL_EXECUTION: 'true',
           BOT_LOCAL_WORKSPACE: root,
+          BOT_OPERATION_ID: String(payload.operation_id),
           ...(process.env.BOT_AGENT_TOOLS_DIR ? { BOT_AGENT_TOOLS_DIR: process.env.BOT_AGENT_TOOLS_DIR } : {}),
           ...(process.env.BOT_SKILL_STORE_DIR ? { BOT_SKILL_STORE_DIR: process.env.BOT_SKILL_STORE_DIR } : {}),
           ...(process.env.BOT_REAL_GH_BIN ? { BOT_REAL_GH_BIN: process.env.BOT_REAL_GH_BIN } : {}),
         },
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ['pipe', 'pipe', 'pipe'],
       });
       let out = '', err = '';
       const timer = timeoutMs ? setTimeout(() => { child.kill('SIGKILL'); reject(new Error('local_runner_timeout')); }, timeoutMs) : undefined;
       child.stdout.setEncoding('utf8');
       child.stderr.setEncoding('utf8');
-      child.stdout.on('data', chunk => { out += chunk; if (out.length > 8 * 1024 * 1024) child.kill('SIGKILL'); });
+      child.stdin.on('error', () => {});
+      child.stdin.end(JSON.stringify(payload));
+      child.stdout.on('data', chunk => { out += chunk; if (out.length > 16 * 1024 * 1024) child.kill('SIGKILL'); });
       child.stderr.on('data', chunk => { err = (err + chunk).slice(-1000); });
       child.on('error', error => { clearTimeout(timer); reject(error); });
       child.on('close', code => {
@@ -521,12 +525,12 @@ export async function withContainerHarnessSession<T, R>(
   if (configBytes.length > 2 * 1024 * 1024) {
     stop('agent_context_too_large', 'waiting_configuration', `容器 Harness 启动配置大小 ${configBytes.length} 字节，超过 2 MiB 上限。`);
   }
-  for (let offset = 0; offset < configBytes.length || offset === 0; offset += 30_000) {
+  for (let offset = 0; offset < configBytes.length || offset === 0; offset += RUNNER_TRANSFER_CHUNK_BYTES) {
     const saved = await transport.deliver({
       type: 'workspace_harness_config',
-      base64: configBytes.subarray(offset, offset + 30_000).toString('base64'),
+      base64: configBytes.subarray(offset, offset + RUNNER_TRANSFER_CHUNK_BYTES).toString('base64'),
       offset,
-      final: offset + 30_000 >= configBytes.length,
+      final: offset + RUNNER_TRANSFER_CHUNK_BYTES >= configBytes.length,
     });
     if (saved?.error) {
       stop('execution_interrupted', 'waiting_environment', `写入容器 Harness 配置失败（${saved.detail || saved.error}）。`);
@@ -850,9 +854,9 @@ export async function withContainerHarnessSession<T, R>(
     enqueueStdin(async () => {
       const bytes = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk;
       if (bytes.length === 0 && !closeAfter) return;
-      for (let at = 0; at < bytes.length || at === 0; at += 36_000) {
-        const slice = bytes.subarray(at, at + 36_000);
-        const isLast = at + 36_000 >= bytes.length;
+      for (let at = 0; at < bytes.length || at === 0; at += RUNNER_TRANSFER_CHUNK_BYTES) {
+        const slice = bytes.subarray(at, at + RUNNER_TRANSFER_CHUNK_BYTES);
+        const isLast = at + RUNNER_TRANSFER_CHUNK_BYTES >= bytes.length;
         const res = await transport.deliver({
           type: 'workspace_harness_stdin',
           instance_id: instanceId,

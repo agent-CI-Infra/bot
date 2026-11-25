@@ -4,7 +4,7 @@ import { resolve,dirname,sep } from 'node:path';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
-import { command,environment,workspaceTag } from './command.mjs';
+import { command,environment,operationTag,workspaceTag } from './command.mjs';
 import { outputLimit } from './command-output.mjs';
 import {agentOperation} from './agent.mjs';
 import { git as storeGit, storeRoot } from './store.mjs';
@@ -157,7 +157,7 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
   // The model's shell command timeout is still controlled by command().
   const git=(args,data,output)=>new Promise((res,rej)=>{
     const chunks=[],errors=[],child=spawn('git',['-c','core.hooksPath=/dev/null','-c','core.fsmonitor=false','-c','commit.gpgsign=false',...args],
-      {cwd:repo,env:{...environment,...workspaceTag(input.workspace_id),GIT_AUTHOR_NAME:'Department Bot',GIT_AUTHOR_EMAIL:author.email,GIT_COMMITTER_NAME:'Department Bot',GIT_COMMITTER_EMAIL:author.email},stdio:['pipe',output?.fd??'pipe','pipe']});
+      {cwd:repo,env:{...environment,...operationTag(input.operation_id),...workspaceTag(input.workspace_id),GIT_AUTHOR_NAME:'Department Bot',GIT_AUTHOR_EMAIL:author.email,GIT_COMMITTER_NAME:'Department Bot',GIT_COMMITTER_EMAIL:author.email},stdio:['pipe',output?.fd??'pipe','pipe']});
     child.stdout?.on('data',chunk=>chunks.push(chunk));
     let errorBytes=0;child.stderr.on('data',chunk=>{if(errorBytes<8000)errors.push(chunk.subarray(0,8000-errorBytes));errorBytes+=chunk.length;});
     child.on('error',()=>rej(new Error(`git ${args[0]} could not start`)));
@@ -278,15 +278,14 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
   // The task's context, its agent's session and the project notes are next to the checkout, not in it: they work before the
   // task has a worktree (#769).
   if(input.type==='workspace_context'){
-    // The control plane sends context in 45,000-byte chunks, 60,000 base64 characters.
-    if(typeof input.base64!=='string'||input.base64.length>61440||!Number.isSafeInteger(input.offset)||input.offset<0)throw new Error('invalid_content');
+    if(typeof input.base64!=='string'||input.base64.length>6*1024*1024||!Number.isSafeInteger(input.offset)||input.offset<0)throw new Error('invalid_content');
     const data=Buffer.from(input.base64,'base64'),target=await contextPath(input.path,true);
     const handle=await open(target,constants.O_WRONLY|constants.O_CREAT|constants.O_NOFOLLOW|(input.offset===0?constants.O_TRUNC:0),0o600);
     try{if((await handle.stat()).size!==input.offset)throw new Error('offset_mismatch');await handle.write(data,0,data.length,input.offset);}finally{await handle.close();}
     return {written:true};
   }
   if(input.type==='workspace_artifact_stage'){
-    if(!/^[a-f0-9]{16,48}$/.test(String(input.stage_id||''))||typeof input.base64!=='string'||input.base64.length>61440||!Number.isSafeInteger(input.offset)||input.offset<0)throw new Error('invalid_artifact_stage');
+    if(!/^[a-f0-9]{16,48}$/.test(String(input.stage_id||''))||typeof input.base64!=='string'||input.base64.length>6*1024*1024||!Number.isSafeInteger(input.offset)||input.offset<0)throw new Error('invalid_artifact_stage');
     const data=Buffer.from(input.base64,'base64');
     if(input.offset+data.length>MAX_ARTIFACT_COMPRESSED_BYTES)throw new Error('artifact_too_large');
     await mkdir(root,{recursive:true,mode:0o700});
@@ -356,7 +355,7 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
       try{return await readBoundedFile(handle,target,{maxBytes:input.max_bytes,skipBinary:input.skip_binary===true});}finally{await handle.close();}
     }
     if(input.type==='workspace_write'){
-      if(typeof input.base64!=='string'||input.base64.length>56000||!Number.isSafeInteger(input.offset)||input.offset<0)throw new Error('invalid_content');
+      if(typeof input.base64!=='string'||input.base64.length>6*1024*1024||!Number.isSafeInteger(input.offset)||input.offset<0)throw new Error('invalid_content');
       if(input.final&&!['100644','100755'].includes(input.mode))throw new Error('invalid_mode');
       const data=Buffer.from(input.base64,'base64'),target=await computerPath(input.path,true);
       const realParent=await realpath(dirname(target));
@@ -369,7 +368,7 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
   }
   await base();
   if(input.type==='workspace_write'){
-    if(typeof input.base64!=='string'||input.base64.length>56000||!Number.isSafeInteger(input.offset)||input.offset<0)throw new Error('invalid_content');
+    if(typeof input.base64!=='string'||input.base64.length>6*1024*1024||!Number.isSafeInteger(input.offset)||input.offset<0)throw new Error('invalid_content');
     const data=Buffer.from(input.base64,'base64'),target=await path(input.path,true);
     const handle=await open(target,constants.O_WRONLY|constants.O_CREAT|constants.O_NOFOLLOW|(input.offset===0?constants.O_TRUNC:0),0o600);
     try{if((await handle.stat()).size!==input.offset)throw new Error('offset_mismatch');await handle.write(data,0,data.length,input.offset);await handle.sync();}finally{await handle.close();}
@@ -637,7 +636,7 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
   // Snapshot one regular private-workspace file; later chunks read this immutable blob, never a live mutable path.
   if(input.type==='workspace_export')return exportFile(await path(input.path));
   // secret_env comes only from the agent process in this container; the manager forwards no such field.
-  if(input.type==='workspace_command')return command(input.command,repo,input.timeout_ms,{outputFile:input.output_file,keepBackground:input.keep_background===true,secretEnv:input.secret_env,workspaceId:input.workspace_id,backgroundDirectory:root+'/logs'});
+  if(input.type==='workspace_command')return command(input.command,repo,input.timeout_ms,{outputFile:input.output_file,keepBackground:input.keep_background===true,secretEnv:input.secret_env,workspaceId:input.workspace_id,operationId:input.operation_id,backgroundDirectory:root+'/logs',onOutput:input._onOutput,onSpawn:input._onSpawn});
   if(input.type==='workspace_finalize')return withWorkspaceLock(root+'/finalize.lock',async()=>{
     const unlocked=await unlock();
     await git(['add','--all']);const tree=(await git(['write-tree'])).toString().trim();
@@ -667,7 +666,8 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
       await rename(temp,cache);handle=await open(cache,constants.O_RDONLY|constants.O_NOFOLLOW);
     }
     try{
-      const size=(await handle.stat()).size,data=Buffer.alloc(Math.max(0,Math.min(30000,size-input.offset)));
+      const chunkLimit=Number.isSafeInteger(input.limit)&&input.limit>=1?Math.min(input.limit,4*1024*1024):30000;
+      const size=(await handle.stat()).size,data=Buffer.alloc(Math.max(0,Math.min(chunkLimit,size-input.offset)));
       const {bytesRead}=await handle.read(data,0,data.length,input.offset);
       return {base64:data.subarray(0,bytesRead).toString('base64'),size};
     }finally{await handle.close();}

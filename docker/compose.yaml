@@ -149,6 +149,7 @@ services:
       BOT_PROJECT_TOOLS_DIR: /project-tools
       BOT_SKILL_STORE_DIR: /skill-store
       BOT_MODEL_GATEWAY_DIR: /run/model-gateway
+      BOT_RUNNER_SOCKETS_DIR: /run/bot-runner
       BOT_PROJECT_EGRESS: "${BOT_PROJECT_EGRESS:-true}"
     volumes:
       - manager-data:/data
@@ -165,6 +166,8 @@ services:
       - skill-store:/skill-store:ro
       # Read-only: the manager finds the model-gateway volume name and mounts it read-only at /run/model-gateway.
       - model-gateway:/run/model-gateway:ro
+      # Per-container private UDS sockets (/run/bot-runner/<key>/runner.sock) for resident runner/daemon.mjs transport.
+      - runner-sockets:/run/bot-runner
     networks: [control]
     read_only: true
     tmpfs:
@@ -200,6 +203,9 @@ volumes:
   model-gateway:
     labels:
       department.bot.kind: model-gateway
+  runner-sockets:
+    labels:
+      department.bot.kind: runner-sockets
   assistant-homes:
   bot-data:
   bot-keys:

@@ -16,7 +16,7 @@
   - **孤儿笔记卷与已停止容器自愈**：`manager/projects.mjs` 将 `reclaimNotes`、`reclaimStaleNotes` 与项目删除（`delete_notes`）统一到共享安全清理入口 `purgeNotesVolume`：删除 `-notes` 卷前按容器实际 `Mounts` 精准识别仍挂载该卷的本部署已停止孤儿容器，仅清理其对应代次的网络与 `resources` 行（不误伤未挂载 `-notes` 卷的运行中容器或活跃项目行；若有运行中容器仍挂载该卷，则以 `409 notes_volume_in_use` / `503 notes_residue_unclearable` 拒绝，绝不误杀运行中实例）。
   - **全平台角色意见箱工具（`submit_feedback`，`src/feedback/`）**：声明在 `basicTools`（不列入 `NATIVE_CLI_REPLACED_TOOLS`），统一注入全部 6 类执行入口——项目工作角色（`src/roles/run.ts`，覆盖全部 5 种后端 `pi`/`claude_code`/`codex`/`icode`/`workswarm`）、对象 Manager 事件分派（`src/dispatch/manager.ts`）、角色对话（`src/roles/conversation.ts`）、个人管理助手（`src/management/agent.ts`，含 `start_own_task`）、飞书群聊助手（`src/channels/service-session.ts`，含 `start_own_task`）与夜间自动记忆整理（`src/memory/consolidation-engine.ts`，覆盖 project/group/personal 三轨）。工具严格为 append-only 只写（不向任何角色暴露读/列/搜/改/删反馈工具）、非终结且不扩大任何业务或 GitHub 权限；触发限流、超长、幂等重放或写盘保护（`store.disk?.check()`）时仅返回结构化观察文本，绝不中断主任务。除模型提交的结构化字段外，控制面在服务端权威采集完整环境与角色配置快照（launchpad 版本与 `BOT_IMAGE_TAG`、Node/OS、`source_kind`、`untrusted_context`、项目策略摘要、生效系统提示词及 SHA-256、角色完整权限矩阵/预算/提供工具/修订号、模型与 Harness/CLI 版本、Skill 清单与 `skills_read`、执行标识与最近工具摘要），API URL 剔除 userinfo/query/hash 并经脱敏与 `assertSecretFree` 后以明文 `.json.gz` 落盘；全局开关关闭时隐藏该工具。
   - **命令时限与后台进程**：`run_command` 支持 `timeout_seconds`（受 `BOT_COMMAND_TIMEOUT_MAX_SECONDS` 统一封顶）与 `keep_background: true`（自动将日志落盘到 `log_path` 并随任务结束回收进程组）。
-  - **命令长度**：任务电脑与助手电脑的 `run_command` 共用同一个命令上限，按 UTF-8 计 64 KiB（`runner/command-policy.mjs` 的 `commandLimit`），schema 的 `command` 描述里写明；超限回稳定 code `command_too_long`，带 `limit` 与 `length`，并提示改写成脚本文件。上限不为无限：整条 runner 请求会 base64url 成一个 `docker exec` 参数，Linux 单参数上限 128 KiB，所以 `runnerRequestLimit`（95 KiB JSON）是传输兜底。传输按 JSON 编码后的字节计，引号与换行会再转义一次，因此 64 KiB 以内的命令也可能超传输上限；控制面与 manager 共用 `requestTooLarge`，命中时回稳定 code `runner_request_too_large`，带 `limit`、`length`（编码后字节）和改写成脚本文件的提示，不再变成 `execution_interrupted` 与重启；再大需要改成 stdin 投递。
+  - **命令长度与传输上限**：任务电脑与助手电脑的 `run_command` 共用同一个命令上限，按 UTF-8 计 1 MiB（`runner/command-policy.mjs` 的 `commandLimit`），schema 的 `command` 描述里写明；超限回稳定 code `command_too_long`，带 `limit` 与 `length`，并提示改写成脚本文件。对于超过 64 KiB 的命令，`runner/command.mjs` 与 `runner/background-command.mjs` 自动落地至私有 `0600` 临时脚本文件经 `/bin/sh <script>` 执行（保持 stdin 为 `/dev/null` 并在退出后删除），绕开 Linux 单参数 128 KiB（`MAX_ARG_STRLEN`）限制。请求传输经容器内常驻 `runner/daemon.mjs` 的 HTTP/1.1 + WebSocket 私有 UDS（或本地 `runner.mjs --stdin`），`runnerRequestLimit` 提升至 8 MiB；控制面、manager 与 daemon 共用 `requestTooLarge`，超限回稳定 `413 runner_request_too_large`（带 `limit` 与 `length`），不再退化成 `execution_interrupted` 与重启（旧版无 UDS 容器回退 `docker exec` 时仍按 `legacyExecRequestLimit` 95 KiB 保护）。文件与 Git Pack/Blob 分块统一提升至 1 MiB（`RUNNER_TRANSFER_CHUNK_BYTES`），并在 daemon 侧提供原生二进制流式 `/v1/blobs/:kind/:id` 端点。
 
 ## 2. `bot.role-run/1` 协议与 `TaskToolGateway`（`src/roles/`）
 
@@ -59,7 +59,7 @@
   - `harness_ref.model_source` 规范值为 `'gateway' | 'local_config'`（旧配置 `'subscription'` 自动归一化为 `'local_config'`），与平台模型网关完全正交。
   - 选择 `local_config` 时，控制面不签发 `'model:invoke'` 令牌能力、不注册模型网关会话，且控制面与 `runner/harness-entry.mjs` **不注入**任何平台模型配置（无 `ANTHROPIC_*`、`--model`、`CODEX_RELAY_URL`、`OPENAI_*`、`config.toml` 或 `-c model_provider`），同时保持每次运行独立的 `HOME` / `CLAUDE_CONFIG_DIR` / `CODEX_HOME`。
   - 启动 CLI 前由 `runner/cli-config.mjs` 仅将 `/workspace/home` 下的白名单文件（Claude Code：`.claude/settings.json`、`.claude/.credentials.json`；Codex：`.codex/config.toml`、`.codex/auth.json`）以 `0600` 权限复制到当前会话目录（Claude Code 传 `--setting-sources user`），运行结束立即删除副本但保留会话 transcript。未检测到任一配置文件时以 `claude_local_config_missing` / `codex_local_config_missing` 失败关闭，绝不回退到平台模型。
-  - 管理入口经 `GET/PUT/DELETE /api/environments/:id/cli-config` → `manager` → runner 非 journal 操作（`cli_config_status`/`write`/`delete`）直写 `/workspace/home`，控制面不读取、不落库、不记录日志；写入内容在控制面、manager 与 runner 三处统一限制上限为 32 KiB（超限返回 `400 invalid_cli_config_content`），由 manager 经 Docker exec 环境变量 `BOT_CLI_CONFIG_B64` 传入（不进入命令行 `argv`，runner 读取后立即清除环境变量）。
+  - 管理入口经 `GET/PUT/DELETE /api/environments/:id/cli-config` → `manager` → runner 非 journal 操作（`cli_config_status`/`write`/`delete`）直写 `/workspace/home`，控制面不读取、不落库、不记录日志；写入内容在控制面、manager 与 runner 三处统一限制上限为 32 KiB（超限返回 `400 invalid_cli_config_content`），常驻 daemon 模式下由 manager 经受保护 HTTP 请求头 `x-bot-cli-config-b64` 投递（不进入 JSON body、journal 或进程 `argv`；旧版 `docker exec` 回退仍走 `BOT_CLI_CONFIG_B64` 环境变量，runner 读取后立即清除）。
 - **取消回收**：所有容器内 Harness 均以独立进程组运行，取消时先优雅中断，宽限期后经 `workspace_harness_interrupt` 杀死整个进程组并执行 `reap`。
 
 ### 默认后端与固定 Pi 的角色
@@ -95,12 +95,12 @@
 - **纯透传、零跨协议转换**：网关校验短期运行令牌（`rrt_…` 或 Pi 短时网关令牌）、`lease_epoch`、实时模型授权与累计预算后，严格核对请求端点协议与所绑模型的有效接口协议（`openai-chat-completions`、`openai-responses`、`anthropic-messages`），不匹配直接返回 `400 model_protocol_mismatch`；仅替换上游目标 URL（保留查询参数）、真实上游鉴权头与 JSON 顶层 `model` 字段（附加输出 token 上限封顶、流式 Chat Completions 补齐 `stream_options.include_usage: true`、WorkSwarm 可信 `allowedTools` 工具过滤，以及边界安全的流式密钥脱敏）。上游响应字节流原样透传回下游，同时由旁路解析器（`PassthroughTap`）无侵入提取 `usage`、`text_delta` 与轨迹摘要写入统一 `model_requests` 账本；下游断开、任务取消或令牌撤销时立即中断上游请求。
 - **协议兼容矩阵前置强校验**：角色保存、运行预览（`resolveRole`）与启动前统一核对后端声明的支持协议（`pi` / `icode` 支持全部三种协议，`codex` 仅 `openai-responses`，`claude_code` 仅 `anthropic-messages`，`workswarm` 支持 `openai-chat-completions` 与 `anthropic-messages`），不兼容立即返回 `harness_model_api_unsupported` 或进入 `waiting_configuration`。
 
-### Pi 会话邮箱（`src/agent/pi.ts`、`runner/agent.mjs`）
+### Pi 会话邮箱与事件驱动唤醒（`src/agent/pi.ts`、`runner/agent.mjs`、`runner/mailbox-watch.mjs`）
 
-控制面和容器里的 Pi 进程通过任务目录 `agent/` 下的文件邮箱处理工具调用、短期只读令牌、回合边界与 harness 事件，每次轮询由 manager 在容器里执行一次 runner（`docker exec`）；**模型请求不再走文件邮箱**，而是由容器内 Pi SDK 直接经内存态回环桥走控制面统一 UDS 透传网关（原生适配三种接口协议，并在网关钩子内完成请求体/图片大小上限拦截、实时授权、预算/最大请求数收尾、流式 `text_delta` 推送与轨迹入库）。
+控制面和容器里的 Pi 进程通过任务目录 `agent/` 下的文件邮箱处理工具调用、短期只读令牌、回合边界与 harness 事件，由 manager 经容器内常驻 `runner/daemon.mjs` 的私有 UDS 通道直接进程内分发（零 `docker exec` 冷启动）；**模型请求不再走文件邮箱**，而是由容器内 Pi SDK 直接经内存态回环桥走控制面统一 UDS 透传网关（原生适配三种接口协议，并在网关钩子内完成请求体/图片大小上限拦截、实时授权、预算/最大请求数收尾、流式 `text_delta` 推送与轨迹入库）。
 
-- **启动**：配置按 30000 字节分块写入，最后一块同时带 `start` 和角色固定的 Pi 版本。runner 先核对版本，不符时什么也不写、不启动，控制面报 `harness_version_mismatch`；版本相符时清理上一进程的邮箱、写入配置并启动，答复里带上实际运行时。工作卷写满时，runner 把带 `start` 的最后一块当作启动拒绝，答复 `disk_full`（`runner/disk.mjs`），什么也不清理、不写、不启动，任务进入等待环境，与单独的 `workspace_agent_start` 一致；只存配置的其他分块照常写入。旧 runner 不认识 `start`，答复里没有运行时，控制面按原流程再查运行时、再启动。续接（`workspace_agent_continue`）和重新附着的会话没有配置可带，仍先单独查运行时。
-- **长轮询**：控制面每次轮询带 `wait_ms`（3 s）、事件 offset，以及已在处理的请求 id：后台运行中或已答复的工具和令牌请求及回合边界。runner 每 50 ms 检查一次，出现控制面没见过的东西就立即返回，包括会话离开运行状态、新的回合边界、工具或令牌请求，以及超过一页的事件。只有新事件时，最早在等待开始 200 ms 后返回；什么都没有就等满 3 s。已在处理的工具和令牌请求只返回 id。
+- **启动**：配置按 1 MiB（`RUNNER_TRANSFER_CHUNK_BYTES`）分块写入（2 MiB 上限下仅需 1–2 次调用），最后一块同时带 `start` 和角色固定的 Pi 版本。runner 先核对版本，不符时什么也不写、不启动，控制面报 `harness_version_mismatch`；版本相符时清理上一进程的邮箱、写入配置并启动，答复里带上实际运行时。工作卷写满时，runner 把带 `start` 的最后一块当作启动拒绝，答复 `disk_full`（`runner/disk.mjs`），什么也不清理、不写、不启动，任务进入等待环境，与单独的 `workspace_agent_start` 一致；只存配置的其他分块照常写入。旧 runner 不认识 `start`，答复里没有运行时，控制面按原流程再查运行时、再启动。续接（`workspace_agent_continue`）和重新附着的会话没有配置可带，仍先单独查运行时。
+- **inotify 事件唤醒长轮询与 WS 推送**：控制面每次轮询带 `wait_ms`（Pi 3 s，其他容器 Harness 1 s）、事件 offset 与已在处理的请求 id。常驻 `runner/daemon.mjs` 通过 `runner/mailbox-watch.mjs` 对 `<task>/agent`、`tool-requests/`、`token-requests/` 挂载引用计数的 Linux `fs.watch`（inotify）监听，并同时支持 WebSocket `mailbox.watch` 实时推送；新事件、回合边界或工具/令牌请求落盘时即时唤醒等待中的轮询（无事件时以低频兜底复查并等满 `wait_ms`），消除高频 25–50 ms 空轮询开销。已在处理的工具和令牌请求只返回 id。
 - **轮询节奏**：答复带 `long_poll: true` 时控制面立即发下一次轮询。旧 runner 或测试替身会立即答复、不带这个标记，控制面仍隔 500 ms 再轮询。等待期间会话被取消、网关发生致命配置/鉴权故障或后台工作失败，控制面立即结束等待并丢弃这次答复。每次轮询前控制面都检查任务状态（用户停止、权限变化），间隔不超过约 3 s，远低于 manager 的 90 s 执行超时。
 
 ### 服务助手回合（`src/harness/service-session.ts`）
@@ -154,9 +154,22 @@ WorkSwarm 的 ACP 桥不接受客户端注入的 HTTP MCP。runner 用 WorkSwarm
 
 安装器核验后写入来源和哈希，再原子切换选定记录。已开始的运行保持原版本绑定。
 
-## 4. 虚拟电脑生命周期与自动预编译镜像引擎（`manager/`、`runner/`）
+## 4. 虚拟电脑生命周期、统一 Runner 网络协议与自动预编译镜像引擎（`manager/`、`runner/`）
 
-项目电脑和助手电脑共用 `manager/computer-resources.mjs` 中的资源值校验、单容器宿主机内存上限计算和保守回退值。各自的生命周期与并发准入仍由对应的电脑管理器负责。
+项目电脑和助手电脑共用 `manager/computer-resources.mjs` 中的资源值校验、单容器宿主机内存上限计算和保守回退值，并通过统一常驻 Runner 守护进程通信。各自的生命周期与并发准入仍由对应的电脑管理器负责。
+
+### 常驻 Runner 守护进程与统一 HTTP/WS 线协议（`runner/daemon.mjs`、`runner/wire-protocol.mjs`、`manager/runner-client.mjs`）
+
+- **常驻进程内分发（零 `docker exec` 冷启动）**：所有项目电脑与助手电脑以 `node /opt/runner/daemon.mjs` 作为主进程常驻运行（取代原空转 `runner/idle.mjs`，后者保留兼容转发）。`daemon.mjs` 将既有 `runner/` 操作通过共享 ESM 模块 `runner/executor.mjs` 在进程内直接分发，不再为每次命令、文件、Git 或邮箱轮询冷启动 Node 子进程；`runner/runner.mjs` 保留薄 CLI 封装并支持 `--stdin`（供 `LocalManager` 与测试直接投递最高 8 MiB 请求，彻底脱离 `argv` 上限）。
+- **每容器私有 UDS 传输与可选受控 TCP 端点**：
+  - `docker/compose.yaml` 新增独立命名卷 `runner-sockets`（仅挂载至 `manager:/run/bot-runner`，`bot`/`webhook`/`tunnel` 均不挂载）。`manager` 为每个容器分配独立子路径 `/run/bot-runner/<sha256(name)[0..24]>`（`0770` GID `10001`），仅将该子路径以 `VolumeOptions: { NoCopy: true, Subpath }` 挂入容器 `/run/bot-runner`，容器间互不可见且不暴露任何宿主机端口。
+  - 每次容器启动前，`manager` 清理遗留套接字并写入一次性 256-bit 随机 Bearer 令牌至 `.token`（`0640`）；`daemon.mjs` 启动读取后立即 `unlink` `.token`（或读取并清除 `BOT_RUNNER_TOKEN` 环境变量），监听 `/run/bot-runner/runner.sock`（`0660`），并对全部 HTTP 与 WebSocket 请求强制 `timingSafeEqual` 校验 Bearer 令牌（与 `egress=false`、`NetworkMode: none`、`ReadonlyRootfs: true`、`UID 10001`、`cap_drop: [ALL]` 完全兼容）。
+  - 同时支持通过 `BOT_RUNNER_LISTEN` 启用强制鉴权的受控 TCP/HTTPS 端点，为远程执行节点（Docker Agent 节点与轻量 SSH 后端）复用同一协议与 `manager/runner-client.mjs` 客户端奠定统一契约。
+- **异步流式命令执行与长连接保活**：
+  - `POST /v1/commands` 立即持久化 `running` journal 并返回 `202` 与 `operation_id`；`manager/runner-client.mjs` 通过持久 WebSocket（`GET /v1/ws`）订阅 `command.output` 实时增量输出、`command.heartbeat`（默认 5 秒心跳）与 `command.done` 终态，彻底解除长耗时命令的 100 秒网关/代理超时风险。
+  - 当 WebSocket 不可用、被反向代理阻断或连接中断时，客户端自动无损降级到有界 HTTP 长轮询（`GET /v1/commands/:id/wait?offset=...&timeout_ms=25000`，单次请求严格 ≤ 25 秒）续读增量输出直至终态；支持 `POST /v1/commands/:id/cancel` 精准回收目标操作进程组。
+  - 原生二进制流式接口 `PUT/GET /v1/blobs/:kind/:id`（覆盖 `git_pack`、`workspace_artifact`、`assistant_archive`、`workspace_blob`、`command_output`）支持大对象直接字节流传输，避免 base64 膨胀。
+  - 旧版容器镜像自动由 `provision()` 检测到 `Cmd` 或 `/run/bot-runner` 挂载差异后原地无损升级（保留工作卷与代次）；未配置 `runner-sockets` 的本地测试或旧容器仍自动兼容回退 `docker exec`。
 
 ### 统一环境与两级预编译镜像（`manager/precompiled-images.mjs`）
 

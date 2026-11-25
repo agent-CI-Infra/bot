@@ -10,6 +10,7 @@ import { deliverMailboxToolReply } from '../roles/task-tools.js';
 import { registerModelGatewaySession } from '../harness/model-gateway.js';
 import type { ModelInterfaceType } from '../models/catalog.js';
 import { consumePendingTaskUpdates } from '../review/bot-pr-wake.js';
+import { RUNNER_TRANSFER_CHUNK_BYTES } from '../../runner/command-policy.mjs';
 
 /** The Pi SDK the project computer image installs (runner/package.json). scripts/check-runtime.mjs keeps the two equal. */
 export const piRuntime = { agent: 'pi', package: '@earendil-works/pi-coding-agent', version: '1.4.0' } as const;
@@ -350,14 +351,14 @@ export function piAdapter<T>(session: PiSession<T>) {
       if (bytes.length > 2 * 1024 * 1024) stop('agent_context_too_large', 'waiting_configuration', `执行上下文大小 ${bytes.length} 字节，超过 2 MiB 上限。`);
       // The last piece of a new session's configuration also starts it (#1277), checking the pinned Pi version before the
       // process runs. A runner older than that ignores start: its answer has no runtime, and the runtime query and the start
-      // call follow as before. Pieces stay 30000 bytes, what those runners accept.
+      // call follow as before.
       let launched: any = null;
       if (fresh) {
-        for (let offset = 0; offset < bytes.length; offset += 30000) {
-          const final = offset + 30000 >= bytes.length;
+        for (let offset = 0; offset < bytes.length; offset += RUNNER_TRANSFER_CHUNK_BYTES) {
+          const final = offset + RUNNER_TRANSFER_CHUNK_BYTES >= bytes.length;
           const saved = await workspace.call(key + ':config:' + offset, {
             type: 'workspace_agent_config',
-            base64: bytes.subarray(offset, offset + 30000).toString('base64'),
+            base64: bytes.subarray(offset, offset + RUNNER_TRANSFER_CHUNK_BYTES).toString('base64'),
             offset,
             final,
             ...(final ? { start: true, ...(session.runtime ? { runtime_version: session.runtime.version } : {}) } : {}),
@@ -430,8 +431,8 @@ export function piAdapter<T>(session: PiSession<T>) {
           const recovery = typeof state.boundary.recovery === 'string' ? state.boundary.recovery : undefined;
           const reply = Buffer.from(JSON.stringify(redactor.clean(conversation ? await conversation.boundary(state.boundary.stage, recovery) : await service!.boundary())));
           if (reply.length > 32 * 1024 * 1024) stop('agent_context_too_large');
-          for (let at = 0; at < reply.length; at += 30000) {
-            const sent = await workspace.call(`${key}:boundary:${id}:${at}`, { type: 'workspace_agent_boundary', request_id: id, base64: reply.subarray(at, at + 30000).toString('base64'), offset: at, final: at + 30000 >= reply.length });
+          for (let at = 0; at < reply.length; at += RUNNER_TRANSFER_CHUNK_BYTES) {
+            const sent = await workspace.call(`${key}:boundary:${id}:${at}`, { type: 'workspace_agent_boundary', request_id: id, base64: reply.subarray(at, at + RUNNER_TRANSFER_CHUNK_BYTES).toString('base64'), offset: at, final: at + RUNNER_TRANSFER_CHUNK_BYTES >= reply.length });
             if (sent.error) stop('execution_interrupted', 'waiting_environment');
           }
           answered.add('boundary:' + id); answered.add('resumed'); continue;

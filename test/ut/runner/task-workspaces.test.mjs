@@ -26,6 +26,7 @@ test('cleanup attributes each process to its own task workspace, so ending one t
   const mine = id(), other = id(), request = value => 'node /opt/runner/runner.mjs ' + Buffer.from(JSON.stringify(value)).toString('base64url');
   const rows = [
     { pid: 1, ppid: 0, cmdline: '/sbin/docker-init -- node /opt/runner/idle.mjs' },
+    { pid: 2, ppid: 1, cmdline: 'node /opt/runner/daemon.mjs' },
     { pid: 10, ppid: 0, cmdline: 'node /opt/runner/pi-entry.mjs ' + tasksRoot + mine },
     { pid: 11, ppid: 10, cmdline: '/bin/sh -c npm test' },
     { pid: 12, ppid: 11, cmdline: 'env -i node server.js' },
@@ -43,7 +44,7 @@ test('cleanup attributes each process to its own task workspace, so ending one t
   const owner = await ownership(rows, { environ: async pid => environ[pid] || '', cwd: async pid => cwd[pid] || '' });
   assert.deepEqual([10, 11, 12, 40].map(owner), [mine, mine, mine, mine]);
   assert.deepEqual([20, 21, 30, 31].map(owner), [other, other, other, other]);
-  assert.deepEqual([1, 41, 50].map(owner), [null, null, null]);
+  assert.deepEqual([1, 2, 41, 50].map(owner), [null, null, null, null]);
 });
 
 test('task commands carry their workspace id and run in their own repository directory', async t => {
