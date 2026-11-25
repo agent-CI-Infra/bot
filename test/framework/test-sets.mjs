@@ -25,8 +25,7 @@ if (!Number.isInteger(jobs) || jobs < 1) fail(usage);
 // and sets stuck that way once kept a whole local run waiting for an hour. The default stays well above the
 // slowest healthy set: codex-harness takes up to about 340 s on CI and up to about 1340 s on a loaded local machine.
 // It bounds the whole set process instead of using node's --test-timeout: given to node --test, that caps each file as a
-// whole, cutting a file whose tests together run longer even when each has a longer timeout of its own; as a default
-// for single tests it would not reach a hang outside any test, such as in top-level await.
+// whole, cutting a file whose tests together run longer even when each has a longer timeout of its own.
 const limit = process.env.BOT_TEST_SET_TIMEOUT ? Number(process.env.BOT_TEST_SET_TIMEOUT) : 1800;
 if (!Number.isFinite(limit) || limit <= 0) fail('BOT_TEST_SET_TIMEOUT must be a positive number of seconds');
 const grace = 10_000; // How long a stopped set has between SIGTERM and SIGKILL.
