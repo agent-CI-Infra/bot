@@ -250,6 +250,7 @@ test('a private timer on Pi with nothing to report ends silently; nothing is sen
   const run = await until(() => f.h.store.get('SELECT * FROM channel_schedule_runs WHERE schedule_id=?', schedule.id), r => r && r.state !== 'running', 60000);
   assert.equal(run.state, 'silent', run.error);
   assert.equal(bodies.length, 1); assert.ok(bodies[0].tools.some(tool => tool.function.name === 'stay_silent'));
+  assert.ok(!bodies[0].tools.some(tool => tool.function.name === 'send_message'));
   const reply = JSON.parse(f.h.store.get("SELECT data FROM management_events WHERE message_id=? AND type='reply'", run.message_id).data);
   assert.equal(reply.text, ''); assert.equal(reply.silent, true); assert.equal(reply.reason, '没有失败的任务');
   await f.service.tick(); assert.deepEqual(sent(f).filter(s => s.includes('每日汇总') || s.includes('没有失败')), []);

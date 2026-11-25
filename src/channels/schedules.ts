@@ -31,9 +31,9 @@ export const withdrawn = (error: unknown): boolean =>
  */
 export const conversationScheduleName = 'conversation_schedules';
 export const conversationScheduleTool = { type: 'function', function: { name: conversationScheduleName,
-  description: 'Timers of this conversation. Each timer runs its prompt here as a new turn of this assistant at its times and posts the answer here; a run with nothing to report may stay silent. '
+  description: 'Timers of this conversation. Each timer runs its prompt here as a new turn of this assistant at its times and posts only a single complete final result here (no mid-turn progress messages); a run with nothing to report may stay silent. '
     + 'action list: the timers. create {name, prompt, cron (5 fields, in timezone) or interval_minutes (at least 5), timezone (IANA, default Asia/Shanghai)}. '
-    + 'update {id, and only what changes}; pause, resume or delete {id}. Write the prompt as the task to do at each run, including when to stay silent. '
+    + 'update {id, and only what changes}; pause, resume or delete {id}. Write the prompt as the complete task to do at each run, including when to stay silent. '
     + 'After creating or changing a timer, tell the person its next run time (next_at and future are epoch milliseconds).',
   parameters: { type: 'object', properties: {
     action: { type: 'string', enum: ['list', 'create', 'update', 'pause', 'resume', 'delete'] }, id: { type: 'string' },
@@ -297,7 +297,7 @@ export class ChannelSchedules {
     else await this.group(row, chat, run, prompt, guard);
   }
   private frame(row: Row, prompt: string): string {
-    return `本条由本会话的定时任务「${row.name}」在 ${new Date(this.clock()).toLocaleString('zh-CN', { timeZone: row.timezone })}（${row.timezone}）触发，不是新发来的消息。请在当前权限内完成下面的任务并给出结果；如果任务说明允许在没有需要报告的内容时保持安静，而且确实没有，请调用 stay_silent 结束，不要回复任何文字。\n\n${prompt}`;
+    return `本条由本会话的定时任务「${row.name}」在 ${new Date(this.clock()).toLocaleString('zh-CN', { timeZone: row.timezone })}（${row.timezone}）触发，不是新发来的消息。请在当前权限内先完成全部数据收集与核对，再一次性给出完整最终结果（直接回复文本或通过 set_feishu_card 暂存单张卡片），不要输出“开始整理 / 先拉取数据 / 正在执行”等过程播报，也不要分多条发送；如果任务说明允许在没有需要报告的内容时保持安静，而且确实没有，请调用 stay_silent 结束，不要回复任何文字。\n\n${prompt}`;
   }
   /** The owner's management assistant in a conversation of this timer, under the owner's current authority only. */
   private async personal(row: Row, chat: Row, run: string, prompt: string, guard: () => void): Promise<void> {
@@ -336,15 +336,13 @@ export class ChannelSchedules {
     if (!binding) return fail(403, 'channel_service_binding_disabled');
     const protection = (turn: string, fence: string) => ({ kind: 'channel_schedule', schedule_id: row.id, run_id: run, chat_id: chat.id, binding_id: binding.id,
       binding_revision: binding.revision, turn_id: turn, source_fence: fence });
-    // Progress messages (#435) reach the group while the run is live, under the same protection as its result. The group runs on
+    // Timer turns deliver only their final result without mid-turn progress messages (#1367). The group runs on
     // its grantors' authority: lapsed GitHub proofs are checked first (#846), while the run already holds the chat, so a message
     // arriving meanwhile waits for it instead of taking the chat from the timer.
     const result = await this.host.exclusive(chat.id, async () => {
       await this.host.renewal(this.host.serviceBindings.grants(binding).map(g => String(g.grantor_id)));
       return this.host.serviceSessions.run({ chat, binding, source_message: 'schedule:' + run,
-        request: this.frame(row, prompt), allowSilence: true, schedule: { name: row.name, guard },
-        stage: m => this.host.post(chat, `定时任务「${row.name}」\n\n${m.text}`, 'channel-schedule:' + run + ':stage:' + m.sequence, 'schedule:' + run,
-          { ...protection(m.turn_id, m.fence), stage: m.sequence }) });
+        request: this.frame(row, prompt), allowSilence: true, schedule: { name: row.name, guard } });
     });
     this.store.run('UPDATE channel_schedule_runs SET turn_id=? WHERE id=?', result.id, run);
     try {
@@ -376,24 +374,15 @@ export class ChannelSchedules {
     if (row!.kind === 'personal') {
       this.owner(chat, String(protection.principal_id));
       if (revision(this.store, String(protection.principal_id)) !== protection.authorization_revision) fail(409, 'authorization_changed');
+      // Keep turn-state validation for any pre-upgrade legacy stage row still draining from channel_outbox.
       if (protection.stage) this.host.managementTurnLive(String(protection.management_message));
       return;
     }
     const binding = this.host.serviceBindings.get(chat.id);
     if (!binding || binding.id !== protection.binding_id || binding.revision !== protection.binding_revision) fail(409, 'conversation_source_changed');
     this.host.serviceBindings.assertUsable(binding!);
-    // The result needs a completed turn; a progress message (#435) also goes out while the turn still runs.
+    // The result needs a completed turn; any pre-upgrade legacy stage row still checks live/completed state.
     this.host.serviceTurnLive(protection);
-  }
-  /** A progress message of a private timer's management turn (#435): sent to the timer's chat while its run is live. */
-  personalStage(run: string, actor: ActorContext, message: string, text: string, sequence: number): string {
-    const current = this.store.get('SELECT r.schedule_id,s.chat_id,s.name,s.kind,s.owner_id FROM channel_schedule_runs r JOIN channel_schedules s ON s.id=r.schedule_id WHERE r.id=?', run);
-    if (!current || current.kind !== 'personal' || current.owner_id !== actor.principal_id) return fail(403, 'channel_command_source_required');
-    this.guard(current.schedule_id, run);
-    const chat = this.host.employees.chat(current.chat_id);
-    return this.host.post(chat, `定时任务「${current.name}」\n\n${text}`, 'channel-schedule:' + run + ':stage:' + sequence, 'schedule:' + run,
-      { kind: 'channel_schedule', schedule_id: current.schedule_id, run_id: run, chat_id: chat.id, principal_id: actor.principal_id,
-        authorization_revision: actor.authorization_revision, management_message: message, stage: sequence });
   }
   /** A command a group's timer run submits: the run is live and belongs to this group, as a message source would. */
   sourceOfCommand(command: Row, run: string): void {

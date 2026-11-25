@@ -25,7 +25,7 @@ import { githubWrite, scopedGithubWriteTool } from '../github/write.js';
 import { projectMergeBoundary } from '../github/merge-policy.js';
 import { OwnTasks, ownTaskNames, ownTaskTools, type OwnTaskHost } from '../service-roles/own-tasks.js';
 import { computerMediaTools, mediaTools, type MediaComputer, type MediaTurn } from '../channels/media.js';
-import { sendMessageName, sendMessageTool, stageMessage, stageMessageInstructions, stageMessageLimit } from '../service-roles/stage-messages.js';
+import { credentialSafetyInstructions, sendMessageName, sendMessageTool, stageMessage, stageMessageInstructions, stageMessageLimit } from '../service-roles/stage-messages.js';
 import { staySilent, staySilentInstructions, staySilentName, staySilentTool } from '../service-roles/stay-silent.js';
 import { privateTurnMessageInstructions, type TurnMessages } from '../channels/turn-messages.js';
 import { conversationScheduleName, conversationScheduleTool } from '../channels/schedules.js';
@@ -66,8 +66,9 @@ export class ManagementAgent {
   incomingMessages?:(actor:ActorContext,conversation:string,input:Json,id:string)=>TurnMessages|undefined;
   incomingHistory?:(message:string)=>Json[];
   mediaTurn?:(actor:ActorContext,conversation:string,input:Json,computers:MediaComputer|undefined,guard:()=>void,imageInput?:()=>boolean)=>MediaTurn|undefined;
-  // Queues a progress message (#435) to the transport that started the turn (a private chat or timer) and returns its outbox id;
-  // it throws when that source no longer allows sending. A console conversation has none: its event stream shows the message.
+  // Queues a progress message (#435) to the transport that started an interactive turn (a private chat) and returns its
+  // outbox id; it throws when that source no longer allows sending. Console conversations only show it in their event
+  // stream, and timer turns do not send progress messages (#1367).
   stageMessage?:(actor:ActorContext,conversation:string,input:Json,message:string,text:string,sequence:number)=>string|undefined;
   // The timers of the private chat this conversation belongs to (#851), managed for its owner; none for a console conversation.
   conversationSchedules?:(actor:ActorContext,conversation:string)=>((args:Json)=>Json)|undefined;
@@ -281,7 +282,7 @@ export class ManagementAgent {
     const computer=this.service.assistants?.turn({owner:{kind:'person',subject:actor.principal_id,tenant},turn:id,check:guard,
       fence:()=>personFence(this.store,actor.principal_id,tenant),facts:()=>({repositories:accessibleRepositories()}),commands:()=>true,
       eligible:()=>{if(!canUseComputer())fail(403,'capability_forbidden');},
-      notify:text=>progress({text})});
+      ...(timer?{}:{notify:text=>progress({text})})});
     const resolveAuthorizedRepository=(selected:unknown):Row=>{
       const project=this.store.all('SELECT * FROM repositories').find(r=>r.id===selected||sameRepositoryName(r.full_name,selected));
       if(project){this.service.scope(actor,project.id);return project;}
@@ -319,7 +320,7 @@ export class ManagementAgent {
       ? projectToolsAssistantTools.filter(t=>t.function.name===projectToolsListName?canListProjectTools():canWriteProjectTools())
       : [];
     const feedbackEnabled=isFeedbackEnabled(this.store);
-    const tools=[readToolResult,...managementTools,...offeredProjectToolTools,...(permitsManagement(permissions(),'project.update',true)?[startRepositoryTool]:[]),...(deciding?[startRequestsTool]:[]),...(schedules?[conversationScheduleTool]:[]),...ownTaskTools,...serviceRepositoryTools,...(canCheckout()?[checkoutRepositoryTool]:[]),activeReadSkillTool,...(cardTurn?[feishuCardTool]:[]),...(permitsTool(permissions(),'github_write')?[scopedGithubWriteTool]:[]),...(computerOffered?assistantComputerTools:[]),...(media?mediaTools.filter(t=>computerOffered||!computerMediaTools.has(t.function.name)):[]),...(feedbackEnabled?[submitFeedbackTool]:[]),sendMessageTool];
+    const tools=[readToolResult,...managementTools,...offeredProjectToolTools,...(permitsManagement(permissions(),'project.update',true)?[startRepositoryTool]:[]),...(deciding?[startRequestsTool]:[]),...(schedules?[conversationScheduleTool]:[]),...ownTaskTools,...serviceRepositoryTools,...(canCheckout()?[checkoutRepositoryTool]:[]),activeReadSkillTool,...(cardTurn?[feishuCardTool]:[]),...(permitsTool(permissions(),'github_write')?[scopedGithubWriteTool]:[]),...(computerOffered?assistantComputerTools:[]),...(media?mediaTools.filter(t=>computerOffered||!computerMediaTools.has(t.function.name)):[]),...(feedbackEnabled?[submitFeedbackTool]:[]),...(timer?[]:[sendMessageTool])];
     // Only a timer's turn may end silently, and only through stay_silent (#489); own tasks never get the tool.
     const turnTools=timer?[...tools,staySilentTool]:tools;let silence:string|undefined;
     // Set once a merged message is certainly for the assistant: then the turn must answer and cannot end silently.
@@ -349,7 +350,7 @@ export class ManagementAgent {
       }),value=>redactor.text(value),limit);
     };
     const executeRaw=async(name:string,args:any,callId:string,ownTaskId?:string):Promise<any>=>{
-      if(name===sendMessageName)return progress(args);
+      if(name===sendMessageName&&!timer)return progress(args);
       // Providers may reuse a tool id in later model turns. Progress needs an id unique to this invocation.
       const eventCallId=randomId();
       await guard();this.event(id,'tool_call',{name,call_id:eventCallId,arguments:args});
@@ -481,7 +482,7 @@ export class ManagementAgent {
           // #1360: the source is a fact of each message; without it the model guessed and named a bound group as the current chat.
           +' The request context\'s message_source says where the current message came from, and each history round\'s source where that one did: web_console (the user typed it in the launchpad web console), feishu_private_chat (the user\'s Feishu private chat with you; chat_name is the Feishu name of the person in it) or timer (one of the user\'s timers, timer_name; its result goes to their Feishu private chat chat_name). One conversation can mix console and private-chat messages. When you mention where a message came from, take it from these fields only: never say a console message came from Feishu. You never receive Feishu group messages, because each bound group has its own group assistant: never say that this conversation or a message comes from a group.'
           +' An explicit request in this conversation is sufficient to change another author\'s Issue or PR title, labels, assignees or open/closed state when the current user has the corresponding repository write permission. Cite this conversation as the source when reporting what changed.'
-          +stageMessageInstructions
+          +(timer?credentialSafetyInstructions:stageMessageInstructions)
           +(computerOffered?computerInstructions('belongs to the current user alone: their Feishu private chat and console conversations share it'):'')
           +(incoming?privateTurnMessageInstructions:'')
           +(schedules?' conversation_schedules manages the timers of this private chat for its owner, for example a daily check that reports only when something is wrong.':'')
@@ -492,7 +493,7 @@ export class ManagementAgent {
           // #1123: explain a flow from the project's own Manager prompt; change it only after a before/after flowchart is confirmed.
           +'\n\n'+managerFlowInstructions
           +'\n\n'+projectToolsPriorityGuidance+(offeredProjectToolTools.length?' Use project_tools_list, project_tools_publish, and project_tools_rollback for authorized projects\' read-only tool volumes; never attempt to write to live project computers or store secrets/credentials in project tools.':'')
-          +(timer?' This message was sent by one of the user\'s timers, not by the user: the request is the timer\'s task. Stay silent only if the task allows it when there is nothing to report, and there is nothing.'+staySilentInstructions:'')
+          +(timer?' This message was sent by one of the user\'s timers, not by the user: the request is the timer\'s task. There is no progress-message channel in a timer turn: finish all tool queries, data collection and verification first, then deliver one complete, self-contained final result in your final reply (plain Markdown or a single staged set_feishu_card). Never output opening announcements, status preambles or split updates such as announcing that you are about to start or fetch data. Stay silent only if the task allows it when there is nothing to report, and there is nothing.'+staySilentInstructions:'')
           +(media?'\nThis Feishu message may contain real attachments: call list_message_resources, then read_message_resource or view_message_image to inspect them. If an image is unsupported in format or rejected for size/resolution/context limits, use import_message_resource and your assistant computer (Python Pillow or ImageMagick) to resize, compress, crop or convert it, then call view_workspace_image to inspect the processed image. Other binary inputs also need import_message_resource and computer tools. Use attach_message_resource, attach_workspace_file or create_reply_file to send actual attachments with your final answer. Never invent paths or resource IDs or claim unsupported or omitted inputs were inspected; selecting an attachment is not delivery.':'')
           +(cardTurn?'\n'+feishuCardInstructions:'')
           +(feedbackEnabled?'\n\n'+feedbackGuidance:'')

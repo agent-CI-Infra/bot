@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { channelFixture, boundGroup, privateChat, repositoryAssistant, scriptedModel, envelope, inGroup, post, until, finished } from '../../../fixtures/channel-fixture.mjs';
+import { assistantManager } from '../../../fixtures/assistant-computer-fixture.mjs';
 import { settled } from '../../../fixtures/management-fixture.mjs';
 import { knowledgeActor } from '../../../fixtures/knowledge-fixture.mjs';
 import { resolvePrincipalActor } from '../../../../dist/identity/authorization.js';
 import { bindingScope } from '../../../../dist/channels/service-bindings.js';
 import { ChannelConsole } from '../../../../dist/channels/console.js';
+import { TaskEngine } from '../../../../dist/agent/engine.js';
 
 // Progress messages of service roles (#435) and their turns without a step limit. Feishu and the model are local protocol fixtures.
 const reply = (res, message) => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message }], usage: { prompt_tokens: 12, completion_tokens: 4 } })); };
@@ -45,7 +47,8 @@ test('a group assistant sends progress messages while it works, before its final
     assert.match(text, /before work that will take a while.*saying what you are about to do/i);
     assert.match(text, /key finding, new evidence or an intermediate conclusion/);
     assert.match(text, /"still working", "仍在执行" or "请稍候"/);
-    assert.match(text, /a group message without an @ to you, or a timer with nothing to report\), send nothing until you know you will answer/);
+    assert.match(text, /a group message without an @ to you\), send nothing until you know you will answer/);
+    assert.doesNotMatch(text, /timer with nothing to report/);
   }
   assert.match(first.tools.find(tool => tool.function.name === 'send_message').function.description, /At most 10 per turn.*attachments are sent only with your final answer/);
   release();
@@ -173,22 +176,110 @@ test('in a console conversation progress messages only enter the event stream, t
   assert.match(f.requests[0].messages[0].content, /At most 10 per turn/);
 });
 
-test('group and private timers send their progress messages to the chat under the timer\'s name before the result (#435)', async t => {
-  const f = await group(t), { chat } = f, own = await privateChat(f);
+test('group and private timers omit and refuse send_message, instruct single complete output, and deliver only one final result (#1367)', async t => {
+  const f = await group(t), { h, chat } = f, own = await privateChat(f);
   const timer = async target => (await f.admin('/api/channels/chats/' + target.id + '/schedules', 'POST', { name: '巡检', prompt: '检查失败的任务。', timezone: 'Asia/Shanghai', cron: '0 9 * * *' })).value.schedule;
-  const run = async (target, label) => {
-    scriptedModel(f, [progress(label + '：开始巡检'), label + '：巡检完成']);
+  const run = async (target, label, kind) => {
+    const bodies = [];
+    f.modelState.respond = async (body, res) => {
+      bodies.push(body);
+      const seen = observations(body);
+      if (!seen.length) return call(res, 'send_message', { text: label + '：开始巡检' });
+      return say(res, label + '：巡检完成，拒绝结果：' + seen[0].error);
+    };
+    const schedule = await timer(target);
+    const beforeOutbox = h.store.get('SELECT count(*) n FROM channel_outbox').n;
+    const beforeSent = f.wire.sent.filter(s => s.receive_id === target.chat_id).length;
+    assert.equal((await f.admin('/api/channels/schedules/' + schedule.id + '/run', 'POST', {})).status, 201);
+    const done = await until(() => h.store.get('SELECT * FROM channel_schedule_runs WHERE schedule_id=?', schedule.id), r => r && r.state !== 'running');
+    assert.equal(done.state, 'completed', done.error);
+    await until(() => f.wire.sent.filter(s => s.receive_id === target.chat_id).length > beforeSent);
+    await f.service.tick();
+    const first = bodies[0], offered = first.tools.map(tool => tool.function.name), system = first.messages[0].content;
+    const request = JSON.parse(first.messages[1].content).request;
+    assert.ok(!offered.includes('send_message'), `${kind} timer must not offer send_message`);
+    assert.ok(offered.includes('stay_silent'), `${kind} timer keeps stay_silent`);
+    assert.ok(offered.includes('set_feishu_card'), `${kind} timer keeps set_feishu_card`);
+    // Credential-redaction safety rule stays, while send_message progress instructions are removed and replaced by single-output guidance.
+    assert.match(system, /Do not paste environment variables or real credentials into public comments, issues, pull requests or messages\./);
+    assert.doesNotMatch(system, /Keep people informed with send_message|At most 10 per turn/);
+    assert.match(system, /no progress-message channel in a timer turn/i);
+    assert.match(system, /one complete, self-contained final result/i);
+    assert.match(system, /Never output opening announcements/i);
+    assert.match(request, /先完成全部数据收集与核对，再一次性给出完整最终结果/);
+    assert.match(request, /不要输出“开始整理 \/ 先拉取数据 \/ 正在执行”等过程播报，也不要分多条发送/);
+    // Calling send_message anyway returns tool_not_allowed and writes no stage message or extra outbox row.
+    assert.deepEqual(observations(bodies[1]), [{ error: 'tool_not_allowed' }]);
+    const newCards = f.wire.sent.filter(s => s.receive_id === target.chat_id).slice(beforeSent).map(s => JSON.stringify(s.content));
+    assert.equal(newCards.length, 1, `${kind} timer must deliver exactly one final message`);
+    assert.match(newCards[0], /定时任务「巡检」/);
+    assert.match(newCards[0], new RegExp(label + '：巡检完成，拒绝结果：tool_not_allowed'));
+    assert.doesNotMatch(newCards[0], /开始巡检/);
+    assert.equal(h.store.get('SELECT count(*) n FROM channel_outbox').n, beforeOutbox + 1);
+    assert.equal(h.store.get("SELECT count(*) n FROM channel_outbox WHERE idempotency_key LIKE '%:stage:%'").n, 0);
+    if (kind === 'group') {
+      assert.equal(h.store.get('SELECT count(*) n FROM channel_service_turn_messages WHERE turn_id=?', done.turn_id).n, 0);
+    } else {
+      assert.equal(h.store.get("SELECT count(*) n FROM management_events WHERE message_id=? AND type='message'", done.message_id).n, 0);
+      // Defensive delivery-layer guard: management.stageMessage never queues Feishu messages for schedule: turns.
+      const actor = resolvePrincipalActor(h.store, f.principal, null);
+      assert.equal(f.service.management.stageMessage(actor, 'conv', { source_message: 'schedule:' + done.id }, done.message_id, '不应发出的中途消息', 1), undefined);
+      assert.equal(h.store.get("SELECT count(*) n FROM channel_outbox WHERE idempotency_key LIKE '%:stage:%'").n, 0);
+    }
+  };
+  await run(chat, '群', 'group');
+  await run(own, '私聊', 'personal');
+});
+
+test('group and private timers queued behind a busy assistant computer send no queuing notice to Feishu (#1367)', async t => {
+  const assistant = await assistantManager(t);
+  let queued = 0;
+  const origCall = assistant.manager.call.bind(assistant.manager);
+  const manager = {
+    call: async (method, path, input, timeout) => {
+      if (!path.startsWith('/v1/assistant-computers')) return method === 'GET' ? { generation: 1, state: 'ready' } : { ok: true, result: {} };
+      const res = await origCall(method, path, input, timeout);
+      if (method === 'PUT' && path !== '/v1/assistant-computers/settings' && res?.state === 'queued') queued++;
+      return res;
+    },
+  };
+  const f = await channelFixture(t, store => ({ engine: new TaskEngine(store, manager), assistantHomes: assistant.homes }));
+  await repositoryAssistant(f);
+  const chat = await boundGroup(f), own = await privateChat(f);
+  const service = f.service.management.service.assistants;
+  await until(() => service.reconciled);
+  await service.saveSettings({ max_containers: 1 });
+  const timer = async target => (await f.admin('/api/channels/chats/' + target.id + '/schedules', 'POST', { name: '电脑巡检', prompt: '在电脑上检查环境。', timezone: 'Asia/Shanghai', cron: '0 9 * * *' })).value.schedule;
+  const runQueued = async (target, label, kind) => {
+    const holder = service.turn({
+      owner: { kind: 'person', subject: 'busy-holder-' + kind, tenant: '' }, turn: 'holder-' + kind,
+      fence: () => 'e'.repeat(64), check: () => {}, facts: () => ({ repositories: ['101'] }), commands: () => true, eligible: () => {},
+    });
+    t.after(async () => { await holder.close().catch(() => {}); });
+    await holder.execute('run_command', { command: 'true' });
+    const queuedBefore = queued;
+    const sentBefore = f.wire.sent.filter(s => s.receive_id === target.chat_id).length;
+    scriptedModel(f, [['run_command', { command: 'printf ok-' + kind }], done => `${label}：执行完成（${done[0].output}）`]);
     const schedule = await timer(target);
     assert.equal((await f.admin('/api/channels/schedules/' + schedule.id + '/run', 'POST', {})).status, 201);
-    const done = await until(() => f.h.store.get('SELECT * FROM channel_schedule_runs WHERE schedule_id=?', schedule.id), r => r && r.state !== 'running');
+    await until(() => queued > queuedBefore, Boolean, 15000);
+    await holder.close();
+    const done = await until(() => f.h.store.get('SELECT * FROM channel_schedule_runs WHERE schedule_id=?', schedule.id), r => r && r.state !== 'running', 15000);
     assert.equal(done.state, 'completed', done.error);
-    await until(() => position(f, label + '：巡检完成') >= 0);
-    const cards = f.wire.sent.filter(s => s.receive_id === target.chat_id).map(s => JSON.stringify(s.content));
-    const start = cards.findIndex(c => c.includes('定时任务「巡检」') && c.includes(label + '：开始巡检'));
-    assert.ok(start >= 0 && start < cards.findIndex(c => c.includes(label + '：巡检完成')));
+    await until(() => f.wire.sent.filter(s => s.receive_id === target.chat_id).length > sentBefore, Boolean, 15000);
+    await f.service.tick();
+    const delivered = f.wire.sent.filter(s => s.receive_id === target.chat_id).slice(sentBefore).map(s => JSON.stringify(s.content));
+    assert.equal(delivered.length, 1, `${kind} timer must send only the single final message even after computer queuing`);
+    assert.match(delivered[0], new RegExp(`${label}：执行完成（ok-${kind}）`));
+    assert.doesNotMatch(delivered[0], /助手电脑繁忙|正在排队|正在被你的另一个会话使用/);
+    if (kind === 'group') {
+      assert.equal(f.h.store.get('SELECT count(*) n FROM channel_service_turn_messages WHERE turn_id=?', done.turn_id).n, 0);
+    } else {
+      assert.equal(f.h.store.get("SELECT count(*) n FROM management_events WHERE message_id=? AND type='message'", done.message_id).n, 0);
+    }
   };
-  await run(chat, '群');
-  await run(own, '私聊');
+  await runQueued(chat, '群', 'group');
+  await runQueued(own, '私聊', 'personal');
 });
 
 test('assistant turns and own tasks have no step limit: a long group answer, a long console answer and a long own task complete (#435)', async t => {

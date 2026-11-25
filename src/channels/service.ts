@@ -180,11 +180,12 @@ export class ChannelService {
       return new MediaTurn(this.media,chat.id,event.message_id,()=>{guard();this.source(event);this.employees.guardPersonal(chat.id,actor.principal_id,source.id);},computers,
         project=>{this.management.service.scope(actor,project);},undefined,fence,imageInput);
     };
-    // A progress message of the management assistant (#435) goes to the private chat or timer that started the turn, under
-    // the same protection as its final answer; a console conversation only shows it in its event stream.
+    // A progress message of the management assistant (#435) goes to the private chat that started an interactive turn, under
+    // the same protection as its final answer; console conversations only show it in their event stream, and timer turns
+    // deliver only their final result without mid-turn progress messages (#1367).
     management.stageMessage=(actor,conversation,input,message,text,sequence)=>{
       const source=String(input.source_message);
-      if(source.startsWith('schedule:'))return this.schedules.personalStage(source.slice(9),actor,message,text,sequence);
+      if(source.startsWith('schedule:'))return;
       const row=store.get('SELECT * FROM channel_inbox WHERE id=? AND conversation_id=?',source.replace(/^feishu:/,''),conversation);
       if(!row)return;
       const e=store.secrets.open(row.payload,'channel-event:'+row.id) as unknown as ChannelEvent;
