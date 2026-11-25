@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
+import { clickAccountMenuEntry, openAccountMenu } from '../helpers/console-navigation.mjs';
 
 async function login(page, h, username, password, hash = '#/projects') {
   await page.goto(h.admin + '/' + hash);
@@ -9,7 +10,6 @@ async function login(page, h, username, password, hash = '#/projects') {
   await expect(page.locator('#workspace')).toBeVisible();
   await expect(page.locator('#rows .row')).toHaveCount(1);
 }
-const accountLinks = page => page.locator('#console-account-menu .console-link:visible');
 
 // #550, #1369: the platform pages (系统初始化, 安装档案, 机器人账号) live under 全局设置, the one entry only a super
 // administrator has: the desktop sidebar pins it and the phone's account menu carries it. 存储 is a personal page too.
@@ -40,9 +40,7 @@ test('#550 #1369 全局设置是超管唯一多出的入口：桌面侧栏与手
     // On the phone the account menu carries both settings entries.
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(h.admin + '/#/projects');
-    await page.locator('#console-account').click();
-    await expect(accountLinks(page)).toHaveText(['个人设置', '全局设置']);
-    await page.locator('#console-account-menu').getByRole('link', { name: '全局设置', exact: true }).click();
+    await clickAccountMenuEntry(page, '全局设置', ['个人设置', '全局设置']);
     await expect(page).toHaveURL(/#\/settings\/work-computers$/);
     const picker = page.getByLabel('当前页面', { exact: true });
     await expect(picker).toBeVisible();
@@ -67,8 +65,7 @@ test('#550 #1369 全局设置是超管唯一多出的入口：桌面侧栏与手
 
       await member.setViewportSize({ width: 390, height: 844 });
       await member.goto(h.admin + '/#/projects');
-      await member.locator('#console-account').click();
-      await expect(accountLinks(member)).toHaveText(['个人设置']);
+      await openAccountMenu(member, ['个人设置']);
       await expect(member.locator('#console-account-settings')).toBeHidden();
       await expect(member.evaluate(() => document.documentElement.scrollWidth)).resolves.toBeLessThanOrEqual(390);
 
