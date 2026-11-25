@@ -66,6 +66,6 @@ src/
 ├── review/ & github/ & actions/ & releases/  # 检视与交付验证、github_write 与 Publisher、Actions 扫描、发版本
 ├── management/ & service-roles/ & channels/  # ManagementService、管理/群聊助手、飞书适配与本地消息账本
 ├── schedules/                   # 持久化 Schedule/Occurrence 租约与事件通知 Outbox
-├── storage/ & memory/ & projects/            # SQLite/轨迹/Blob、项目知识、项目电脑网关与 Worktree
+├── storage/ & memory/ & projects/ & sync/      # SQLite/轨迹/Blob、项目知识、项目电脑网关与 Worktree、统一 FileSyncEngine
 └── external/ & public-board/    # 外部执行端凭据 Broker、公开看板增量采集与托管
 ```

@@ -71,3 +71,34 @@ flowchart LR
   - 默认全局开启（`settings.memory_consolidation.enabled = true`，窗口 `02:00`–`05:00`，支持跨零点窗口与逻辑日归属），**不设增量活动门控**；按逻辑日对全部已启用范围（`enabled_override ?? global.enabled`）以确定性哈希错峰排队，受全局 `max_concurrency`（1–8）约束，单逻辑日单范围经 `UNIQUE(scope_kind, scope_id, logical_day) WHERE trigger='nightly'` 保证至多运行一次（失败不刷屏重跑，重启时 `interruptConsolidationRuns` 收口遗留 `running` 记录）。
   - 夜间触发遇实时工作占用（项目并发满或删除中、群存在运行中回合、个人存在待处理/运行中管理消息）自动让位延后；运行中 `guard()` 持续核对范围启用状态、授权/代次/模型权限与手动停止信号。
   - 模型优先级固定为「范围专用 → 全局默认共享模型 → 主体自有模型」，不可用或权限不覆盖时记录 `skipped`（`model_unavailable`）绝不静默切换；项目删除、群停用/连接器删除与模型删除分别级联停止在途整理并清理对应状态、历史记录或模型引用。
+
+## 6. 统一可复用文件同步与冲突处理引擎（`src/sync/`、`runner/sync-client.mjs`）
+
+为支撑分布式 Linux Docker 节点与非阻塞助手预热，同时保留容器内目录直接供 `rg`/`jq`/`sed`/`python` 本地批处理的体验，平台建设**唯一一套可复用**的文件同步与冲突处理引擎（`FileSyncEngine`），不依赖 NFS/FUSE，6 类宿主机目录仅通过声明式 `SyncNamespacePolicy` 与轻量 `SyncNamespaceAdapter` 接入，严禁各自重复实现同步或合并逻辑：
+
+- **6 类平台目录的声明式策略映射（`src/sync/namespaces.ts`、`src/sync/adapters.ts`）**：
+
+| 命名空间 | 容器挂载路径 | 模式 | 不可变 | 冲突策略 | 脱敏 / 历史 | 底层权威源与同步特性 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `tool-results` | `/results` | `ro` | 是 | `reject` | 否 / 否 | 绑定 `ToolResultFiles`（`/tool-results/<owner>`），支持 `?paths=...` 单文件懒拉取 |
+| `project-tools` | `/opt/project-tools` | `ro` | 否（版本化） | `reject` | 否 / 否 | 直接复用 `project_tool_revisions.manifest` 与 `sha256` 增量同步 `rev-<N>`，支持受控内部相对软链 |
+| `agent-tools` | `/opt/agent-tools` | `ro` | 否（版本化） | `reject` | 否 / 否 | 按 `linux/<arch>`（可选 `<product>@<version>`）增量缓存对应 CLI 与 `node`/`uv` 运行时，保留可执行位与受控内部相对软链 |
+| `skill-store` | `/opt/bot-skills` | `ro` | 是（内容寻址） | `reject` | 否 / 否 | 按 `projects/<repoId>`、`service` 或精确 `sets/<hash>` 增量同步并硬链接复用 |
+| `project-notes` | `../notes/` | `rw` | 否 | `merge_or_conflict_copy` | 是 / 是 | 共享 `VersionedDirectoryAdapter`（或单机 `ManagerProjectNotesAdapter` 桥接 `/v1/projects/:id/file-tree`），沿用 `.write-history` |
+| `assistant-homes` | `~/memory/` | `rw` | 否 | `merge_or_conflict_copy` | 是 / 是 | 与 `project-notes` 复用同一 `VersionedDirectoryAdapter` + `.write-history`，仅同步 `memory/` 子树（`/workspace` 与 `/tmp` 保持临时卷不同步） |
+
+- **统一协议、CAS 对象缓存与 `BlobStore` 抽象（`src/sync/http.ts`、`src/sync/blob-store.ts`、`runner/sync-client.mjs`）**：
+  - 控制面在单一业务端口提供受控 HTTP 端点：`GET /sync/:namespace/:scope/manifest?since_rev=...&paths=...`、`POST /sync/:namespace/:scope/blobs/fetch`、`GET /sync/:namespace/:scope/blobs/:sha256`、`POST /sync/:namespace/:scope/blobs/put`、`POST /sync/:namespace/:scope/commit`、`GET /sync/:namespace/:scope/conflicts` 与 `GET /sync/:namespace/:scope/history?path=...`。
+  - SQLite `sync_scope_revisions` 与 `sync_scope_entries` 为全部 6 类命名空间维护统一的单调范围修订号与单文件增量变更检查点，兼容控制台或宿主机带外修改。
+  - 控制面抽象 `BlobStore` 接口（默认 `LocalDiskBlobStore` 分片落盘 `blobs/sha256/<aa>/<bb>/<hash>`，原子写入 + 读时哈希校验，并预留 `presignGet`/`presignPut` 供后续接入 S3/MinIO 预签名直传）。
+  - 客户端 `runner/sync-client.mjs` 维护按 `sha256` 索引的本地 `CasCache` 缓存池（跨命名空间/作用域共享，未变文件与命中缓存文件 **0 字节传输**）：`ro` 非可执行文件优先硬链接物化（跨文件系统自动降级拷贝），`rw` 与可执行文件始终原子拷贝物化以防就地编辑污染 CAS；可写目录原子维护 `.sync-base.json`（记录每文件 `revision` 与 `sha256` 基线，且在 `AssistantHomes.list` 与 `runner/assistant-files.mjs` 中与 `.write-*` 一并隐藏）。
+- **单文件粒度三层冲突处理（仅 `rw` 命名空间，`src/sync/merge3.ts`、`src/sync/engine.ts`）**：
+  - 提交按单文件独立结算，不同文件并发写互不阻塞；`base_revision === current_revision`（或向已软删路径以 `base_revision === 0` 新建）直接提交。
+  - **第 1 层（自动三方合并）**：同文件基线落后时，控制面从 CAS/历史版本取 `base` + `current` + `local` 执行 Myers 差异 + 纯文本三方行级合并；不同段落/行修改与收敛修改自动无冲突合入新版本。
+  - **第 2 层（`interactive` 真冲突）**：同行/重叠/同点插入真冲突、二进制冲突或删改冲突返回 HTTP `409 sync_conflict` 及 `base / current / local` 原文、冲突块与 diff3 标记，保留本地文件与基线交由在线 Agent 语义合并重提（`SyncClient.acceptServerBase`）。
+  - **第 3 层（`background` 真冲突与夜间整理让位）**：主文件 `current` 原样保留不动，将未自动合并的本地版本写入旁路冲突副本 `<stem>.conflict-<actorTag>-<ts><ext>`（自动防同名碰撞并受 255 字节段长约束）并同步记入 `.write-history` 与 SQLite `sync_conflicts` 表，零静默覆盖、零丢数据；当请求启用 `skip_if_human_edited`（夜间记忆整理）且历史修订显示 `base_revision` 之后存在人工修改（`user:*` / `console`）时，安全跳过并返回 `skipped_human_edited`。
+- **安全边界与脱敏拦截**：
+  - 所有 `/sync/*` 端点要求受控作用域 Bearer 令牌（`bsync_<id>.<secret>`，`SyncTokenService` 常时哈希比对并绑定 `(namespace, scope, mode)` 授权与有效期，且已纳入 `runner/credential-redaction.mjs` 自识别脱敏规则）；`actor` 身份严格锚定认证主体不可伪造。
+  - `blobs/fetch` 与 `GET /blobs/:sha256` 强制校验目标 `sha256` 属于当前授权 `scope`，阻断跨作用域 CAS 哈希探测；`ro` 命名空间拒绝一切写操作（`403 sync_namespace_readonly`）。
+  - 对 `redact: true` 命名空间，文本内容在进入 `BlobStore` 落盘前即经 `configuredRedactor` + `publicText` 脱敏并将脱敏结果回传客户端同步覆盖本地副本；含已登记密钥或 PEM 私钥块的二进制载荷与敏感路径（`.env`、`*.pem`、`*.key`、`id_rsa`、`.ssh/`、`.aws/` 等）fail-closed 拒绝（`400 sync_secret_detected` / `sync_sensitive_path`）。
+  - 服务端与客户端双重校验路径规范化（拒绝 `..`、绝对路径、反斜杠、控制字符、`.git`、`.write-*`、`.sync-base.json*`）与 `O_DIRECTORY | O_NOFOLLOW` / `lstat` 符号链接防护，禁止任何符号链接逃逸或借 `push` 外泄宿主机文件。
