@@ -189,8 +189,13 @@ test('model failures name the model, its host and the provider explanation witho
   let reply;const model=createServer(async(req,res)=>{for await(const _ of req);res.writeHead(reply.status,{'Content-Type':'application/json'});res.end(JSON.stringify(reply.body));});
   model.listen(0,'127.0.0.1');await once(model,'listening');t.after(()=>new Promise(resolve=>model.close(resolve)));
   const host='127.0.0.1:'+model.address().port;
-  const h=await emptyRepositoryFixture(t,{modelUrl:'http://'+host+'/v1',execute(request){
-    if(request.type==='workspace_agent_poll')return {ok:true,result:{state:'running',request:{id:'model-1',body:{messages:[{role:'user',content:'Review this.'}]}}}};
+  let gateway=null;
+  const h=await emptyRepositoryFixture(t,{modelUrl:'http://'+host+'/v1',async execute(request){
+    if(request.type==='workspace_agent_gateway'){gateway=JSON.parse(Buffer.from(request.base64,'base64').toString('utf8'));return {ok:true,result:{written:true}};}
+    if(request.type==='workspace_agent_poll'){
+      const res=await fetch(`${gateway.model_gateway_url}/v1/chat/completions`,{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+gateway.run_token},body:JSON.stringify({model:'fixture-model',messages:[{role:'user',content:'Review this.'}]})});
+      return {ok:true,result:{state:'failed',error:'model_request_failed',detail:`HTTP ${res.status}`}};
+    }
   }});h.setBranch('ready');
   reply={status:400,body:{error:{message:"This model's maximum context length is 8192 tokens; key fixture-key was rejected"}}};
   let task=await h.run();assert.deepEqual([task.status,task.error_code],['failed','model_http_400']);

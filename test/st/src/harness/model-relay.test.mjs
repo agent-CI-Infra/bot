@@ -16,7 +16,7 @@ import { ModelCatalog, saveModelMetadata } from '../../../../dist/models/catalog
 import { savePricing } from '../../../../dist/metrics/accounting.js';
 import { allocateLease, issueRunToken, roleRunStorage, verifyRunToken } from '../../../../dist/roles/role-run.js';
 import { beginRun } from '../../../../dist/tasks/trace.js';
-import { createModelGatewayHub, readProviderCredentialFile } from '../../../../dist/harness/model-gateway.js';
+import { createModelGatewayHub, DEFAULT_MODEL_GATEWAY_SOCKET, readProviderCredentialFile, resolveControlPlaneModelGatewaySocket } from '../../../../dist/harness/model-gateway.js';
 const { startModelBridge } = await import('../../../../runner/model-relay.mjs');
 
 const hex48 = () => randomBytes(24).toString('hex');
@@ -846,4 +846,13 @@ test('client closing SSE stream right after terminal response.completed still re
     await new Promise(resolve => setTimeout(resolve, 20));
   }
   assert.deepEqual([stored?.state, stored?.http_status, stored?.input_tokens, stored?.output_tokens], ['received', 200, 42, 7]);
+});
+
+test('resolveControlPlaneModelGatewaySocket defaults to /run/model-gateway/gateway.sock when mounted, honors explicit env override/disable, and skips when unmounted', () => {
+  assert.equal(resolveControlPlaneModelGatewaySocket('/custom/gw.sock', () => false), '/custom/gw.sock');
+  assert.equal(resolveControlPlaneModelGatewaySocket('  /custom/gw.sock  ', () => false), '/custom/gw.sock');
+  assert.equal(resolveControlPlaneModelGatewaySocket('', () => true), null);
+  assert.equal(resolveControlPlaneModelGatewaySocket('   ', () => true), null);
+  assert.equal(resolveControlPlaneModelGatewaySocket(undefined, dir => dir === '/run/model-gateway'), DEFAULT_MODEL_GATEWAY_SOCKET);
+  assert.equal(resolveControlPlaneModelGatewaySocket(undefined, () => false), null);
 });

@@ -964,3 +964,58 @@ test('#1358 role save and resolve enforce backend model protocol compatibility w
   assert.deepEqual(view.backends.find(b => b.id === 'claude_code').supported_model_apis, ['anthropic-messages']);
   assert.deepEqual(view.backends.find(b => b.id === 'pi').supported_model_apis, ['openai-chat-completions', 'openai-responses', 'anthropic-messages']);
 });
+
+test('#1358 legacy stored cross-protocol roles surface harness_model_api_unsupported on resolveRole and preview API', async t => {
+  const f = await fixture(t, () => call('finish', { summary: 'ok' }));
+  f.s.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES('m-anth','r','http://127.0.0.1:1/v1/messages','claude-sonnet-4-5',?,'now')", f.s.secrets.seal({ value: 'k' }, 'model:m-anth'));
+
+  // Capture a valid profile_hash for chat-completions model `m`, plus valid Codex/Claude Code harness refs.
+  const base = f.put({
+    roles: [
+      { role_id: 'test', harness_ref: { id: 'pi' }, model_profile_ref: { model_id: 'm' } },
+      { role_id: 'dev', harness_ref: { id: 'codex' }, model_profile_ref: { model_id: 'm_codex' } },
+      { role_id: 'reviewer', harness_ref: { id: 'claude_code' }, model_profile_ref: { model_id: 'm-anth' } },
+      { role_id: 'ux', harness_ref: { id: 'codex', model_source: 'local_config' }, model_profile_ref: null },
+    ],
+  });
+  const chatProfileRef = base.roles.find(r => r.role_id === 'test').model_profile_ref;
+
+  // Simulate a legacy saved configuration persisted before #1358:
+  // - dev (codex) explicitly bound to chat-completions model `m`
+  // - reviewer (claude_code) inheriting project default `m` (chat-completions)
+  // - ux (codex local_config) stays completely orthogonal and previewable
+  const legacySaved = {
+    ...base,
+    roles: base.roles.map(r => {
+      if (r.role_id === 'dev') return { ...r, model_profile_ref: chatProfileRef };
+      if (r.role_id === 'reviewer') return { ...r, model_profile_ref: null };
+      return r;
+    }),
+  };
+  f.s.run("UPDATE settings SET value=? WHERE key='roles:r'", JSON.stringify(legacySaved));
+  f.s.run("UPDATE role_config_revisions SET config=? WHERE repository_id='r' AND revision=?", JSON.stringify(legacySaved), base.revision);
+
+  // Direct resolveRole (preview mode, persist: false) rejects both incompatible roles with harness_model_api_unsupported.
+  assert.throws(
+    () => resolveRole(f.s, 'r', 'dev', 'task.request', { persist: false }),
+    err => err instanceof TaskError && err.code === 'harness_model_api_unsupported' && /openai-chat-completions/.test(err.detail),
+  );
+  assert.throws(
+    () => resolveRole(f.s, 'r', 'reviewer', 'task.request', { persist: false }),
+    err => err instanceof TaskError && err.code === 'harness_model_api_unsupported' && /openai-chat-completions/.test(err.detail),
+  );
+  const uxResolved = resolveRole(f.s, 'r', 'ux', 'task.request', { persist: false });
+  assert.equal(uxResolved.snapshot.model.source, 'local_config');
+
+  // Role configuration GET preview API surfaces harness_model_api_unsupported without breaking the rest of the preview.
+  const view = roleApi(f.s, admin, 'GET', rolesUrl, {});
+  const devPreview = view.preview.find(entry => entry.role === 'dev');
+  const reviewerPreview = view.preview.find(entry => entry.role === 'reviewer');
+  const uxPreview = view.preview.find(entry => entry.role === 'ux');
+  assert.equal(devPreview.error, 'harness_model_api_unsupported');
+  assert.match(devPreview.detail || '', /openai-chat-completions/);
+  assert.equal(reviewerPreview.error, 'harness_model_api_unsupported');
+  assert.match(reviewerPreview.detail || '', /openai-chat-completions/);
+  assert.equal(uxPreview.error, undefined);
+  assert.equal(uxPreview.model.source, 'local_config');
+});

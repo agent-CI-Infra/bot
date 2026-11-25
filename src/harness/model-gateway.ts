@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { chmodSync, mkdirSync, readFileSync, statSync, unlinkSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
 import { dirname } from 'node:path';
@@ -7,7 +7,7 @@ import { Readable } from 'node:stream';
 import { normalizeResponseFraming } from './response-framing.js';
 import type { Row, Store } from '../storage/database.js';
 import { traceSnapshot } from '../tasks/trace.js';
-import { TaskError, type Redactor } from '../agent/common.js';
+import { networkReason, TaskError, type Redactor } from '../agent/common.js';
 import type { AgentSpec } from '../agent/runtime.js';
 import { openModel, resolveModelWireUrl, type RuntimeModel } from '../agent/model.js';
 import { beginModelRequest, finishModelRequest, pricingFor, type Pricing } from '../metrics/accounting.js';
@@ -86,6 +86,8 @@ export interface ModelGatewaySessionOptions {
   onResponseComplete?: (summary: PassthroughResponseSummary, tap: PassthroughTap, isSubagent: boolean) => void;
   /** Optional hook when an upstream HTTP status should also raise a control-plane session fault (e.g. Pi 401/403). */
   onUpstreamHttpError?: (status: number, detail: string) => void;
+  /** Optional hook when an upstream request fails with a transport or timeout error before completing. */
+  onUpstreamTransportError?: (reason: string) => void;
   /** Optional callback for fatal control-plane errors raised inside a request handler. */
   onSessionFault?: (error: TaskError) => void;
   maxRequestBytes?: number;
@@ -327,6 +329,7 @@ function createRegisteredSession(options: ModelGatewaySessionOptions): Registere
     onTextDelta,
     onResponseComplete,
     onUpstreamHttpError,
+    onUpstreamTransportError,
     onSessionFault,
     maxRequestBytes = maxGatewayRequestBytes,
     maxOutputTokens: explicitMaxTokens,
@@ -1056,6 +1059,12 @@ function createRegisteredSession(options: ModelGatewaySessionOptions): Registere
             // Storage failure during error cleanup must not escape request teardown.
           }
         }
+        if (!clientClosed && !(err instanceof TaskError)) {
+          const transportReason = isTimeout
+            ? `连续 ${Math.round(timing.idleMs / 1000)} 秒没有响应`
+            : networkReason(err, timing.idleMs);
+          onUpstreamTransportError?.(transportReason);
+        }
         if (!clientClosed && !res.writableEnded && !res.destroyed) {
           const code = err instanceof TaskError ? err.code : isTimeout ? 'provider_timeout' : 'api_error';
           const detail = redactor.text(String(err?.message || code)).slice(0, 300);
@@ -1276,6 +1285,17 @@ export const defaultModelGateway = new ModelGatewayHub();
 
 export function createModelGatewayHub(): ModelGatewayHub {
   return new ModelGatewayHub();
+}
+
+export function resolveControlPlaneModelGatewaySocket(
+  envValue: string | undefined = process.env.BOT_MODEL_GATEWAY_SOCKET,
+  dirExists: (dir: string) => boolean = existsSync,
+): string | null {
+  if (envValue !== undefined) {
+    const trimmed = envValue.trim();
+    return trimmed || null;
+  }
+  return dirExists(dirname(DEFAULT_MODEL_GATEWAY_SOCKET)) ? DEFAULT_MODEL_GATEWAY_SOCKET : null;
 }
 
 export function startModelGatewayServer(

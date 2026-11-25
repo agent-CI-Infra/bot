@@ -30,7 +30,7 @@ import { agentToolsRetainCount } from './app/agent-tools.js';
 import { activeCliVersions } from './roles/role-run.js';
 import { ensureServiceSkillScope, resolveSkillStoreRoot } from './roles/skill-store.js';
 import { migrateLegacyProjectMemories } from './memory/migration.js';
-import { startModelGatewayServer } from './harness/model-gateway.js';
+import { DEFAULT_MODEL_GATEWAY_SOCKET, resolveControlPlaneModelGatewaySocket, startModelGatewayServer } from './harness/model-gateway.js';
 
 process.umask(0o077);
 commandTimeoutLimit();
@@ -169,9 +169,16 @@ const { server } = createControlPlane({ store, staticDirectory: resolve(import.m
   // BOT_TRUSTED_PROXIES: comma-separated proxy addresses/CIDRs allowed to name the password-login client.
   { trustedProxies: (process.env.BOT_TRUSTED_PROXIES || '').split(',').map(value => value.trim()).filter(Boolean) });
 // Dedicated UDS passthrough model gateway for project and assistant computers (mounted read-only at /run/model-gateway).
-const modelGatewaySocket = process.env.BOT_MODEL_GATEWAY_SOCKET;
+const modelGatewaySocket = resolveControlPlaneModelGatewaySocket();
 const modelGatewayServer = modelGatewaySocket ? await startModelGatewayServer(modelGatewaySocket) : null;
-if (modelGatewayServer) console.log(`model gateway listening on ${modelGatewayServer.socketPath}`);
+if (modelGatewayServer) {
+  console.log(`model gateway listening on ${modelGatewayServer.socketPath}`);
+} else {
+  const reason = process.env.BOT_MODEL_GATEWAY_SOCKET === undefined
+    ? `${dirname(DEFAULT_MODEL_GATEWAY_SOCKET)} is not mounted and BOT_MODEL_GATEWAY_SOCKET is unset`
+    : 'BOT_MODEL_GATEWAY_SOCKET is empty';
+  console.warn(`[model-gateway] UDS listener disabled (${reason}); container model requests require the UDS gateway`);
+}
 // The only business listener: console, API, OAuth, App callbacks, webhooks, external executors and public boards.
 server.on('error', () => { console.error('listener failed'); process.exit(1); });
 server.listen(8791, '0.0.0.0', () => {

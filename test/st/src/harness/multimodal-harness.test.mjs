@@ -207,7 +207,7 @@ test('Pi gateway serviceHarnessTurn delivers 4.5 MiB view_message_image, auto-re
   const manager = new LocalManager('101', root);
   const redactor = new Redactor();
 
-  // 4.5 MiB raw image (~6 MiB base64) padded onto valid PNG header: exercises >2 MiB tool reply, >2 MiB proxy, chunked workspace_agent_request, and >2 MiB pi.ts & gateway.ts!
+  // 4.5 MiB raw image (~6 MiB base64) padded onto valid PNG header: exercises >2 MiB tool reply, >2 MiB UDS/loopback passthrough gateway, and >2 MiB pi.ts & model-gateway.ts!
   const large45MiBPng = Buffer.concat([smallPng, Buffer.alloc(4.5 * 1024 * 1024, 0x55)]);
   const large45Base64 = large45MiBPng.toString('base64');
   // Real 2400x2400 PNG to verify Pi's default images.autoResize scales to <=2000x2000 while retaining original workspace path.

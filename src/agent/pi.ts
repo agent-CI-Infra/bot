@@ -221,6 +221,8 @@ export function piAdapter<T>(session: PiSession<T>) {
     const maxImageBytes = Number.isSafeInteger(config.image_request_limit) && config.image_request_limit > 0
       ? config.image_request_limit
       : imageRequestLimit;
+    const gatewayFailure: { current: { code: string; state: 'failed' | 'retry_wait' | 'waiting_configuration'; detail: string } | null } = { current: null };
+    const modelTarget = `模型 ${model.model}（${(() => { try { return new URL(model.url).host; } catch { return '地址无效'; } })()}）`;
     const modelGateway = await registerModelGatewaySession({
       store,
       task,
@@ -295,18 +297,33 @@ export function piAdapter<T>(session: PiSession<T>) {
       },
       onTextDelta: service ? async delta => { await service.text(delta); } : undefined,
       onResponseComplete: (_summary, tap, isSubagent) => {
+        gatewayFailure.current = null;
         const msg = tap.assistantMessage();
         session.inspect?.(msg);
         if (service && !isSubagent) service.responded(Boolean(msg.tool_calls?.length));
       },
       onUpstreamHttpError: (status, detail) => {
+        const said = detail ? '：' + redactor.text(detail).replace(/\s+/g, ' ').trim().slice(0, 320) : '';
         if (status === 401 || status === 403) {
           failSession(new TaskError(
             'model_authentication_failed',
             'waiting_configuration',
-            `模型 ${model.model} 拒绝认证或访问，HTTP ${status}${detail ? '：' + redactor.text(detail) : ''}。请检查模型 API Key 和权限。`,
+            `${modelTarget}拒绝认证或访问，HTTP ${status}${said}。请检查模型 API Key 和权限。`,
           ));
+          return;
         }
+        gatewayFailure.current = {
+          code: 'model_http_' + status,
+          state: status === 408 || status === 429 || status >= 500 ? 'retry_wait' : 'failed',
+          detail: `${modelTarget}返回 HTTP ${status}${said}`,
+        };
+      },
+      onUpstreamTransportError: reason => {
+        gatewayFailure.current = {
+          code: 'model_unavailable',
+          state: 'retry_wait',
+          detail: redactor.text(`${modelTarget}请求失败：${reason}。`),
+        };
       },
       onSessionFault: err => failSession(err),
     });
@@ -434,6 +451,7 @@ export function piAdapter<T>(session: PiSession<T>) {
         if (state.error === 'agent_compaction_failed') stop('agent_compaction_failed', 'retry_wait', `Pi 压缩会话失败${reason}。`);
         // A failed agent carries error as well, so it takes this path and is retried in a fresh workspace; its reason is kept.
         if (state.error === 'disk_full') stop('disk_full', 'waiting_environment', `项目电脑的工作卷空间不足，任务执行进程已停止${reason}。`);
+        if (state.state === 'failed' && gatewayFailure.current) stop(gatewayFailure.current.code, gatewayFailure.current.state, gatewayFailure.current.detail);
         if (state.error || ['interrupted', 'missing'].includes(state.state)) stop('execution_interrupted', 'waiting_environment', state.state === 'failed'
           ? `任务执行进程失败：${redactor.text(String(state.detail || '没有返回原因')).replace(/\s+/g, ' ').slice(0, 300)}。`
           : `轮询任务执行进程时中断，状态=${state.state || '未知'}，offset=${offset}。`);
