@@ -284,7 +284,7 @@ try {
   if (workswarm) await releaseWorkSwarmPorts(workSwarmInstance);
   if (closing) throw new AcpError('acp_connection_closed');
   const env = { ...environment(), ...swarm?.env };
-  if (icode) await configureICode(config, env);
+  const icodeConfigured = icode ? await configureICode(config, env) : null;
   if (closing) throw new AcpError('acp_connection_closed');
   agent = start(executable, launch.args.map(arg => expand(arg)), env, 'agent', true, swarm?.workspace);
   consumeProtocol(agent.stdout, frame => handle(frame, launch.answers));
@@ -319,7 +319,13 @@ try {
     sessionId = created?.sessionId;
     if (typeof sessionId !== 'string' || !sessionId || sessionId.length > 8192) throw new AcpError('acp_invalid_session');
   }
-  write({ type: 'ready', session_id: sessionId, recoveryMode });
+  write({
+    type: 'ready',
+    session_id: sessionId,
+    recoveryMode,
+    ...(icodeConfigured?.skill_paths?.length ? { skill_paths: icodeConfigured.skill_paths } : {}),
+    ...(icodeConfigured?.skills?.length ? { skills: icodeConfigured.skills } : {}),
+  });
 
   const input = createInterface({ input: process.stdin });
   input.once('close', () => void closeSession());

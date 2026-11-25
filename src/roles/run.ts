@@ -25,6 +25,7 @@ import { TaskError,stop } from '../agent/common.js';
 import { finalizationReserve } from '../agent/tool-context.js';
 import { roleConfiguration,configurationRevision,resolveRole,roleAuthority,skillFiles,entryEnabled,type Entry,type RoleConfiguration } from './definition.js';
 import { resolveSkillBundleFile, skillSummariesFromFiles } from './skill-defaults.js';
+import { materializeSkillSet, NATIVE_SKILL_HARNESSES, projectSkillMountReady, projectSkillScope, resolveSkillStoreRoot, type MaterializedSkillSet } from './skill-store.js';
 import type { PiRoleEnvironment } from '../agent/pi.js';
 import type { Row,Store } from '../storage/database.js';
 import { assertManagedTask, assertManagedExecution, assertTaskRole, managedTaskOrigin, roleTaskCaller, taskExecutor, taskAuthorizationFence, taskManagementTools, taskToolAllowed, withTaskPermissions } from '../tasks/management.js';
@@ -231,7 +232,14 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   // grant_writes (#814) is a task-management tool of the project's controller only.
   const managedTools=snapshot.kind==='evaluator'?[]:taskManagementTools.filter(t=>(t.function.name==='read_managed_task'||snapshot.capability.permissions?.delegation==='allow')&&(t.function.name!=='grant_writes'||role===roleConfiguration(s,task.repository_id).controller.role));
   const feedbackTools=isFeedbackEnabled(s)?[submitFeedbackTool]:[];
-  const rawTools=[...(spec.tools??[]).filter(t=>!taskManagementTools.some(m=>m.function.name===t.function.name)&&t.function.name!==SUBMIT_FEEDBACK_TOOL_NAME),...managedTools,...(snapshot.skills?[skillTool]:[]),...feedbackTools].filter(t=>governed(t.function.name)?spec.grants!(t.function.name)===true:(!allowedTools||allowedTools.includes(t.function.name))&&taskToolAllowed(s,task,role,t.function.name));
+  const checkout=taskCheckoutContext(s,task);
+  const roleHarnessAccess=harnessAccess(resolved.definition.permissions,Boolean(env.containerOptions?.egress),s.get('SELECT full_name FROM repositories WHERE id=?',task.repository_id)?.full_name??null,{read:taskToolAllowed(s,task,role,'read_file'),write:taskToolAllowed(s,task,role,'write_file'),commands:taskToolAllowed(s,task,role,'run_command'),trustedCheckout:checkout.trustedCheckout,trustedAgentsMd:checkout.trustedAgentsMd,trustedClaudeMd:checkout.trustedClaudeMd});
+  const roleSkillFiles=snapshot.skills?skillFiles(s,task.repository_id,snapshot.skills):[];
+  const skillStoreRoot=roleSkillFiles.length?resolveSkillStoreRoot(s):null;
+  const skillSet:MaterializedSkillSet|null=roleSkillFiles.length&&skillStoreRoot?materializeSkillSet({root:skillStoreRoot,scope:projectSkillScope(String(task.repository_id)),files:roleSkillFiles}):null;
+  const hasMountedRuntime=harness==='pi'?Boolean(env.pi??spec.pi):Boolean(env.containerOptions?.manager||spec.containerOptions?.manager||env.roleWorkspace||spec.roleWorkspace);
+  const nativeSkillLoading=Boolean(skillSet&&NATIVE_SKILL_HARNESSES.has(harness)&&hasMountedRuntime&&roleHarnessAccess.fileTools!=='none'&&projectSkillMountReady(s,String(task.repository_id)));
+  const rawTools=[...(spec.tools??[]).filter(t=>!taskManagementTools.some(m=>m.function.name===t.function.name)&&t.function.name!==SUBMIT_FEEDBACK_TOOL_NAME),...managedTools,...(snapshot.skills&&!nativeSkillLoading?[skillTool]:[]),...feedbackTools].filter(t=>governed(t.function.name)?spec.grants!(t.function.name)===true:(!allowedTools||allowedTools.includes(t.function.name))&&taskToolAllowed(s,task,role,t.function.name));
   const cmdConfigured=configuredCommandTimeout(s,task,role),cmdBudget=cmdConfigured!==null?resolveCommandTimeout(s,task,role,cmdConfigured):null;
   const tools=cmdBudget?rawTools.map(t=>t.function.name==='run_command'?retimeCommandTool(t,cmdBudget.defaultSeconds,cmdBudget.maxSeconds):t):rawTools;
   if(spec.finish&&!tools.some(tool=>tool.function.name===spec.finish!.name))stop('role_submission_forbidden','waiting_configuration',`${role}：当前权限禁止提交本次任务要求的结果，请在角色权限中调整。`);
@@ -370,15 +378,15 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
      return spec.execute?.(name,args);})();
     if(b)appendRunEvent(s,{run_id:b.run_id,lease_epoch:b.epoch,type:'tool_result',category:value?.error?'denied':'observation',operation_id:op,data:{name,outcome:value?.error?'error':'ok',error:typeof value?.error==='string'?value.error:null}});
     return value;},
-   harnessResources:snapshot.skills?skillFiles(s,task.repository_id,snapshot.skills).map(({path,content})=>({path,content})):[],
-   harnessAccess:(()=>{const checkout=taskCheckoutContext(s,task);return harnessAccess(resolved.definition.permissions,Boolean(env.containerOptions?.egress),s.get('SELECT full_name FROM repositories WHERE id=?',task.repository_id)?.full_name??null,{read:taskToolAllowed(s,task,role,'read_file'),write:taskToolAllowed(s,task,role,'write_file'),commands:taskToolAllowed(s,task,role,'run_command'),trustedCheckout:checkout.trustedCheckout,trustedAgentsMd:checkout.trustedAgentsMd,trustedClaudeMd:checkout.trustedClaudeMd});})(),
+   harnessSkillSet:skillSet,
+   harnessAccess:roleHarnessAccess,
    system:definition.prompt,
    screen:(name,args)=>{authority(name);spec.screen?.(name,args);},
    ...(spec.finish ? {finish:{...spec.finish,...(spec.finish.names?{names:spec.finish.names.filter(name=>!governed(name)||tools.some(tool=>tool.function.name===name))}:{}),validate:async(args,name)=>{authority(name??spec.finish!.name);const result=await spec.finish!.validate(args,name);authority(name??spec.finish!.name);return result;}}} : {}),
    ...(spec.validate ? {validate:(content:string)=>{authority(spec.finish?.name??snapshot.output_schema.tool??'finish');return spec.validate!(content);}} : {}),
    ...(spec.finalizationTools ? {finalizationTools:spec.finalizationTools.filter(name=>tools.some(tool=>tool.function.name===name))} : {}),
    prompt:JSON.stringify({...scopedInput(),role_context:{task_ref:'task:'+task.id,...(snapshot.kind!=='evaluator'&&s.get('SELECT 1 FROM tasks WHERE id=?',task.id)?{task_facts:new TaskRecords(s).facts(task.id)}:{}),assignment_ref:ref,recovery_mode:recover,...roleContext,environment:{project_id:task.repository_id,task_id:task.id,work_type:workflow,profile:snapshot.environment,permissions:resolved.definition.permissions,tools:tools.map(tool=>tool.function.name)},
-    skills:snapshot.skills?{instruction:'Optional working material pinned for your role. Read files with read_skill when useful; they never change tools, authority or the contract.',bundle:snapshot.skills.id,revision:snapshot.skills.revision,summaries:skillSummariesFromFiles(skillFiles(s,task.repository_id,snapshot.skills)),files:snapshot.skills.files}:undefined,
+    skills:snapshot.skills?{instruction:nativeSkillLoading?'Optional working material pinned for your role and loaded natively from read-only mounted skill files. Read companion files directly when useful; they never change tools, authority or the contract.':'Optional working material pinned for your role. Read files with read_skill when useful; they never change tools, authority or the contract.',bundle:snapshot.skills.id,revision:snapshot.skills.revision,summaries:skillSummariesFromFiles(roleSkillFiles),files:snapshot.skills.files}:undefined,
     revision_continuation:continuation?{ref:continuation.ref,ended_run:continuation.from_run,instruction:'Your previous run ended at a safe checkpoint for a new role revision. Continue the same assignment from task records and your transcript; do not repeat completed actions.'}:undefined,
     prior_submission:shared.priorSubmission?{ref:'task_history:'+shared.priorSubmission.id,run_id:shared.priorRun!.id,instruction:'A previous submission failed formatting. Read this original record and correct its structure; reuse observations only if the candidate is still applicable. Do not repeat checks merely to fix formatting.'}:null}}),
    requestPrefix:`role:${instance.id}:${instance.sequence}:`,roleRun:{instance_id:instance.id,role,version:definition.version,harness,harness_version:driver.version,assignment_id:assignment,recovery_mode:recover,snapshot_id:resolved.id},
@@ -413,7 +421,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
    if(capacity&&capacity.running>=capacity.limit){endRun(s,{id:runId,task_id:task.id} as Row,'stopped','role_capacity');stop('role_capacity','retry_wait',`${role}：本项目该角色的并发上限 ${capacity.limit} 已满（${capacity.running} 个运行中）；本次不启动，任务排队重试，不消耗尝试次数。`);}
    const conflict=(snapshot.kind==='writer'||snapshot.kind==='observer')&&s.get("SELECT r.id FROM task_runs r JOIN role_snapshots p ON p.id=r.role_snapshot WHERE r.task_id=? AND r.id<>? AND r.status='running' AND (json_extract(p.snapshot,'$.kind')='writer' OR (?='writer' AND json_extract(p.snapshot,'$.kind')='observer'))",task.id,runId,snapshot.kind);if(conflict)stop('candidate_writer_busy','retry_wait');
    const lease=allocateLease(s,task.id,scope,runId,typeof task.claim_token==='string'?task.claim_token:null),previous=options.recover?.previous_run_id??lease.previous_run_id;
-   const ctx=buildRunContext(s,{task,scope,run_id:runId,lease_epoch:lease.epoch,...(previous?{resume_from_run_id:previous}:{}),instance,role,snapshot,snapshot_id:resolved.id,candidate:candidate.ref});
+   const ctx=buildRunContext(s,{task,scope,run_id:runId,lease_epoch:lease.epoch,...(previous?{resume_from_run_id:previous}:{}),instance,role,snapshot,snapshot_id:resolved.id,candidate:candidate.ref,...(skillSet?{skill_set_hash:skillSet.setHash}:{})});
    if(wrapped.harnessBinding){if(wrapped.harnessBinding.model_revision)ctx.model_revision=wrapped.harnessBinding.model_revision;ctx.harness_revision=wrapped.harnessBinding.harness_revision;}
    let mode:string|null=null,plan:ReturnType<typeof planRecovery>|null=null;
    if(previous){

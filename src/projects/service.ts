@@ -12,6 +12,7 @@ import { withTaskMetrics } from '../metrics/accounting.js';
 import { repositoryConcurrency } from '../app/settings.js';
 import { consoleComputer, ownComputer, rememberConsoleComputer, saveConsoleComputer, syncConsoleComputer } from '../rules/service.js';
 import { activeProjectToolRevision } from './tools.js';
+import { ensureProjectSkillScope, resolveSkillStoreRoot } from '../roles/skill-store.js';
 import { MAX_CLI_CONFIG_BYTES } from '../../runner/cli-config.mjs';
 
 // Resource and network policy fields remain super-administrator-only; project administrators may configure software overlays.
@@ -176,6 +177,11 @@ export class ProjectService {
   }
   private async reconcileProject(repo: Row): Promise<void> {
     this.store.trajectories.results.directory(projectResultOwner(repo.id));
+    const skillRoot = resolveSkillStoreRoot(this.store);
+    if (skillRoot) {
+      try { ensureProjectSkillScope(skillRoot, String(repo.id)); }
+      catch (error) { this.failures.report('skill-store ' + repo.id, error); }
+    }
     try {
       // The repository is connected again while the notes volume of the project it used to be is still there: the old
       // notes must never be readable by the new project, so the volume goes before anything can start against it (#771).
@@ -231,10 +237,11 @@ export class ProjectService {
         // An answered start also clears the notes-retry slot: the residue it owed is gone, or the manager no longer refuses it.
         this.notesRetries.delete(repo.id);
         if (result?.state) state = result;
-      } else if (repo.enabled && state.state === 'ready' && (state.computer?.resources_pending || state.computer?.image_pending || state.computer?.tools_pending)) {
-        // Resource defaults changed, a deferred precompiled image finished building, or a new project tools revision was
-        // published: rebuild once no task runs on the computer. claimQueuedTask excludes repositories with a pending
-        // environment_operations row, so checking claims and recording `refresh` in one transaction leaves no race window.
+      } else if (repo.enabled && state.state === 'ready' && (state.computer?.resources_pending || state.computer?.image_pending || state.computer?.tools_pending || state.computer?.skills_pending)) {
+        // Resource defaults changed, a deferred precompiled image finished building, a new project tools revision was
+        // published, or the project skill-store subpath became available: rebuild once no task runs on the computer.
+        // claimQueuedTask excludes repositories with a pending environment_operations row, so checking claims and
+        // recording `refresh` in one transaction leaves no race window.
         const input = { operation_id: randomId(), generation: state.generation };
         const queued = this.store.transaction(() => {
           if (this.store.get("SELECT 1 FROM task_claims WHERE repository_id=? UNION ALL SELECT 1 FROM environment_operations WHERE repository_id=? AND state='pending'", repo.id, repo.id)) return false;

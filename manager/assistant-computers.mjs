@@ -113,8 +113,8 @@ export function validateAssistantSettings(input, host = null) {
 
 export class AssistantComputers {
   /** homes: where the HOME volume is mounted in the manager (read-only), to find its name and check a generation exists. */
-  constructor({ docker, db, deployment, image, homes = '/assistant-homes', agentTools, projectToolsMount = null, projectToolsVolume = null, resultMount, globalEnvironment = null, disk = null, allocatedMemoryMb = null }) {
-    this.docker = docker; this.db = db; this.deployment = deployment; this.image = image; this.homes = homes; this.agentTools=agentTools; this.projectToolsMount = projectToolsMount; this.projectToolsVolume = projectToolsVolume; this.resultMount=resultMount;
+  constructor({ docker, db, deployment, image, homes = '/assistant-homes', agentTools, projectToolsMount = null, projectToolsVolume = null, skillStoreMount = null, skillStoreVolume = null, resultMount, globalEnvironment = null, disk = null, allocatedMemoryMb = null }) {
+    this.docker = docker; this.db = db; this.deployment = deployment; this.image = image; this.homes = homes; this.agentTools=agentTools; this.projectToolsMount = projectToolsMount; this.projectToolsVolume = projectToolsVolume; this.skillStoreMount = skillStoreMount; this.skillStoreVolume = skillStoreVolume; this.resultMount=resultMount;
     this.globalEnvironment = globalEnvironment; this.disk = disk; this.allocatedMemoryMb = allocatedMemoryMb; this.lastHost = null;
     // owner -> lease; owner -> pending removal; owner -> serialized operations; waiting: owners queued for capacity.
     this.leases = new Map(); this.removing = new Map(); this.locks = new Map(); this.waiting = [];
@@ -280,6 +280,16 @@ export class AssistantComputers {
     if (!name) throw new ManagerError('assistant_homes_unavailable', 503);
     return this.volumeName = name;
   }
+  async serviceSkillsMount() {
+    if (!this.skillStoreMount || !this.skillStoreVolume) return [];
+    const volume = await this.skillStoreVolume();
+    if (!volume) return [];
+    const checkPath = `${this.skillStoreMount}/service`;
+    const info = await lstat(checkPath).catch(() => null);
+    if (!info) return [];
+    if (info.isSymbolicLink() || !info.isDirectory()) throw new ManagerError('skill_store_path_invalid', 409);
+    return [{ Type: 'volume', Source: volume, Target: '/opt/bot-skills', ReadOnly: true, VolumeOptions: { NoCopy: true, Subpath: 'service' } }];
+  }
   view(lease) {
     return { owner: lease.owner, state: lease.state, turn: lease.turn, fence: lease.fence, home: { generation: lease.generation, mode: lease.mode },
       resources: lease.resources, egress: lease.egress, image: lease.image, project_tools: lease.projectTools ?? [], created_at: lease.created, used_at: lease.used, renewed_at: lease.renewed, running_operations: lease.inflight };
@@ -361,6 +371,7 @@ export class AssistantComputers {
         }
       }
       const env = globalEnv.env, envSignature = JSON.stringify(Object.entries(env).sort());
+      const wantSkills = (await this.serviceSkillsMount()).length > 0;
       let lease = this.leases.get(owner);
       if (lease?.state === 'busy' && lease.turn !== turn) {
         // Another turn of the same owner (a private chat and a console conversation of one person) holds it: wait for it,
@@ -375,6 +386,7 @@ export class AssistantComputers {
         const current = lease.fence === fence && lease.generation === generation && lease.mode === mode && (!input.harness || lease.harness)
           && (held || (lease.image === targetImage && (lease.envSignature ?? '[]') === envSignature
             && (lease.projectToolsSignature ?? '[]') === projectToolsSignature
+            && (lease.skillsMounted ?? false) === wantSkills
             && lease.egress === settings.egress && JSON.stringify(lease.resources) === JSON.stringify(effectiveResources) && now - lease.created < settings.max_lifetime_minutes * 60_000));
         const running = current && (await this.inspect(owner).catch(() => null))?.State?.Running === true;
         if (running) {
@@ -453,6 +465,8 @@ export class AssistantComputers {
     // Docker answers 404 (no such image) with nothing: a clear creation failure, not a container gone missing later.
     const networkMode = lease.egress ? await this.ensureNetwork() : 'none';
     const tools=lease.harness?await this.agentTools?.():null, results=await this.resultMount?.(owner)??[];
+    const skillMounts = await this.serviceSkillsMount();
+    lease.skillsMounted = skillMounts.length > 0;
     const projectToolMounts = [];
     const mountedProjectTools = [];
     if (lease.projectTools?.length) {
@@ -492,6 +506,7 @@ export class AssistantComputers {
           { Type: 'volume', Source: wsVol, Target: '/workspace', ReadOnly: false },
           { Type: 'volume', Source: tmpVol, Target: '/tmp', ReadOnly: false },
           ...(tools?[{Type:'volume',Source:tools,Target:'/opt/agent-tools',ReadOnly:true}]:[]),
+          ...skillMounts,
           ...projectToolMounts,
         ] } });
     if (!made) throw Object.assign(new ManagerError('assistant_computer_create_failed', 503), { detail: `image ${lease.image} not found` });

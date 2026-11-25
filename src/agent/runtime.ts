@@ -61,7 +61,10 @@ export interface AgentSpec<T> {
   harnessPreparation?: unknown;
   /** Explicit backend request budget; entry-loop defaults must not become native Harness limits. */
   harnessTurnLimit?:number;
-  harnessResources?:{path:string;content:string}[];
+  /** Content-addressed read-only skill set materialized on the control plane (`skill-store` volume). */
+  harnessSkillSet?: import('../roles/skill-store.js').MaterializedSkillSet | null;
+  /** Pinned skill revision identifiers for audit / RunContext (`skill_revisions`). */
+  harnessSkillRevisions?: string[];
   /** A native turn may end without proposing a business delivery. The caller records/coordinates that observation. */
   onTurnEnd?: (turn:{text:string;session_id?:string})=>T|Promise<T>;
   /** Native tools are owned and selected by the executing Harness, not platform RPC names. */

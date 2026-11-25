@@ -43,7 +43,7 @@ export class ManualReclaim {
     };
     const daily = await this.retention.run();
     if (daily.finished_at) {
-      for (const key of ['trajectories', 'evidence', 'channel_resources', 'channel_cards', 'feedback', 'deliveries', 'commit_checks', 'dispatch_failures', 'dispatch_threads', 'memory_consolidation_runs', 'project_notes']) {
+      for (const key of ['trajectories', 'evidence', 'channel_resources', 'channel_cards', 'feedback', 'skill_store', 'deliveries', 'commit_checks', 'dispatch_failures', 'dispatch_threads', 'memory_consolidation_runs', 'project_notes']) {
         const part = daily[key] as Removed | undefined;
         if (part) add(part, key === 'deliveries' ? 'payload_bytes' : 'file_bytes');
       }

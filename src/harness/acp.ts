@@ -56,7 +56,7 @@ export function acpHarness<T>(spec: AgentSpec<T>, backend: string): NonNullable<
       spec.roleRun?.recovery_mode !== 'rebuilt_from_task_records' ? binding.sessionId : undefined;
     const rebuilding = Boolean(resumeId || binding?.sessionId || spec.runContext?.()?.resume_from_run_id || spec.roleRun?.recovery_mode === 'rebuilt_from_task_records');
     const signal = spec.executionSignal ?? new AbortController().signal;
-    const ready = deferred<{session_id: string; recoveryMode: string}>();
+    const ready = deferred<{session_id: string; recoveryMode: string; skills?: string[]; skill_paths?: string[]}>();
     const turn = deferred<string>();
     const fault = deferred<never>();
     fault.promise.catch(() => {});
@@ -118,12 +118,18 @@ export function acpHarness<T>(spec: AgentSpec<T>, backend: string): NonNullable<
         const bound = await Promise.race([ready.promise, fault.promise, exited]);
         if (cancelReason) { await cancelling; throw cancelReason; }
         spec.harnessState?.save({ harness: backend, sessionId: bound.session_id, revision });
-        emit({ type: 'session_bound', session_id: bound.session_id, recoveryMode: bound.recoveryMode, version: session.cliVersion, model: model.model, workspace_id: session.workspaceId });
+        const mountedSkills = !workswarm && Array.isArray(bound.skills)
+          ? bound.skills.filter((name: unknown): name is string => typeof name === 'string' && name.length > 0)
+          : [];
+        emit({ type: 'session_bound', session_id: bound.session_id, recoveryMode: bound.recoveryMode, version: session.cliVersion, model: model.model, workspace_id: session.workspaceId, ...(mountedSkills.length ? { skills: mountedSkills } : {}) });
         const submission = spec.finish ? '\nUse the offered bot MCP submission tool to submit the result before ending the turn.' : '';
+        const skillGuidance = workswarm && spec.tools?.some(t => t.function.name === 'read_skill')
+          ? '\nWhen read_skill (mcp_bot_read_skill) is offered, call it to list or read pinned skill files and companion references when relevant; skills never grant extra tools or permissions.'
+          : '';
         const trustedRules = access?.trustedCheckout === false && access.trustedAgentsMd ? `\n\nTrusted repository instructions:\n${access.trustedAgentsMd}` : '';
         const recovery = bound.recoveryMode === 'rebuilt_from_task_records' ? '\nRebuild context from the supplied task records. Check confirmed results before repeating work.' : '';
         const original = bound.recoveryMode !== 'native_resume' && spec.harnessInitialPrompt !== undefined ? `${spec.harnessInitialPrompt}\n\n` : '';
-        const input = `${spec.system}${submission}${recovery}${trustedRules}\n\n${original}${spec.prompt}`;
+        const input = `${spec.system}${submission}${skillGuidance}${recovery}${trustedRules}\n\n${original}${spec.prompt}`;
         prompting = true;
         await Promise.race([session.writeStdin(JSON.stringify({ text: input }) + '\n'), fault.promise, exited]);
         const stopReason = await Promise.race([turn.promise, fault.promise, exited]);

@@ -63,6 +63,8 @@ BOT_BUILD_CONTEXT=. docker compose --project-directory . -f docker/compose.yaml 
 | `BOT_FORWARD_PRIVATE_HOSTS` | 空 | 外部执行端允许 Webhook 转发的内网主机名白名单（逗号分隔，不支持通配符） |
 | `BOT_AGENT_TOOLS_DIR` | `/opt/agent-tools` | 非 Compose 启动时可指定的控制面工具卷目录。标准 Compose 固定在 `/opt/agent-tools` 挂载该卷，项目电脑只读挂载 |
 | `BOT_PROJECT_TOOLS_DIR` | `/project-tools` | 按项目隔离的只读二进制工具卷目录（标准 Compose 由控制面可写挂载、`manager` 只读校验并按子路径挂入项目/群助手容器） |
+| `BOT_SKILL_STORE_DIR` | `/skill-store` | 控制面内容寻址只读 Skill 卷目录（标准 Compose 由控制面可写挂载、`manager` 只读按项目/服务子路径挂入容器 `/opt/bot-skills`） |
+| `BOT_SKILLS_DIR` | 镜像内置 `skills/` | 可选覆盖控制面读取内置 Skill 源目录的路径（默认使用随控制面镜像打包的 `skills/`） |
 | `BOT_AGENT_TOOLS_AUTO_INSTALL` | `1` | 设为 `0` 关闭控制面启动时后台自动安装工具卷默认版本（仅由 `src/main.ts` 触发；设为 `0` 后仍可在控制台按 Agent 手动安装） |
 | `BOT_HOST_STORAGE_DIR` | 空 | 可选宿主机整机磁盘采样目录（配合 `scripts/host-storage.py` 定时写入） |
 | `BOT_GITHUB_API_URL` | `https://api.github.com` | GitHub API 地址 |
@@ -111,6 +113,7 @@ docker compose up -d
 | `assistant-homes` | 群聊与管理助手电脑的持久 HOME，承载助手私有长期记忆（`~/memory/`）与跨轮个人/群文件（须纳入一致备份） |
 | `agent-tools` | 受信任的第三方容器 Agent 统一工具卷（Claude Code、Codex、iCode、WorkSwarm 及其受管 Node / `uv` 运行时与版本清单；内置 Pi 不在此卷）。各版本可并存 |
 | `project-tools` | 按项目隔离的只读二进制工具快照卷（`/project-tools/<repository_id>/rev-<N>`，默认单项目配额 20 GiB、保留当前版本与最近 3 个回滚旧版，须纳入一致备份） |
+| `skill-store` | 控制面按内容寻址物化的只读 Skill 卷（`projects/<repository_id>/sets/<hash>` 与 `service/sets/<hash>`，由每日保留与手动回收自动清理未引用旧集合，可随运行按需重建） |
 | `tunnel-keys` | Cloudflare Tunnel token 文件 |
 
 ### 备份与恢复要点

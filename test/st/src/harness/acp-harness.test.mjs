@@ -231,26 +231,30 @@ test('iCode config restricts project inputs and builtins, and selects the model 
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const cases = [
     { type: 'openai-chat-completions', provider: 'openai', style: 'chat_completions', files: 'write', trusted: true, commands: true,
-      projectSkills: true, tools: ['filesystem.read', 'search', 'filesystem.write', 'shell'] },
+      memoryFiles: ['AGENTS.md'], mountedSkillDir: '/opt/bot-skills/sets/abc/bot/skills', expectPaths: ['/opt/bot-skills/sets/abc/bot/skills'], tools: ['filesystem.read', 'search', 'filesystem.write', 'shell'] },
     { type: 'openai-responses', provider: 'openai', style: 'responses', files: 'read', trusted: false, commands: false,
-      projectSkills: false, tools: ['filesystem.read', 'search'] },
+      memoryFiles: [], mountedSkillDir: '/opt/bot-skills/sets/def/bot/skills', expectPaths: ['/opt/bot-skills/sets/def/bot/skills'], tools: ['filesystem.read', 'search'] },
     { type: 'anthropic-messages', provider: 'anthropic', style: undefined, files: 'none', trusted: true, commands: false,
-      projectSkills: false, tools: [] },
+      memoryFiles: [], mountedSkillDir: '/opt/bot-skills/sets/ghi/bot/skills', expectPaths: null, tools: [] },
   ];
-  for (const { type, provider, style, files, trusted, commands, projectSkills, tools } of cases) {
+  for (const { type, provider, style, files, trusted, commands, memoryFiles, mountedSkillDir, expectPaths, tools } of cases) {
     const home = join(root, type);
     await configureICode({
       model: 'test-model', acp_model: { interface_type: type, context_window: 100000, max_output_tokens: 4096, image_input: false },
       execution_access: { fileTools: files, workspace: 'write', commands, trustedCheckout: trusted },
-    }, { HOME: home, BOT_ACP_RELAY_URL: 'http://127.0.0.1:3210' });
+    }, { HOME: home, BOT_ACP_RELAY_URL: 'http://127.0.0.1:3210', BOT_MOUNTED_SKILLS_DIR: mountedSkillDir });
     const profile = json(join(home, '.chrys', 'models', 'launchpad.yaml'));
     const agent = json(join(home, '.chrys', 'agents', 'launchpad.yaml'));
     assert.deepEqual(json(join(home, '.chrys', 'settings.yaml')), {
-      project: { config_enabled: false, hooks_enabled: false, skills_enabled: projectSkills },
+      project: { config_enabled: false, hooks_enabled: false, skills_enabled: false },
     });
-    assert.deepEqual(agent.memory.files, projectSkills ? ['AGENTS.md'] : []);
-    assert.deepEqual(agent.skills, { auto_load_user_agents_skills: false, auto_load_cwd_agents_skills: projectSkills,
-      ...(commands ? {} : { script_extensions: [] }) });
+    assert.deepEqual(agent.memory.files, memoryFiles);
+    assert.deepEqual(agent.skills, {
+      ...(expectPaths ? { paths: expectPaths } : {}),
+      auto_load_user_agents_skills: false,
+      auto_load_cwd_agents_skills: false,
+      ...(commands ? {} : { script_extensions: [] }),
+    });
     assert.deepEqual(agent.tools.builtins, ['ask_user', 'todo', ...tools]);
     assert.equal(agent.model.profile_id, profile.id);
     assert.equal(profile.provider, provider);
@@ -263,7 +267,7 @@ test('iCode config restricts project inputs and builtins, and selects the model 
   assert.deepEqual(icodeAnswer({}), { cancelled: true });
 });
 
-async function driveICodeEntry(t, handshake) {
+async function driveICodeEntry(t, handshake, options = {}) {
   const root = mkdtempSync(join(tmpdir(), 'icode-entry-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const rootTools = join(root, 'tools'), agentDir = join(root, 'agent'), home = join(root, 'home');
@@ -277,12 +281,16 @@ async function driveICodeEntry(t, handshake) {
   writeFileSync(join(agentDir, 'harness.json'), JSON.stringify({
     acp_product: readAcpProduct(rootTools, 'icode'), instance_id: instanceId, model: 'fixture',
     acp_model: { interface_type: 'openai-chat-completions', context_window: 10000, max_output_tokens: 1024, image_input: false },
+    ...(options.executionAccess ? { execution_access: options.executionAccess } : {}),
   }));
 
   // The local runner correctly rejects iCode. Exercise the ACP entry point without changing that restriction.
   const child = spawn(process.execPath, [resolve('runner/acp-entry.mjs'), agentDir, join(directory, 'bin', 'icode')], {
     cwd: root, signal: AbortSignal.timeout(20_000),
-    env: { ...process.env, HOME: home, BOT_RUN_TOKEN: 'fixture-run-token', BOT_ACP_RELAY_URL: 'http://127.0.0.1:3210' },
+    env: {
+      ...process.env, HOME: home, BOT_RUN_TOKEN: 'fixture-run-token', BOT_ACP_RELAY_URL: 'http://127.0.0.1:3210',
+      ...(options.mountedSkillsDir ? { BOT_MOUNTED_SKILLS_DIR: options.mountedSkillsDir } : {}),
+    },
   });
   const closed = once(child, 'close');
   const frames = [];
@@ -303,9 +311,52 @@ test('iCode negotiates HTTP MCP, answers only the current session and closes it'
   assert.equal(status, 0, JSON.stringify(frames) + stderr);
   assert.equal(frames.find(frame => frame.event?.type === 'configuration').event.agent.version, icodeTestedVersion);
   assert.equal(frames.find(frame => frame.type === 'turn').stop_reason, 'end_turn');
+  assert.equal(frames.find(frame => frame.type === 'ready').skills, undefined, 'without mounted skills dir, ready must omit skills');
   assert.deepEqual(json(join(run, 'wrong-session.json')), { cancelled: true });
   assert.deepEqual(json(join(run, 'input.json')), { answers: [inputAnswer, inputAnswer], cancelled: false });
   assert.equal(json(join(run, 'close.json')), true);
+});
+
+test('#1359 iCode ready frame reports only runner-applied mounted skills and omits them when fileTools=none or mount is absent', async t => {
+  const skillsDir = mkdtempSync(join(tmpdir(), 'icode-mounted-skills-'));
+  t.after(() => rmSync(skillsDir, { recursive: true, force: true }));
+  mkdirSync(join(skillsDir, 'alpha-ops'), { recursive: true });
+  writeFileSync(join(skillsDir, 'alpha-ops', 'SKILL.md'), '---\nname: alpha-ops\ndescription: Alpha.\n---\nBody.\n');
+
+  const withRead = await driveICodeEntry(t, 'supported', {
+    executionAccess: { fileTools: 'read', workspace: 'read', commands: false, trustedCheckout: false },
+    mountedSkillsDir: skillsDir,
+  });
+  assert.equal(withRead.status, 0, withRead.stderr);
+  const readyRead = withRead.frames.find(frame => frame.type === 'ready');
+  assert.deepEqual(readyRead.skills, ['alpha-ops']);
+  assert.deepEqual(readyRead.skill_paths, [skillsDir]);
+
+  const withNone = await driveICodeEntry(t, 'supported', {
+    executionAccess: { fileTools: 'none', workspace: 'none', commands: false, trustedCheckout: false },
+    mountedSkillsDir: skillsDir,
+  });
+  assert.equal(withNone.status, 0, withNone.stderr);
+  const readyNone = withNone.frames.find(frame => frame.type === 'ready');
+  assert.equal(readyNone.skills, undefined, 'fileTools=none must not report skills in ready');
+  assert.equal(readyNone.skill_paths, undefined, 'fileTools=none must not report skill_paths in ready');
+
+  // Control plane ACP driver (src/harness/acp.ts) must also never echo spec.harnessSkillSet when runner reported no skills.
+  const f = await fixture(t);
+  f.spec.harnessSkillSet = {
+    setHash: 'a'.repeat(64),
+    scope: 'projects/1',
+    storeRoot: skillsDir,
+    hostRoot: skillsDir,
+    containerPluginDir: '/opt/bot-skills/sets/' + 'a'.repeat(64) + '/bot',
+    containerSkillsDir: '/opt/bot-skills/sets/' + 'a'.repeat(64) + '/bot/skills',
+    skills: [{ slug: 'alpha-ops', name: 'alpha-ops', description: 'Alpha.' }],
+  };
+  const session = roleHarness(id).createSession(f.spec, {});
+  t.after(() => session.close());
+  assert.deepEqual(await session.run(), { summary: 'verified fact' });
+  const bound = f.events.find(event => event.type === 'session_bound');
+  assert.equal(bound.skills, undefined, 'session_bound must not claim harnessSkillSet skills when runner did not configure them');
 });
 
 for (const mode of ['wrong-protocol', 'wrong-version', 'no-http', 'no-close']) {

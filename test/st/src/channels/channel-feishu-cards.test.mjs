@@ -80,6 +80,10 @@ test('group assistant reads feishu-cards skill, sends Card JSON 2.0, records rea
   const r1 = await post(f.h, f.id, msg1);
   assert.equal((await finished(f.h, r1.value.operation_id)).state, 'completed');
   await until(() => f.wire.sent.length >= 1);
+  // Fallback path without assistant computer keeps read_skill offered and referenced in card instructions.
+  const fallbackSys = String(f.requests[0]?.messages?.[0]?.content ?? '');
+  assert.match(fallbackSys, /Read feishu-cards\/SKILL\.md via read_skill/);
+  assert.ok((f.requests[0]?.tools ?? []).some(tool => tool.function.name === 'read_skill'));
 
   const sentCard = f.wire.sent[0];
   assert.equal(sentCard.msg_type, 'interactive');

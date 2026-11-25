@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 const modelId = '1c0de000000000000000000000000001';
@@ -24,9 +24,14 @@ export async function configureICode(config, env) {
   if (files === 'write') builtins.push('filesystem.write');
   if (commands) builtins.push('shell');
 
+  const skillDir = typeof env.BOT_MOUNTED_SKILLS_DIR === 'string' && env.BOT_MOUNTED_SKILLS_DIR.trim()
+    ? env.BOT_MOUNTED_SKILLS_DIR.trim()
+    : null;
+  const appliedSkillPaths = skillDir && files !== 'none' ? [skillDir] : [];
   const documents = {
     'settings.yaml': {
-      project: { config_enabled: false, hooks_enabled: false, skills_enabled: trusted && files !== 'none' },
+      // Trusted repository skills are already materialized into the read-only skill-store mount; never auto-load from cwd.
+      project: { config_enabled: false, hooks_enabled: false, skills_enabled: false },
     },
     'models/launchpad.yaml': {
       id: modelId, name: 'Launchpad', model_id: config.model,
@@ -43,12 +48,27 @@ export async function configureICode(config, env) {
       tools: { builtins },
       model: { profile_id: modelId },
       memory: { files: trusted && files !== 'none' ? ['AGENTS.md'] : [] },
-      skills: { auto_load_user_agents_skills: false, auto_load_cwd_agents_skills: trusted && files !== 'none',
-        ...(commands ? {} : { script_extensions: [] }) },
+      skills: {
+        ...(appliedSkillPaths.length ? { paths: appliedSkillPaths } : {}),
+        auto_load_user_agents_skills: false,
+        auto_load_cwd_agents_skills: false,
+        ...(commands ? {} : { script_extensions: [] }),
+      },
     },
   };
   await Promise.all(['agents', 'models'].map(path => mkdir(join(directory, path), { recursive: true, mode: 0o700 })));
   // JSON is also valid YAML and keeps model names and endpoint strings literal.
   await Promise.all(Object.entries(documents).map(([path, value]) =>
     writeFile(join(directory, path), JSON.stringify(value), { flag: 'wx', mode: 0o600 })));
+  const skills = [];
+  for (const dir of appliedSkillPaths) {
+    const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const skillFile = await stat(join(dir, entry.name, 'SKILL.md')).catch(() => null);
+      if (skillFile?.isFile()) skills.push(entry.name);
+    }
+  }
+  skills.sort();
+  return { skill_paths: appliedSkillPaths, skills };
 }

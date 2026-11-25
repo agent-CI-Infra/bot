@@ -20,6 +20,8 @@ import type { HarnessCapabilities } from './protocol.js';
 import { icodeProductId, workswarmProductId } from '../../runner/acp-products.mjs';
 import { acpHarness, prepareAcp } from '../harness/acp.js';
 import { codexAppServer } from '../harness/app-server.js';
+import { LocalManager } from '../projects/local-manager.js';
+import { toHarnessSkillSetConfig } from './skill-store.js';
 /**
  * The capability matrix of a driver. Role configuration is checked against it before a run starts: the role kinds it can
  * run, the model APIs it speaks, whether it needs tool calls and which structured submissions it supports. A combination
@@ -104,12 +106,14 @@ function piHarness<T>(spec:AgentSpec<T>):NonNullable<AgentSpec<T>['adapter']>{
  if(sessionStore)useWorkspace(spec.store,{...env.workspace.task,workspace_id:sessionStore},'workspace_harness_start');
  const bound=spec.harnessState?.value?.harness==='pi'&&typeof spec.harnessState.value.sessionId==='string'?spec.harnessState.value:undefined;
  const cmdBudget=resolveCommandTimeout(spec.store,spec.task,spec.roleRun?.role,base?.config?.command_timeout?.default_seconds??null);
+ const isLocalTransport=(env.workspace as any)?.manager instanceof LocalManager||(spec.roleWorkspace as any)?.manager instanceof LocalManager||spec.containerOptions?.manager instanceof LocalManager;
+ const skillSetConfig=toHarnessSkillSetConfig(spec.harnessSkillSet,isLocalTransport);
  const config={...(base?.config??{capabilities:{workspace:{read:false,write:false,notes:false,shell:false},github:{permissions:{},publication:'none'},agents:false,writes:[]},finish_tools:[],finish_on_pull_request:false,review_session:false}),
   command_timeout:{default_seconds:cmdBudget.defaultSeconds,max_seconds:cmdBudget.maxSeconds},
   ...(spec.runAccess?.token?{run_token:spec.runAccess.token}:{}),
   github_host:githubHostFromApiUrl(spec.containerOptions?.githubApiUrl),
   ...(spec.containerOptions?.allowHttpGit?{allow_http_git:true}:{}),
-  model_transport:spec.containerOptions?.modelTransport,system:spec.system,prompt:spec.prompt,accept_turn_result:!!spec.onTurnEnd,resources:spec.harnessResources,tools,control_tools:control,workspace_id:spec.roleWorkspace?.task.workspace_id??env.workspace.task.workspace_id,...(spec.harnessAccess?{native_access:spec.harnessAccess,native_workspace_id:spec.roleWorkspace?.task.workspace_id,native_fresh:spec.roleRun?.role==='qa'}:{}),
+  model_transport:spec.containerOptions?.modelTransport,system:spec.system,prompt:spec.prompt,accept_turn_result:!!spec.onTurnEnd,...(skillSetConfig?{skill_set:skillSetConfig}:{}),tools,control_tools:control,workspace_id:spec.roleWorkspace?.task.workspace_id??env.workspace.task.workspace_id,...(spec.harnessAccess?{native_access:spec.harnessAccess,native_workspace_id:spec.roleWorkspace?.task.workspace_id,native_fresh:spec.roleRun?.role==='qa'}:{}),
   ...(bound?{native_session:{id:bound.sessionId,file:bound.transcript}}:{}),...(sessionStore?{session_store:sessionStore}:{}),session_key:spec.roleRun?.instance_id??spec.harnessSessionKey};
  return async(services:AgentServices):Promise<T>=>{
   const nativeUsage=new Map<number,{input:number;output:number;known:boolean}>();

@@ -33,8 +33,9 @@ import { RepositoryOnboarding, onboardingInstructions, onboardingRepositoryOf, s
 import { startRequestsName, startRequestsTool } from './onboarding-requests.js';
 import { managerFlowInstructions } from '../dispatch/settings.js';
 import { lateSchedules } from '../actions/late-schedules.js';
-import { feishuAssistantSkills, makeReadSkillTool, readSkill, readSkillName, readSkillTool } from '../service-roles/skills.js';
-import { feishuCardInstructions, feishuCardTool, feishuCardToolName, FeishuCardTurn } from '../channels/cards.js';
+import { assistantSkills, feishuAssistantSkills, makeReadSkillTool, readSkill, readSkillName, readSkillTool, serviceSkillFiles, serviceSkillRevisions } from '../service-roles/skills.js';
+import { materializeSkillSet, NATIVE_SKILL_HARNESSES, resolveSkillStoreRoot, serviceSkillScope } from '../roles/skill-store.js';
+import { feishuCardPrompt, feishuCardTool, feishuCardToolName, FeishuCardTurn } from '../channels/cards.js';
 import { sameRepositoryName } from './repository-name.js';
 import {
   executeProjectToolsAssistantTool,
@@ -311,8 +312,14 @@ export class ManagementAgent {
     const redactor=new Redactor();
     const cardTurn=this.feishuCard?.(actor,conversation,input,value=>publicText(redactor.text(value),configuredRedactor(this.store)));
     const activeSkills=cardTurn?feishuAssistantSkills:undefined;
+    const activeSkillIds=cardTurn?feishuAssistantSkills:assistantSkills;
     const activeReadSkillTool=cardTurn?makeReadSkillTool(feishuAssistantSkills):readSkillTool;
     const computerOffered=!!this.service.assistants?.available()&&canUseComputer();
+    const skillStoreRoot=resolveSkillStoreRoot(this.store);
+    const serviceSkillSet=skillStoreRoot?materializeSkillSet({root:skillStoreRoot,scope:serviceSkillScope(),files:serviceSkillFiles(activeSkillIds)}):null;
+    const serviceSkillRevs=serviceSkillRevisions(activeSkillIds);
+    const managementHarness=String(serviceRole(this.store,managementAssistant)?.harness??'pi');
+    const nativeServiceSkills=Boolean(serviceSkillSet&&computerOffered&&NATIVE_SKILL_HARNESSES.has(managementHarness)&&permitsTool(permissions(),'read_file'));
     const canCheckout=()=>!!this.service.assistants?.available()&&canUseComputer()&&githubReadScopes(permissions()).includes('contents');
     const canListProjectTools=()=>!!this.service.projectTools&&permitsManagement(permissions(),'get_environment',false);
     const canWriteProjectTools=()=>!!this.service.projectTools&&permitsManagement(permissions(),'project.update',true);
@@ -320,7 +327,7 @@ export class ManagementAgent {
       ? projectToolsAssistantTools.filter(t=>t.function.name===projectToolsListName?canListProjectTools():canWriteProjectTools())
       : [];
     const feedbackEnabled=isFeedbackEnabled(this.store);
-    const tools=[readToolResult,...managementTools,...offeredProjectToolTools,...(permitsManagement(permissions(),'project.update',true)?[startRepositoryTool]:[]),...(deciding?[startRequestsTool]:[]),...(schedules?[conversationScheduleTool]:[]),...ownTaskTools,...serviceRepositoryTools,...(canCheckout()?[checkoutRepositoryTool]:[]),activeReadSkillTool,...(cardTurn?[feishuCardTool]:[]),...(permitsTool(permissions(),'github_write')?[scopedGithubWriteTool]:[]),...(computerOffered?assistantComputerTools:[]),...(media?mediaTools.filter(t=>computerOffered||!computerMediaTools.has(t.function.name)):[]),...(feedbackEnabled?[submitFeedbackTool]:[]),...(timer?[]:[sendMessageTool])];
+    const tools=[readToolResult,...managementTools,...offeredProjectToolTools,...(permitsManagement(permissions(),'project.update',true)?[startRepositoryTool]:[]),...(deciding?[startRequestsTool]:[]),...(schedules?[conversationScheduleTool]:[]),...ownTaskTools,...serviceRepositoryTools,...(canCheckout()?[checkoutRepositoryTool]:[]),...(nativeServiceSkills?[]:[activeReadSkillTool]),...(cardTurn?[feishuCardTool]:[]),...(permitsTool(permissions(),'github_write')?[scopedGithubWriteTool]:[]),...(computerOffered?assistantComputerTools:[]),...(media?mediaTools.filter(t=>computerOffered||!computerMediaTools.has(t.function.name)):[]),...(feedbackEnabled?[submitFeedbackTool]:[]),...(timer?[]:[sendMessageTool])];
     // Only a timer's turn may end silently, and only through stay_silent (#489); own tasks never get the tool.
     const turnTools=timer?[...tools,staySilentTool]:tools;let silence:string|undefined;
     // Set once a merged message is certainly for the assistant: then the turn must answer and cannot end silently.
@@ -495,7 +502,7 @@ export class ManagementAgent {
           +'\n\n'+projectToolsPriorityGuidance+(offeredProjectToolTools.length?' Use project_tools_list, project_tools_publish, and project_tools_rollback for authorized projects\' read-only tool volumes; never attempt to write to live project computers or store secrets/credentials in project tools.':'')
           +(timer?' This message was sent by one of the user\'s timers, not by the user: the request is the timer\'s task. There is no progress-message channel in a timer turn: finish all tool queries, data collection and verification first, then deliver one complete, self-contained final result in your final reply (plain Markdown or a single staged set_feishu_card). Never output opening announcements, status preambles or split updates such as announcing that you are about to start or fetch data. Stay silent only if the task allows it when there is nothing to report, and there is nothing.'+staySilentInstructions:'')
           +(media?'\nThis Feishu message may contain real attachments: call list_message_resources, then read_message_resource or view_message_image to inspect them. If an image is unsupported in format or rejected for size/resolution/context limits, use import_message_resource and your assistant computer (Python Pillow or ImageMagick) to resize, compress, crop or convert it, then call view_workspace_image to inspect the processed image. Other binary inputs also need import_message_resource and computer tools. Use attach_message_resource, attach_workspace_file or create_reply_file to send actual attachments with your final answer. Never invent paths or resource IDs or claim unsupported or omitted inputs were inspected; selecting an attachment is not delivery.':'')
-          +(cardTurn?'\n'+feishuCardInstructions:'')
+          +(cardTurn?'\n'+feishuCardPrompt(nativeServiceSkills):'')
           +(feedbackEnabled?'\n\n'+feedbackGuidance:'')
           +administrator;
         effectiveSystem=system;
@@ -504,6 +511,8 @@ export class ManagementAgent {
         const context={...this.context(base,conversation,id,input.content),...pendingRequests(),recent_tool_results:resultFiles.recent()};
         const turnSpec:import('../agent/runtime.js').AgentSpec<unknown>={resultSession:resultFiles,store:this.store,task:{id,repository_id:null,service_role_id:managementAssistant,kind:'management.agent',conversation_id:conversation,source_message:input.source_message},redactor,guard,
           model,executionSignal:signal,
+          harnessSkillSet:serviceSkillSet,
+          harnessSkillRevisions:serviceSkillRevs,
           containerOptions:{
             githubApiUrl:this.service.githubUrl,
             resolveGithubRepository:selected=>{try{return resolveAuthorizedRepository(selected);}catch(error){if(error instanceof HttpError&&[403,404].includes(error.status))return null;throw error;}},

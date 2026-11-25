@@ -6,6 +6,7 @@ import { dropUninstalledIntegrations } from './integrations.js';
 import { type ProjectService } from './service.js';
 import { type ProjectToolsService } from './tools.js';
 import { removeBrowserEvidence } from '../browser/evidence.js';
+import { removeProjectSkillStore, resolveSkillStoreRoot } from '../roles/skill-store.js';
 import { deleteConsolidationScope, releaseConsolidationModels } from '../memory/consolidation-storage.js';
 
 // The task engine's running work on a repository's computer; a deletion waits for it before removing task rows.
@@ -189,6 +190,11 @@ export class ProjectRemoval {
       catch { this.store.audit(user.id, 'repository.evidence_removal_failed', id, id); }
       try { await this.projectTools?.removeProject(id); }
       catch { this.store.audit(user.id, 'repository.project_tools_removal_failed', id, id); }
+      try {
+        const skillRoot = resolveSkillStoreRoot(this.store);
+        if (skillRoot) removeProjectSkillStore(skillRoot, id);
+      }
+      catch { this.store.audit(user.id, 'repository.skill_store_removal_failed', id, id); }
       return removed;
     } finally { this.projects?.endRemoval(id); }
   }

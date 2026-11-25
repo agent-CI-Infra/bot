@@ -172,7 +172,7 @@ test('Claude Code protocol fixture: seven RoleRun operations, container stdio MC
   }
   assert.ok(launch.args.includes('--dangerously-skip-permissions'));
   assert.ok(launch.args.includes('--strict-mcp-config'));
-  assert.ok(launch.args.includes('--disable-slash-commands'));
+  assert.ok(!launch.args.includes('--disable-slash-commands'));
   assert.equal(launch.args[launch.args.indexOf('--setting-sources')+1],'');
   assert.equal(JSON.parse(launch.args[launch.args.indexOf('--settings')+1]).disableAllHooks,true);
   assert.ok(launch.args.includes('--setting-sources'));
@@ -891,4 +891,28 @@ test('#1260 Claude Code local_config mode injects zero platform model config, st
   assert.equal(existsSync(join(homeClaudeDir, 'settings.json')), true, 'source file in /workspace/home preserved');
   assert.equal(st.model, 'claude-custom-local-4-5');
   assert.equal(JSON.stringify(f.s.all('SELECT data FROM task_history')).includes('local-only-secret-token'), false);
+});
+
+test('#1359 Claude Code loads pinned skills via --plugin-dir from skill-store and reports skills in session_bound', async t => {
+  const f = await claudeFixture(t);
+  const admin = { id: 'admin', role: 'project_admin', repositories: ['r'] };
+  const url = new URL('http://local/api/repositories/r/roles');
+  roleApi(f.s, admin, 'PUT', url, {
+    expected_revision: roleApi(f.s, admin, 'GET', url, {}).revision,
+    enabled: true,
+    skills: [{ id: 'team-kit', source: { type: 'inline', files: [{ path: 'SKILL.md', content: '---\nname: team-kit\ndescription: Team conventions.\n---\nFollow conventions.' }] } }],
+    roles: [{ role_id: 'dev', harness_ref: { id: 'claude_code' }, skill_bundle_ref: { id: 'team-kit' } }],
+  });
+  const out = await runRole(f.spec, 'dev');
+  assert.equal(out.result.summary, 'read through gateway');
+  const st = f.state('dev');
+  const launch = JSON.parse(readFileSync(join(f.cliHome(st), 'launch.json'), 'utf8'));
+  assert.ok(!launch.args.includes('--disable-slash-commands'), 'must not pass --disable-slash-commands so plugin skills can load');
+  const pluginIdx = launch.args.indexOf('--plugin-dir');
+  assert.ok(pluginIdx >= 0, 'must pass --plugin-dir for materialized skill set');
+  const pluginDir = launch.args[pluginIdx + 1];
+  assert.ok(existsSync(join(pluginDir, '.claude-plugin', 'plugin.json')), 'plugin manifest must exist');
+  assert.ok(existsSync(join(pluginDir, 'skills', 'team-kit', 'SKILL.md')), '1-level skill directory must exist');
+  const bound = f.s.all("SELECT data FROM task_history WHERE type='harness_event'").map(r => JSON.parse(r.data)).find(e => e.type === 'session_bound');
+  assert.deepEqual(bound.skills, ['bot:team-kit']);
 });

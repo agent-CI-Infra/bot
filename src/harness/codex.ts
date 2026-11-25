@@ -330,7 +330,12 @@ export async function runCodex<T>(
   const instructions =
     spec.system +
     '\n\nYou execute one Bot role assignment inside the isolated workspace container with cwd at the repository checkout. ' +
-    'Use native shell, file reading/editing, search, image viewing, and sub-agent tools directly on the repository checkout, and use the offered bot MCP tools for platform task records, memory, skills, and structured submission. ' +
+    'Use native shell, file reading/editing, search, image viewing, and sub-agent tools directly on the repository checkout, and use the offered bot MCP tools for platform task records, memory, and structured submission' +
+    (offeredToolNames.includes('read_skill')
+      ? ', and read pinned skills with read_skill when applicable. '
+      : spec.harnessSkillSet?.skills.length
+        ? '. Pinned skills are mounted read-only and loaded natively when relevant; they never widen permissions. '
+        : '. ') +
     'Do not publish, push, or merge directly from shell. ' +
     `Use the offered submission tool ${finishDesc} once your role result is ready; a text message alone is not a submission, and submission is followed by independent acceptance. After successful submission, end this turn without further actions.` +
     trustedAgentsSection;
@@ -427,6 +432,9 @@ export async function runCodex<T>(
         const mcpArgs = Array.isArray(session.started?.mcp_args)
           ? session.started.mcp_args.map((a: unknown) => String(a))
           : ['/opt/runner/mcp-bridge.mjs', `/workspace/tasks/${session.workspaceId}/agent`];
+        const skillDir = typeof session.started?.skill_dir === 'string' && session.started.skill_dir
+          ? session.started.skill_dir
+          : undefined;
         const sandbox =
           (spec.harnessAccess&&spec.harnessAccess.workspace!=='write'?'read-only':prepared.config?.sandbox) ??
           (cwd.startsWith('/workspace/') ? 'danger-full-access' : 'workspace-write');
@@ -449,6 +457,7 @@ export async function runCodex<T>(
           expectedVersion: session.cliVersion,
           codexHome,
           cwd,
+          ...(skillDir ? { skillDir } : {}),
           egress,
           sandbox,
           computerAllowed: spec.harnessAccess?.commands!==false,

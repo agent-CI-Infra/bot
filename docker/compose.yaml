@@ -35,6 +35,7 @@ services:
       BOT_DATABASE_PATH: /data/control.sqlite
       BOT_TOOL_RESULTS_DIR: /tool-results
       BOT_PROJECT_TOOLS_DIR: /project-tools
+      BOT_SKILL_STORE_DIR: /skill-store
       BOT_AGENT_TOOLS_AUTO_INSTALL: "${BOT_AGENT_TOOLS_AUTO_INSTALL:-1}"
       BOT_MASTER_KEY_FILE: /keys/master.key
       BOT_MANAGER_TOKEN_FILE: /internal/manager.token
@@ -86,6 +87,9 @@ services:
       # Per-project isolated binary tool snapshots (/project-tools/<repository_id>/rev-<N>, #1322).
       # Only the control plane writes here; project computers and group assistants mount active revisions read-only.
       - project-tools:/project-tools
+      # Content-addressed materialized skill sets (/skill-store/projects/<repository_id>/sets/<hash> & /skill-store/service/sets/<hash>, #1359).
+      # Only the control plane writes here; project and assistant computers mount their isolated scope read-only at /opt/bot-skills.
+      - skill-store:/skill-store
     networks: [control]
     read_only: true
     tmpfs:
@@ -140,6 +144,7 @@ services:
       BOT_PROJECT_IMAGE: ghcr.io/agent-ci-infra/bot-project-computer:${BOT_IMAGE_TAG:-latest}
       BOT_TOOL_RESULTS_DIR: /tool-results
       BOT_PROJECT_TOOLS_DIR: /project-tools
+      BOT_SKILL_STORE_DIR: /skill-store
       BOT_PROJECT_EGRESS: "${BOT_PROJECT_EGRESS:-true}"
     volumes:
       - manager-data:/data
@@ -152,6 +157,8 @@ services:
       - agent-tools:/opt/agent-tools:ro
       # Read-only: the manager finds the project-tools volume name and validates each active rev-<N> before subpath mount.
       - project-tools:/project-tools:ro
+      # Read-only: the manager finds the skill-store volume name and validates each scope directory before subpath mount.
+      - skill-store:/skill-store:ro
     networks: [control]
     read_only: true
     tmpfs:
@@ -181,6 +188,9 @@ volumes:
   project-tools:
     labels:
       department.bot.kind: project-tools
+  skill-store:
+    labels:
+      department.bot.kind: skill-store
   assistant-homes:
   bot-data:
   bot-keys:

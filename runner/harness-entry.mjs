@@ -1,4 +1,3 @@
-import {stageSessionSkills} from './session-resources.mjs';
 import {startCredentialHelperServer} from './credential-helper.mjs';
 import {buildGitConfigEnv} from './git-credential-bot.mjs';
 import { createServer } from 'node:http';
@@ -7,7 +6,7 @@ import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { appendFile, chmod, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { existsSync, lstatSync, readdirSync, realpathSync } from 'node:fs';
-import { delimiter, dirname, join, resolve, sep } from 'node:path';
+import { delimiter, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { maskedStream } from './command-output.mjs';
 import { environment as baseEnv, workspaceTag } from './command.mjs';
 import { startModelRelay } from './model-relay.mjs';
@@ -29,6 +28,18 @@ function mapToolsPath(containerPath) {
     return resolve(process.env.BOT_AGENT_TOOLS_DIR, containerPath.slice('/opt/agent-tools/'.length));
   }
   return containerPath;
+}
+
+function mapSkillPath(containerPath, skillSet) {
+  if (!containerPath || typeof containerPath !== 'string') return null;
+  if (!local) return containerPath;
+  const prefix = '/opt/bot-skills/';
+  if (!containerPath.startsWith(prefix)) return containerPath;
+  const baseRoot = process.env.BOT_SKILL_STORE_DIR?.trim()
+    || (typeof skillSet?.local_root === 'string' && isAbsolute(skillSet.local_root) ? skillSet.local_root : '');
+  const scope = typeof skillSet?.scope === 'string' ? skillSet.scope : '';
+  if (!baseRoot || !scope || scope.includes('..') || scope.startsWith('/') || scope.includes('\\')) return null;
+  return resolve(baseRoot, scope, containerPath.slice(prefix.length));
 }
 
 async function ensureSafeDirectory(dirPath, allowedRoot) {
@@ -286,6 +297,13 @@ try {
 
   childEnv = buildGitConfigEnv(childEnv, gitCredPath, allowHttpGit);
 
+  const skillSet = rawConfig.skill_set && typeof rawConfig.skill_set === 'object' ? rawConfig.skill_set : null;
+  const mappedPluginDir = skillSet?.plugin_dir ? mapSkillPath(skillSet.plugin_dir, skillSet) : null;
+  const mappedSkillsDir = skillSet?.skills_dir ? mapSkillPath(skillSet.skills_dir, skillSet) : null;
+  const fileAccess = rawConfig.execution_access ? (rawConfig.execution_access.fileTools ?? rawConfig.execution_access.workspace) : 'write';
+  const mountedPluginDir = fileAccess !== 'none' && mappedPluginDir && existsSync(mappedPluginDir) ? mappedPluginDir : null;
+  const mountedSkillsDir = fileAccess !== 'none' && mappedSkillsDir && existsSync(mappedSkillsDir) ? mappedSkillsDir : null;
+
   let spawnCmd = executable;
   let spawnArgs = [];
   let sessionId = typeof rawConfig.session_id === 'string' ? rawConfig.session_id : null;
@@ -307,7 +325,6 @@ try {
       stagedLocalConfigs = await stageLocalCliConfig(workspaceRoot, 'claude_code', claudeHome, addSecret);
       await writeFile(`${agentDir}/staged-cli-config.json`, JSON.stringify(stagedLocalConfigs), { mode: 0o600 });
     }
-    await stageSessionSkills(claudeHome,rawConfig.resources);
     await ensureSafeDirectory(`${homeDir}/.config`, homeDir);
     await ensureSafeDirectory(`${homeDir}/.cache`, homeDir);
     if (rawConfig.resume === true && sessionId && claudeTranscriptExists(homeDir, sessionId)) {
@@ -353,11 +370,11 @@ try {
       '--tools', 'default',
       '--disallowedTools', disallowed.join(','),
       '--setting-sources', localConfig ? 'user' : '',
+      ...(mountedPluginDir ? ['--plugin-dir', mountedPluginDir] : []),
       '--add-dir', repoDir,
       '--settings', JSON.stringify({ autoUpdatesChannel: 'stable', disableAllHooks:true }),
       '--mcp-config', JSON.stringify(mcpConfig),
       '--strict-mcp-config',
-      '--disable-slash-commands',
       '--dangerously-skip-permissions',
       '--no-chrome',
       ...(!localConfig ? ['--model', String(rawConfig.model || 'claude-sonnet-4-5-20250929')] : []),
@@ -399,7 +416,6 @@ try {
       stagedLocalConfigs = await stageLocalCliConfig(workspaceRoot, 'codex', codexHome, addSecret);
       await writeFile(`${agentDir}/staged-cli-config.json`, JSON.stringify(stagedLocalConfigs), { mode: 0o600 });
     }
-    await stageSessionSkills(codexHome,rawConfig.resources);
     if(gateway) await writeFile(
       `${codexHome}/config.toml`,
       buildCodexConfigToml({
@@ -428,7 +444,10 @@ try {
     spawnArgs = [`${runnerRoot}/acp-entry.mjs`, agentDir, executable];
     childEnv.BOT_ACP_RELAY_URL = relay.url;
     childEnv.BOT_ACP_INSTANCE_ID = instanceId;
-    if (icode) childEnv.CHRYS_SESSION_ROOT_DIR = await ensureSafeDirectory(join(cliStateRoot, 'icode'), cliStateRoot);
+    if (icode) {
+      childEnv.CHRYS_SESSION_ROOT_DIR = await ensureSafeDirectory(join(cliStateRoot, 'icode'), cliStateRoot);
+      if (mountedSkillsDir) childEnv.BOT_MOUNTED_SKILLS_DIR = mountedSkillsDir;
+    }
   }
 
   await writeFile(stdoutFile, '', { mode: 0o600 });
@@ -477,6 +496,7 @@ try {
     actual_resume: actualResume,
     repo_dir: repoDir,
     codex_home: childEnv.CODEX_HOME ?? null,
+    skill_dir: mountedSkillsDir ?? null,
     mcp_command: nodeExecutable,
     mcp_args: [mcpBridgePath, agentDir],
   });
