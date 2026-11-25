@@ -5,6 +5,7 @@ import { assertCurrent, authorize, restrictActor, revision, type ActorContext } 
 import { localParts, nextTime, parseCron, previewTimes } from '../schedules/time.js';
 import type { ChannelService } from './service.js';
 import type { StagedFeishuCard } from './cards.js';
+import { chatProfile } from './profiles.js';
 
 // Prompt-driven timers mounted on a Feishu chat (#330). A private chat's timer runs its owner's management assistant; a bound
 // group's timer runs the group's service role. The prompt is only the task: tools, projects and permissions stay the chat's own
@@ -37,6 +38,24 @@ export const conversationScheduleTool = { type: 'function', function: { name: co
     + 'After creating or changing a timer, tell the person its next run time (next_at and future are epoch milliseconds).',
   parameters: { type: 'object', properties: {
     action: { type: 'string', enum: ['list', 'create', 'update', 'pause', 'resume', 'delete'] }, id: { type: 'string' },
+    name: { type: 'string', maxLength: 100 }, prompt: { type: 'string', maxLength: 8000 }, timezone: { type: 'string', maxLength: 64 },
+    cron: { type: 'string', maxLength: 120 }, interval_minutes: { type: 'integer', minimum: 5, maximum: 44640 } }, required: ['action'], additionalProperties: false } } };
+
+/**
+ * The timers of bound groups, for the management assistant (#1362): what the console's group timer API does, for the current
+ * person and with its checks. A project scheduled task never posts to Feishu, so this is how a scheduled message reaches a group.
+ */
+export const groupScheduleName = 'group_schedules';
+export const groupScheduleTool = { type: 'function', function: { name: groupScheduleName,
+  description: 'Timers of the bound Feishu groups the current person may manage, the same timers as on the console\'s group page. Each timer runs its prompt as a new turn of that group\'s own assistant, '
+    + 'with the group\'s projects and permissions, and posts the answer in the group; a run with nothing to report may stay silent. This is how to post into a group on a schedule: '
+    + 'project scheduled tasks (schedule.register) never post to Feishu. A private chat\'s own timers are conversation_schedules, not this tool. '
+    + 'action groups: the groups you may manage (group_id, name, chat_id; name is the group\'s Feishu name, null when not known yet, then say so instead of guessing). '
+    + 'list {group_id}: its timers. create {group_id, name, prompt, cron (5 fields, in timezone) or interval_minutes (at least 5), timezone (IANA, default Asia/Shanghai)}. '
+    + 'update {id, and only what changes}; pause, resume or delete {id}. Write the prompt as the task the group\'s assistant does at each run, including when to stay silent. '
+    + 'After creating or changing a timer, tell the person its group and next run time as a date and time in the timer\'s time zone (next_at and future are epoch milliseconds; never show the raw number).',
+  parameters: { type: 'object', properties: {
+    action: { type: 'string', enum: ['groups', 'list', 'create', 'update', 'pause', 'resume', 'delete'] }, group_id: { type: 'string', maxLength: 64 }, id: { type: 'string', maxLength: 64 },
     name: { type: 'string', maxLength: 100 }, prompt: { type: 'string', maxLength: 8000 }, timezone: { type: 'string', maxLength: 64 },
     cron: { type: 'string', maxLength: 120 }, interval_minutes: { type: 'integer', minimum: 5, maximum: 44640 } }, required: ['action'], additionalProperties: false } } };
 
@@ -214,6 +233,41 @@ export class ChannelSchedules {
     const current = this.view(old), recurrence = spec.cron !== undefined || spec.interval_minutes !== undefined;
     return { schedule: this.view(this.change(old, chat, by, { name: current.name, prompt: current.prompt, timezone: current.timezone,
       ...(recurrence ? {} : current.cron ? { cron: current.cron } : { interval_minutes: current.interval_minutes }), ...spec })) };
+  }
+
+  // --- From the management assistant (#1362) ---------------------------------------------------------------------------
+  /** Bound groups whose timers the actor may manage, by the console's rule: whoever may manage the group's enabled, usable binding. */
+  groups(actor: ActorContext): Row[] {
+    return this.store.all("SELECT c.id FROM channel_service_bindings b JOIN channel_chats c ON c.id=b.chat_id WHERE b.enabled=1 AND c.chat_type<>'p2p' ORDER BY c.id").flatMap(row => {
+      try { const chat = this.host.employees.chat(row.id); this.manage(actor, chat); return [chat]; }
+      catch (error) { if (error instanceof HttpError) return []; throw error; }
+    });
+  }
+  /**
+   * The group_schedules tool: the console's group timer calls (list, create, update, remove) for the current person, with the
+   * same checks and the person recorded as the author, so the timers run as the group's assistant like any other. Private chat
+   * timers are left to conversation_schedules. An update names only what changes and the timer's current revision is read here.
+   */
+  managed(actor: ActorContext, input: Json): Json {
+    fields(input, ['action', 'group_id', 'id', 'name', 'prompt', 'timezone', 'cron', 'interval_minutes']);
+    const { action, group_id: group, id, ...spec } = input;
+    if (action === 'groups') return { groups: this.groups(actor).map(chat => ({ group_id: chat.id, name: chatProfile(this.store, chat.id).display_name || null, chat_id: chat.chat_id })) };
+    const chat = (value: unknown) => {
+      const row = this.host.employees.chat(text(value, 64));
+      if (row.chat_type === 'p2p') fail(400, 'group_chat_required', 'group_id');
+      return row;
+    };
+    if (action === 'list') return this.list(actor, chat(group).id);
+    if (action === 'create') return this.create(actor, chat(group).id, { timezone: 'Asia/Shanghai', ...spec });
+    if (!['update', 'pause', 'resume', 'delete'].includes(String(action))) return fail(400, 'channel_schedule_action_invalid', 'action');
+    const old = this.schedule(text(id, 64));
+    if (old.kind !== 'group') fail(404, 'channel_schedule_not_found');
+    if (action === 'delete') return this.remove(actor, old.id, { expected_revision: old.revision });
+    if (action !== 'update') return this.update(actor, old.id, { expected_revision: old.revision, enabled: action === 'resume' });
+    // As in a conversation: the rest is the timer's current spec, and a new recurrence replaces the old one.
+    const current = this.view(old), recurrence = spec.cron !== undefined || spec.interval_minutes !== undefined;
+    return this.update(actor, old.id, { expected_revision: old.revision, name: current.name, prompt: current.prompt, timezone: current.timezone,
+      ...(recurrence ? {} : current.cron ? { cron: current.cron } : { interval_minutes: current.interval_minutes }), ...spec });
   }
   /** Run once now, whatever the timer's rhythm; one run of a timer at a time. */
   runNow(actor: ActorContext, id: string, input: Json): Json {

@@ -132,6 +132,8 @@ export class ChannelService {
       const chat=personalChat(conversation);if(!chat||chat.chat_type!=='p2p')return;
       return args=>this.schedules.conversation(chat.id,{actor},args);
     };
+    // The timers of bound groups (#1362), for a person who may manage at least one of them, in any of their conversations.
+    management.groupSchedules=actor=>this.schedules.groups(actor).length?args=>this.schedules.managed(actor,args):undefined;
     management.feishuCard=(actor,conversation,input,clean)=>{
       const source=String(input.source_message??'');
       if(source.startsWith('schedule:')){

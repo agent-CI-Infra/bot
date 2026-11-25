@@ -28,7 +28,7 @@ import { computerMediaTools, mediaTools, type MediaComputer, type MediaTurn } fr
 import { credentialSafetyInstructions, sendMessageName, sendMessageTool, stageMessage, stageMessageInstructions, stageMessageLimit } from '../service-roles/stage-messages.js';
 import { staySilent, staySilentInstructions, staySilentName, staySilentTool } from '../service-roles/stay-silent.js';
 import { privateTurnMessageInstructions, type TurnMessages } from '../channels/turn-messages.js';
-import { conversationScheduleName, conversationScheduleTool } from '../channels/schedules.js';
+import { conversationScheduleName, conversationScheduleTool, groupScheduleName, groupScheduleTool } from '../channels/schedules.js';
 import { RepositoryOnboarding, onboardingInstructions, onboardingRepositoryOf, startRepositoryName, startRepositoryTool } from './onboarding.js';
 import { startRequestsName, startRequestsTool } from './onboarding-requests.js';
 import { managerFlowInstructions } from '../dispatch/settings.js';
@@ -73,6 +73,8 @@ export class ManagementAgent {
   stageMessage?:(actor:ActorContext,conversation:string,input:Json,message:string,text:string,sequence:number)=>string|undefined;
   // The timers of the private chat this conversation belongs to (#851), managed for its owner; none for a console conversation.
   conversationSchedules?:(actor:ActorContext,conversation:string)=>((args:Json)=>Json)|undefined;
+  // The timers of the bound groups the person may manage (#1362), as on the console's group page; none when they manage none.
+  groupSchedules?:(actor:ActorContext)=>((args:Json)=>Json)|undefined;
   // Feishu Card JSON 2.0 staging for Feishu private chats and personal timers (#1219); none for Web console conversations.
   feishuCard?:(actor:ActorContext,conversation:string,input:Json,clean:(value:string)=>string)=>FeishuCardTurn|undefined;
   readonly own:OwnTasks;
@@ -294,7 +296,7 @@ export class ManagementAgent {
     const repositories=new ServiceRepositories(this.store,new Redactor(),guard,resolveAuthorizedRepository,()=>githubReadScopes(JSON.parse(serviceRole(this.store,managementAssistant)!.permissions)),this.service.githubUrl);
     let modelImageInput=true;
     const media=this.mediaTurn?.(actor,conversation,input,computer,()=>{assertCurrent(actor);this.conversation(base,conversation);},()=>modelImageInput);
-    const schedules=this.conversationSchedules?.(actor,conversation);
+    const schedules=this.conversationSchedules?.(actor,conversation),groupTimers=this.groupSchedules?.(actor);
     const permissions=()=>JSON.parse(serviceRole(this.store,managementAssistant)?.permissions??'{}') as RolePermissions;
     // github_write (#381): the assistant's role permission, and the current user's authority to write tasks in a started project.
     const write=async(args:any)=>{
@@ -327,7 +329,7 @@ export class ManagementAgent {
       ? projectToolsAssistantTools.filter(t=>t.function.name===projectToolsListName?canListProjectTools():canWriteProjectTools())
       : [];
     const feedbackEnabled=isFeedbackEnabled(this.store);
-    const tools=[readToolResult,...managementTools,...offeredProjectToolTools,...(permitsManagement(permissions(),'project.update',true)?[startRepositoryTool]:[]),...(deciding?[startRequestsTool]:[]),...(schedules?[conversationScheduleTool]:[]),...ownTaskTools,...serviceRepositoryTools,...(canCheckout()?[checkoutRepositoryTool]:[]),...(nativeServiceSkills?[]:[activeReadSkillTool]),...(cardTurn?[feishuCardTool]:[]),...(permitsTool(permissions(),'github_write')?[scopedGithubWriteTool]:[]),...(computerOffered?assistantComputerTools:[]),...(media?mediaTools.filter(t=>computerOffered||!computerMediaTools.has(t.function.name)):[]),...(feedbackEnabled?[submitFeedbackTool]:[]),...(timer?[]:[sendMessageTool])];
+    const tools=[readToolResult,...managementTools,...offeredProjectToolTools,...(permitsManagement(permissions(),'project.update',true)?[startRepositoryTool]:[]),...(deciding?[startRequestsTool]:[]),...(schedules?[conversationScheduleTool]:[]),...(groupTimers?[groupScheduleTool]:[]),...ownTaskTools,...serviceRepositoryTools,...(canCheckout()?[checkoutRepositoryTool]:[]),...(nativeServiceSkills?[]:[activeReadSkillTool]),...(cardTurn?[feishuCardTool]:[]),...(permitsTool(permissions(),'github_write')?[scopedGithubWriteTool]:[]),...(computerOffered?assistantComputerTools:[]),...(media?mediaTools.filter(t=>computerOffered||!computerMediaTools.has(t.function.name)):[]),...(feedbackEnabled?[submitFeedbackTool]:[]),...(timer?[]:[sendMessageTool])];
     // Only a timer's turn may end silently, and only through stay_silent (#489); own tasks never get the tool.
     const turnTools=timer?[...tools,staySilentTool]:tools;let silence:string|undefined;
     // Set once a merged message is certainly for the assistant: then the turn must answer and cannot end silently.
@@ -425,6 +427,7 @@ export class ManagementAgent {
         else if(name===feishuCardToolName){if(!cardTurn)return fail(403,'tool_not_allowed');result=cardTurn.execute(args);}
         else if(name===startRepositoryName){if(!permitsManagement(permissions(),'project.update',true))fail(403,'tool_not_allowed');validate(startRepositoryTool.function.parameters,args);result=await this.onboarding.tool(actor,args);}
         else if(name===conversationScheduleName){if(!schedules)fail(403,'tool_not_allowed');result=schedules!(args);}
+        else if(name===groupScheduleName){if(!groupTimers)fail(403,'tool_not_allowed');validate(groupScheduleTool.function.parameters,args);result=groupTimers!(args);}
         else if(name===startRequestsName){if(!deciding)fail(403,'tool_not_allowed');validate(startRequestsTool.function.parameters,args);result=await requests.tool(actor,args);}
         else if(projectToolsAssistantNames.includes(name)){
           const projectTools=this.service.projectTools;
@@ -495,6 +498,13 @@ export class ManagementAgent {
           +(schedules?' conversation_schedules manages the timers of this private chat for its owner, for example a daily check that reports only when something is wrong.':'')
           // #1072: a project scheduled task can start a workflow on time; its example instruction checks for a running run first.
           +' A project scheduled task (management_command schedule.register, workflow manager.check) can also start a GitHub Actions workflow on time, for example when GitHub\'s own schedule runs late. Its instruction says which workflow, on which ref, and to check first, for example: 「在 main 上触发 .github/workflows/nightly.yml（github_write POST /actions/workflows/nightly.yml/dispatches，ref 为 main）。触发前先用 github_read 查看这个 workflow 有没有排队或正在运行的运行，有就不再触发，只在报告里说明；触发后在报告里写上 GitHub 返回的运行链接。」 The Manager runs it with github_write, which needs the project\'s capability ceiling at comment or more, Actions write on the Manager role and the workflow declaring workflow_dispatch; GitHub refuses the rest and the task reports it.'
+          // #1362: asked for a daily report in two bound groups, the assistant tried a project scheduled task, which cannot post there.
+          +' A new project plan sets actor_id "auto" (preview_schedule and schedule.register both accept it): the project\'s service identity, created on registration when the project has none.'
+          +' A project scheduled task never posts to Feishu: its results stay in the project\'s task records and on GitHub, and its parameters name no chat or destination.'
+          +' A scheduled message into a Feishu group is a timer of that group, run as a turn of the group\'s own assistant'
+          +(groupTimers?': manage it with group_schedules, for the groups its action groups lists.'
+            :'. The current person manages no bound group, so you cannot set one up here: anyone in the group can ask the group\'s assistant there, or someone who manages the group sets it up on the console\'s group page.')
+          +' A Feishu private chat\'s own timers are '+(schedules?'conversation_schedules.':'managed from that private chat, not from this conversation.')
           +'\n\n'+lateSchedules
           +'\n\n'+onboardingInstructions
           // #1123: explain a flow from the project's own Manager prompt; change it only after a before/after flowchart is confirmed.
