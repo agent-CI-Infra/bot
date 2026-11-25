@@ -37,7 +37,7 @@ function syncConsoleScope() {
 }
 function restoreConsoleStart(rows) {
   // #1369: a saved #/more names no page any more, so it starts like a bare address, in the remembered scope.
-  if (location.hash && location.hash !== '#/' && location.hash !== '#/more') return;
+  if (location.hash && location.hash !== '#/' && !retiredMoreAddress.test(location.hash)) return;
   let scope;
   try { scope = localStorage.getItem(consoleLastScopeKey()); } catch { /* Use All projects when storage is unavailable. */ }
   const project = rows.find(row => String(row.id) === scope);

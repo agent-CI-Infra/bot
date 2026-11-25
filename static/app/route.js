@@ -3,6 +3,8 @@ const taskKinds = { reviews: 'review', developments: 'development' }, listTabs =
 // Console pages are drawn by static/shell.js (renderConsolePage). They are not tabs of the generic list, and no list
 // read may ever build /api/<tab> from them: #/inbox would become GET /api/inbox, an endpoint that does not exist (#365).
 const consoleTabs = ['inbox', 'new-task', 'conversations', 'task', 'not-found'];
+// #1369: the retired 更多功能 page, with whatever a saved link appended to it; it opens the console home instead.
+const retiredMoreAddress = /^#\/more(?:[/?].*)?$/;
 // #934, #1133: legacy #/onboarding/<id> links redirect to the management assistant and prefill its composer.
 const repositoryOnboardingAddress = /^#\/onboarding\/([1-9]\d*)$/;
 // #642: an address under #/ that names no page shows 找不到这个页面 instead of keeping (or silently loading) another page.
@@ -47,7 +49,7 @@ function addressTab(hash) {
   if (hash === '#/projects') return 'projects';
   if (/^#\/(?:board|reviews|developments)(?:\/.*)?$/.test(hash.split('?')[0])) return 'projects';
   // #1369: route() sends the retired 更多功能 page to the console home of the current scope.
-  if (hash.split('?')[0] === '#/more') return 'projects';
+  if (retiredMoreAddress.test(hash)) return 'projects';
   if (onboardingAddress.test(hash)) return 'settings';
   if (hash === '#external') return 'external';
   // #224-A: the component/state sample page. It has an address of its own so a deep link works, and no #tabs entry:
@@ -76,7 +78,7 @@ async function route() {
   const oldInbox = /^#\/inbox\/([1-9]\d*)(?:\/(\d+))?$/.exec(location.hash);
   if (oldInbox) history.replaceState(null, '', `#/projects/${oldInbox[1]}/inbox${oldInbox[2] ? '/' + oldInbox[2] : ''}`);
   // #1369: the 更多功能 page is gone; a saved #/more opens the console home of the current scope instead.
-  if (location.hash.split('?')[0] === '#/more') history.replaceState(null, '', consolePageAddress('projects'));
+  if (retiredMoreAddress.test(location.hash)) history.replaceState(null, '', consolePageAddress('projects'));
   const oldMenu = /^#\/projects\/([1-9]\d*)\/menu$/.exec(location.hash);
   if (oldMenu) history.replaceState(null, '', `#/projects/${oldMenu[1]}/overview`);
   // #1222: the legacy console Kanban board is retired; single-project board redirects to Project Overview Tasks,
