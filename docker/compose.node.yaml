@@ -1,0 +1,90 @@
+# Remote Linux Docker compute node (node-agent) for distributed launchpad deployments.
+# Runs the published bot-computer-manager image with `node manager/node-agent.mjs` — no Docker TCP port is ever exposed.
+#
+# Required environment variables:
+#   BOT_CENTER_URL          Control-plane origin (e.g. https://bot.example.com)
+#   BOT_NODE_PAIRING_TOKEN  One-time pairing token (bnode_...) issued in Console -> 全局设置 -> 计算节点
+#
+# Optional environment variables:
+#   BOT_IMAGE_TAG           Pinned release tag matching the control plane (default: latest)
+#   BOT_NODE_LABELS         Comma-separated key=value scheduling labels (e.g. gpu=true,region=cn-east)
+#   BOT_NODE_TRANSPORT      websocket (default, auto-falls back to long_poll) or long_poll
+#   BOT_PROJECT_EGRESS      Container internet egress default (default: true)
+#
+# Usage:
+#   BOT_CENTER_URL=https://bot.example.com BOT_NODE_PAIRING_TOKEN=bnode_... \
+#     docker compose -f docker/compose.node.yaml up -d
+#
+# After the first successful pairing, the node persists its Ed25519 identity in `node-data` (/data/node-identity.json)
+# and no longer needs BOT_NODE_PAIRING_TOKEN on subsequent restarts.
+services:
+  node-agent:
+    image: ghcr.io/agent-ci-infra/bot-computer-manager:${BOT_IMAGE_TAG:-latest}
+    command: ["node", "manager/node-agent.mjs"]
+    depends_on:
+      project-image:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8795/ready', { signal: AbortSignal.timeout(2000) }).then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      start_period: 30s
+      retries: 3
+    environment:
+      TMPDIR: /tmp
+      SQLITE_TMPDIR: /tmp
+      BOT_CENTER_URL: "${BOT_CENTER_URL:-}"
+      BOT_NODE_PAIRING_TOKEN: "${BOT_NODE_PAIRING_TOKEN:-}"
+      BOT_NODE_LABELS: "${BOT_NODE_LABELS:-}"
+      BOT_NODE_TRANSPORT: "${BOT_NODE_TRANSPORT:-websocket}"
+      BOT_NODE_DATA_DIR: /data
+      BOT_MANAGER_DATABASE: /data/manager.sqlite
+      BOT_SYNC_CACHE_DIR: /data/sync-cache
+      BOT_PROJECT_IMAGE: ghcr.io/agent-ci-infra/bot-project-computer:${BOT_IMAGE_TAG:-latest}
+      BOT_IMAGE_TAG: "${BOT_IMAGE_TAG:-latest}"
+      BOT_AGENT_TOOLS_DIR: /opt/agent-tools
+      BOT_PROJECT_TOOLS_DIR: /project-tools
+      BOT_SKILL_STORE_DIR: /skill-store
+      BOT_TOOL_RESULTS_DIR: /tool-results
+      BOT_ASSISTANT_HOMES: /assistant-homes
+      BOT_MODEL_GATEWAY_DIR: /run/model-gateway
+      BOT_RUNNER_SOCKETS_DIR: /run/bot-runner
+      BOT_PROJECT_EGRESS: "${BOT_PROJECT_EGRESS:-true}"
+    volumes:
+      - node-data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+      - node-assistant-homes:/assistant-homes
+      - node-agent-tools:/opt/agent-tools
+      - node-project-tools:/project-tools
+      - node-skill-store:/skill-store
+      - node-tool-results:/tool-results
+      - node-model-gateway:/run/model-gateway
+      - node-runner-sockets:/run/bot-runner
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    init: true
+    stop_grace_period: 100s
+    restart: unless-stopped
+
+  # Pulls the matching project computer image into this node's local Docker daemon before node-agent starts.
+  project-image:
+    image: ghcr.io/agent-ci-infra/bot-project-computer:${BOT_IMAGE_TAG:-latest}
+    entrypoint: ["true"]
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: "no"
+
+volumes:
+  node-data:
+  node-assistant-homes:
+  node-agent-tools:
+  node-project-tools:
+  node-skill-store:
+  node-tool-results:
+  node-model-gateway:
+  node-runner-sockets:

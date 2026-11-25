@@ -10,19 +10,18 @@
 flowchart LR
   User["Browser / GitHub / Feishu / External Client"] --> Edge["HTTPS Reverse Proxy or Cloudflare Tunnel (edge net)"]
   Edge --> Webhook["webhook gateway (edge + control net)"]
-  Webhook --> Bot["bot control-plane :8791 (control net)"]
+  Webhook --> Bot["bot control-plane :8791 (ClusterManager + ClusterHub)"]
   Bot --> SQLite["bot-data: SQLite + trajectories + blobs + git-cache"]
-  Bot --> Manager["manager (control net + Docker socket)"]
-  Manager --> ProjComp["Project Computers (per-repo bridge net, UID 10001)"]
-  Manager --> AsstComp["Assistant Computers (isolated ICC-off bridge or none, UID 10001)"]
-  Bot -. "read-only /opt/agent-tools, /opt/bot-skills, /results & /run/model-gateway (UDS)" .-> ProjComp
-  Bot -. "read-only /opt/bot-skills & /run/model-gateway (UDS)" .-> AsstComp
+  Bot --> Manager["local manager (local node, control net + Docker socket)"]
+  NodeAgent["remote node-agent (Linux Docker hosts, outbound WS / <=25s HTTPS long-poll)"] --> Bot
+  Manager --> ProjComp["Local Project / Assistant Computers (UID 10001)"]
+  NodeAgent --> RemoteComp["Remote Project / Assistant Computers (local Docker + SyncClient + UDS model proxy)"]
 ```
 
 | 服务 | 源码目录 | 核心职责 |
 | --- | --- | --- |
-| `bot`（控制面） | `src/`、`static/`、`public-board/` | 单一业务端口 `8791` 统一承接管理 API、控制台静态页、OAuth/App 回调、GitHub/飞书 Webhook、外部执行端与公开看板；承担全部认证授权、事件分派、任务调度、模型网关、GitHub 发布与存储持久化。 |
-| `manager` | `manager/` | **唯一挂载 Docker socket 的服务**；按部署 ID 和受控操作接口管理项目电脑、助手电脑与笔记卷，不对外暴露宿主端口，也不接触上游凭据或控制面数据库。 |
+| `bot`（控制面） | `src/`、`static/`、`public-board/` | 单一业务端口 `8791` 统一承接管理 API、控制台静态页、OAuth/App 回调、GitHub/飞书 Webhook、外部执行端、公开看板、文件同步网关（`/sync/*`）与节点接入总线（`/cluster/nodes/*`）；承担全部认证授权、事件分派、任务调度、集群路由与助手租约、模型网关、GitHub 发布与存储持久化。 |
+| `manager` / `node-agent` | `manager/` | **唯一挂载本地 Docker socket 的计算面服务**（永不暴露 Docker TCP）。单机部署运行 `manager/main.mjs` 作为内置 `local` 节点；分布式扩展节点复用同一镜像运行 `manager/node-agent.mjs`（`ComputeDriver` Linux Docker 实现，预留 `host` 返回 501），通过主动反向 WS / 长轮询接入控制面，保留本机 `manager.sqlite`、容器与预编译镜像缓存。 |
 | `runner` | `runner/` | 预装在项目/助手电脑镜像内的常驻守护进程（`runner/daemon.mjs`），经每容器隔离挂载的 UDS（`/run/bot-runner/runner.sock`，带一次性 Bearer 令牌鉴权，容器间及非 `manager` 服务均不可见）提供统一 HTTP/1.1 + WebSocket 线协议，进程内直接执行命令（异步流式 + 心跳 + HTTP 长轮询降级）、文件/二进制流、Git、Harness 与 inotify 邮箱唤醒，并维护本地 journal；`runner/runner.mjs --stdin` 保留供本地开发与 `docker exec` 大载荷兼容回退使用。 |
 | `webhook`、`tunnel` | `webhook/`、`tunnel/` | 边界转发网关与可选 Cloudflare Tunnel；`tunnel` 仅位于 `edge` 网络，只能经 `webhook` 到达 `bot:8791`，无法触及 `manager`。 |
 
@@ -54,7 +53,20 @@ flowchart LR
 - **可信与不可信代码检出区分**：
   - PR 检视、续修未合入 bot PR 属于非受信任检出：控制面禁止任何后端从该检出自动加载 `.agents/skills/`、`.pi/skills/`、`.codex/skills/`、根目录 `AGENTS.md`/`CLAUDE.md` 或任何本地 hooks/MCP，仅从受控基准分支注入可信配置并将可信 Skill 物化至只读 `/opt/bot-skills` 卷。
 
-## 4. 模块分层总览
+## 4. 分布式计算节点架构（ClusterManager 与 node-agent）
+
+- **状态归属与路由边界（`src/cluster/manager.ts`）**：
+  - 控制面 `control.sqlite` 仅保存集群期望态与协调账本：`compute_nodes`（默认自动注册内置 `local` 节点）、`compute_node_sessions`、`repository_node_bindings`、`repository_node_volumes`、`assistant_placements` 与 `environment_operation_nodes`；每个节点保留本机实态（`manager.sqlite`、本机容器、本机预编译镜像缓存与宿主机资源水位）。
+  - `ClusterManager` 实现 `Manager` 接口并按纯路由表分流：项目笔记与文件树（`/file-tree`、`/files`、`/notes`）始终由控制面权威处理，绝不将写入路由至远端节点；项目生命周期与执行按 `repository_node_bindings` 路由并执行 `binding_epoch` 栅栏校验；全局读接口（`/v1/projects`、`/v1/defaults`、`/v1/storage`、`/v1/precompiled-images`、`/v1/project-tools/mounts`、`/v1/notes-volumes`）聚合本机与在线远端节点，全局写接口扇出同步。
+- **节点身份、双向传输与统一同步（`src/cluster/hub.ts`、`manager/node-agent.mjs`、`manager/node-sync.mjs`、`manager/node-model-proxy.mjs`）**：
+  - 节点通过一次性配对令牌（`bnode_...`，数据库仅存哈希）绑定 Ed25519 公钥并换发绑定至 `node_id` 的短期会话（`bnsess_...`，均纳入全局红线脱敏）；所有远端调用采用异步 `operation_id` 立即 ack、断线重连后按 `op.resume` 幂等续传、超阈结果自动 `op.chunk` 分片传输（支持最长 35 分钟启停/构建与 `<=25s` HTTPS 长轮询回退）。
+  - 节点目录同步严格复用统一 `FileSyncEngine` 与 `runner/sync-client.mjs`（共享本地 CAS 对象缓存池，向 `/cluster/nodes/sync-token` 申请严格按节点绑定与助手归属校验的短期 `bsync_...` 令牌），不引入第二套同步或冲突合并实现。
+  - 节点本地监听 `/run/model-gateway/gateway.sock`（只读挂入容器），将容器 `rrt_...` 请求经节点长连或流式 `/cluster/nodes/model-proxy` 转发至控制面 `ModelGatewayHub`，长期 API Key 永不离开控制面；认证 WS 上同步预留默认拒绝（`allowTunnel=false`）的通用 TCP 隧道原语供后续远端 SSH 目标接入复用。
+- **助手电脑单写者与排水/改绑安全**：
+  - 控制面通过 `assistant_placements`（`owner, node_id, epoch, generation, turn, state, lease_expires_at, affinity_until`）执行 SQLite CAS 租约：同一归属任何时刻至多运行一台容器，保留亲和窗口与 `owner_busy` 排队语义；跨节点迁移严格遵循「先停旧节点容器并经 `SyncClient` 刷回 `assistant-homes` → 原子提交新 placement → 再在新节点拉起容器」，消除跨节点双写。
+  - 绑定状态机维护 `bound | active | draining | offline | rebinding`；节点排水后 `claimQueuedTask` 与 `ProjectService.reconcileProject` 立即拒绝新任务认领与失败自动重启，待在跑任务结束或超时后再停止容器；项目改绑先写回 `project-notes` 并就地回收旧节点容器/工作卷（不跨节点拷贝工作卷），孤儿笔记卷回收（`reclaimNotes` / `NotesReclaimer`）严格按 `node_id` 命中真实持卷节点。
+
+## 5. 模块分层总览
 
 ```text
 src/
@@ -66,6 +78,6 @@ src/
 ├── review/ & github/ & actions/ & releases/  # 检视与交付验证、github_write 与 Publisher、Actions 扫描、发版本
 ├── management/ & service-roles/ & channels/  # ManagementService、管理/群聊助手、飞书适配与本地消息账本
 ├── schedules/                   # 持久化 Schedule/Occurrence 租约与事件通知 Outbox
-├── storage/ & memory/ & projects/ & sync/      # SQLite/轨迹/Blob、项目知识、项目电脑网关与 Worktree、统一 FileSyncEngine
+├── storage/ & memory/ & projects/ & sync/ & cluster/  # SQLite/轨迹/Blob、项目知识、项目电脑、统一 FileSyncEngine、分布式节点集群
 └── external/ & public-board/    # 外部执行端凭据 Broker、公开看板增量采集与托管
 ```

@@ -50,6 +50,7 @@ import { worktreeStorage } from '../projects/worktrees.js';
 import { projectToolsStorage } from '../projects/tools.js';
 import { feedbackStorage } from '../feedback/storage.js';
 import { syncStorage } from '../sync/storage.js';
+import { clusterStorage } from '../cluster/storage.js';
 
 export type Row = Record<string, any>;
 export interface StoreOptions { slowSqlMs?: number; log?: (line: string) => void; now?: () => number }
@@ -342,6 +343,8 @@ export class Store {
     feedbackStorage(this);
     // Unified FileSyncEngine conflict audit & scope revision tracking (#1377).
     syncStorage(this);
+    // Distributed Linux Docker compute nodes, project bindings & assistant single-writer placements (#1380).
+    clusterStorage(this);
     // One capability ceiling per project (#850), derived once from the switches and writes it replaces.
     ceilingStorage(this);
     // One-time #1122 migration retiring work_settings, task_models and legacy work-type sections.

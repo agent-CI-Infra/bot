@@ -1150,6 +1150,15 @@ export class ModelGatewayHub {
     return this.udsSocketPath;
   }
 
+  /**
+   * Handles a proxied HTTP request (e.g. from a remote node-agent relaying container `/run/model-gateway/gateway.sock`
+   * traffic over an authenticated cluster session). Authentication still strictly requires a live `rrt_...` run token
+   * and all API keys remain exclusively on the control plane.
+   */
+  handleIncoming(req: IncomingMessage, res: ServerResponse): void {
+    this.onRequest(req, res);
+  }
+
   async startUds(socketPath: string): Promise<ModelGatewayServerHandle> {
     if (Buffer.byteLength(socketPath, 'utf8') >= 104) {
       throw new Error(`model_gateway_socket_path_too_long (${Buffer.byteLength(socketPath, 'utf8')} bytes): ${socketPath}`);

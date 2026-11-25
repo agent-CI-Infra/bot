@@ -65,6 +65,7 @@ import { MemoryConsolidationApi } from './memory/consolidation-api.js';
 import { feedbackApi } from './feedback/api.js';
 import { skillLibraryApi } from './roles/skill-library-api.js';
 import { createDefaultSyncRuntime, syncTokensApi, type CreateDefaultSyncRuntimeOptions, type SyncRuntime } from './sync/index.js';
+import { clusterApi, ClusterManager } from './cluster/index.js';
 
 interface Options { store: Store; staticDirectory: string; secureCookies?: boolean;
   // BOT_PUBLIC_ORIGIN: the deployment's own origin, always a valid Origin for writes; the wizard's verified address takes over URLs.
@@ -98,7 +99,9 @@ interface Options { store: Store; staticDirectory: string; secureCookies?: boole
   onConsolidation?: (service: MemoryConsolidationService) => void;
   /** Optional pre-built FileSyncEngine runtime or override options for the unified `/sync/:namespace/:scope/*` API (#1377). */
   sync?: SyncRuntime;
-  syncOptions?: Partial<CreateDefaultSyncRuntimeOptions>; }
+  syncOptions?: Partial<CreateDefaultSyncRuntimeOptions>;
+  /** Optional distributed Linux Docker compute cluster router (#1380). */
+  cluster?: ClusterManager; }
 async function body(req: IncomingMessage, limit: number): Promise<{ bytes: Buffer; complete: boolean }> {
   const chunks: Buffer[] = []; let size = 0, complete = true;
   for await (const chunk of req) {
@@ -169,13 +172,21 @@ export function createControlPlane(options: Options, security: { trustedProxies?
   });
   const sync = options.sync ?? createDefaultSyncRuntime({
     store,
-    manager: toolsManager,
+    manager: options.cluster ?? toolsManager,
     projectTools,
     agentToolsRoot: agentTools.volumeRoot,
     assistantHomes: assistants.homes,
     assistantHomesRoot: options.assistantHomes,
+    ...(options.cluster?.getSyncTokens() ? { tokens: options.cluster.getSyncTokens() } : {}),
     ...options.syncOptions,
   });
+  const cluster = options.cluster ?? new ClusterManager({
+    store,
+    localManager: toolsManager,
+    syncTokens: sync.tokens,
+    imageTag: options.imageTag,
+  });
+  if (!cluster.getSyncTokens()) cluster.setSyncTokens(sync.tokens);
   sharedManagement.assistants = assistants;
   sharedManagement.projectTools = projectTools;
   sharedManagement.gitCache = options.gitCache ?? options.engine?.gitCache;
@@ -288,6 +299,7 @@ export function createControlPlane(options: Options, security: { trustedProxies?
       respond(res,200,await external.publicApi(path,value,String(req.headers.authorization||'')));return;
     }
     if (await sync.handleHttp(req, res, url)) return;
+    if (await cluster.hub.handleHttp(req, res, url)) return;
     const match = /^\/hooks\/github\/([a-f0-9]{48})\/([a-f0-9]{48})$/.exec(path);
     if (method === 'POST' && match) {
       const input = await body(req, options.maxBodyBytes ?? 2 * 1024 * 1024);
@@ -572,20 +584,25 @@ export function createControlPlane(options: Options, security: { trustedProxies?
     };
     guard();
     if (path === '/api/agent-tools/install' || path === '/api/agent-tools/upgrade') res.setTimeout(1_200_000);
-    const result = await store.withAuthorizationGuard(guard, async () => syncTokensApi(sync.tokens, user, method, url, input) ?? feedbackApi(store, current, method, url, input) ?? await consolidationApi.api(current, method, url, input) ?? identityApi(store, current, sessionToken(req), method, url, input) ?? await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager,assistants) ?? await agentToolsApi(store,agentTools,user,method,path,input) ?? await assistantComputersApi(assistants,user,method,path) ?? await storage.api(user,method,path,input) ?? serviceRolesApi(store,user,method,path,input) ?? trustedOrganizationsApi(store,user,method,path,input) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, mutation && req.headers.origin || deploymentOrigin(req)) ?? await managementApi.manager(context,method,url,input) ?? await managementApi.task(context,method,url,input) ?? await managerApi(store,rules,user,method,url,input) ?? await rules.api(user,method,url,input) ?? await skillLibraryApi(store,current,method,url,input,{githubUrl:options.githubUrl}) ?? external.api(user,method,url,input) ?? await knowledgeFilesApi(store,options.projects?.manager,user,method,url,input) ?? await projectTools.api(user,method,url,input) ?? await options.engine?.api(user,method,url,input) ?? taskCommands.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input, githubIdentity ? { verifyInstallation: (_ref, installation) => githubIdentity.verifyInstallation(sessionToken(req), installation) } : undefined) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? retiredApi(url) ?? await management(store, user, method, url, input) ?? await models(store, user, method, url, input)
+    if (mutation && (path.startsWith('/api/nodes/') || /^\/api\/repositories\/[^/]+\/node$/.test(path))) res.setTimeout(300_000);
+    const result = await store.withAuthorizationGuard(guard, async () => syncTokensApi(sync.tokens, user, method, url, input) ?? await clusterApi(cluster, user, method, url, input, { origin: mutation && req.headers.origin || deploymentOrigin(req), imageTag: options.imageTag, onRebound: () => { void options.projects?.reconcile().catch(() => {}); } }) ?? feedbackApi(store, current, method, url, input) ?? await consolidationApi.api(current, method, url, input) ?? identityApi(store, current, sessionToken(req), method, url, input) ?? await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager,assistants) ?? await agentToolsApi(store,agentTools,user,method,path,input) ?? await assistantComputersApi(assistants,user,method,path) ?? await storage.api(user,method,path,input) ?? serviceRolesApi(store,user,method,path,input) ?? trustedOrganizationsApi(store,user,method,path,input) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, mutation && req.headers.origin || deploymentOrigin(req)) ?? await managementApi.manager(context,method,url,input) ?? await managementApi.task(context,method,url,input) ?? await managerApi(store,rules,user,method,url,input) ?? await rules.api(user,method,url,input) ?? await skillLibraryApi(store,current,method,url,input,{githubUrl:options.githubUrl}) ?? external.api(user,method,url,input) ?? await knowledgeFilesApi(store,options.projects?.manager,user,method,url,input) ?? await projectTools.api(user,method,url,input) ?? await options.engine?.api(user,method,url,input) ?? taskCommands.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input, githubIdentity ? { verifyInstallation: (_ref, installation) => githubIdentity.verifyInstallation(sessionToken(req), installation) } : undefined) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? retiredApi(url) ?? await management(store, user, method, url, input) ?? await models(store, user, method, url, input)
       ?? await taskChecksApi(store, user, method, url, options.githubUrl) ?? (method === 'GET' ? costsApi(store,user,url) ?? queries(store, user, url) : undefined));
     if (!result) return fail(404, 'not_found');
     // List visibility, board publication, skill library metadata and notes never change the desired state of a project computer.
-    const consoleOnly = /^\/api\/installations\/[1-9]\d*(?:\/(?:restore|board))?$/.test(path) || /^\/api\/repositories\/[^/]+\/(?:notes|knowledge-files|knowledge-directories|memory-consolidation|releases|skills|roles\/(?:resolve|probe-model))(?:\/.*)?$/.test(path);
+    const consoleOnly = /^\/api\/installations\/[1-9]\d*(?:\/(?:restore|board))?$/.test(path) || /^\/api\/repositories\/[^/]+\/(?:notes|knowledge-files|knowledge-directories|memory-consolidation|releases|skills|node|roles\/(?:resolve|probe-model))(?:\/.*)?$/.test(path);
     if (mutation && !consoleOnly && (path.startsWith('/api/repositories') || path.startsWith('/api/installations') || path === '/api/settings')) void options.projects?.reconcile().catch(() => {});
     const activatedRepo = method === 'POST' ? /^\/api\/installations\/([1-9]\d*)\/activate$/.exec(path)?.[1] : undefined;
     if (activatedRepo) githubLogin.identity?.scheduleRepositoryMemberSync(activatedRepo);
     respond(res, method === 'POST' ? 201 : 200, result);
   }));
   server.requestTimeout = 30_000; server.headersTimeout = 10_000;
+  server.on('upgrade', (req, socket, head) => {
+    if (!cluster.hub.handleUpgrade(req, socket, head)) socket.destroy();
+  });
   let connectionTimer: ReturnType<typeof setInterval>;
   let closing = false;
   server.once('listening', () => {
+    cluster.start();
     channels.start(); void assistants.warnIfRequired().catch(() => {});
     // Run legacy service_role_memory migration to completion before assistants.start() schedules retention so dormant
     // owners' HOMEs cannot be swept before or while their migrated memory is written and touched.
@@ -607,9 +624,9 @@ export function createControlPlane(options: Options, security: { trustedProxies?
     }
   });
   let drained:Promise<unknown>=Promise.resolve();
-  server.once('close',()=>{ closing = true; clearInterval(connectionTimer); channels.close(); channelConnections.close(); githubLogin.identity?.close(); drained=Promise.allSettled([channels.drain(),assistants.close(),projectTools.stop(),scheduler.close(),consolidation.stop(),managementApi.agent.close(),githubLogin.identity?.drain()]); });
+  server.once('close',()=>{ closing = true; clearInterval(connectionTimer); channels.close(); channelConnections.close(); githubLogin.identity?.close(); drained=Promise.allSettled([cluster.close(),channels.drain(),assistants.close(),projectTools.stop(),scheduler.close(),consolidation.stop(),managementApi.agent.close(),githubLogin.identity?.drain()]); });
   const close=server.close.bind(server);
   // The caller may close SQLite after this callback; every background consumer must have finished first.
   server.close=((callback?: (error?:Error)=>void)=>close(error=>{void drained.then(()=>callback?.(error));})) as typeof server.close;
-  return { server, sync };
+  return { server, sync, cluster };
 }

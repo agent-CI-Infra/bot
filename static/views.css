@@ -1150,3 +1150,20 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
   .skill-version-bar{align-items:stretch}
   .skill-add-item-row button{width:100%}
 }
+/* #1380: Distributed compute nodes settings and per-project node binding card. */
+.compute-node-list{display:grid;gap:var(--space-4);margin-top:var(--space-3);min-width:0}
+.compute-node-item{display:grid;gap:var(--space-3);padding:var(--space-4);border:1px solid var(--color-border);border-radius:var(--radius-3);background:var(--color-surface-alt);min-width:0}
+.compute-node-head{display:flex;justify-content:space-between;align-items:center;gap:var(--space-2);flex-wrap:wrap;min-width:0}
+.compute-node-title{display:flex;align-items:center;gap:var(--space-2);flex-wrap:wrap;min-width:0}
+.compute-node-title h3{margin:0;font-size:var(--font-size-2);overflow-wrap:anywhere}
+.compute-node-id{font-size:var(--font-size-1);color:var(--color-text-muted);background:var(--color-surface);padding:2px 6px;border-radius:var(--radius-2);border:1px solid var(--color-border);overflow-wrap:anywhere;word-break:break-all}
+.compute-node-pairing-box{margin-top:var(--space-4);padding:var(--space-4);border:1px solid var(--color-info-border);border-radius:var(--radius-3);background:var(--color-info-bg);display:grid;gap:var(--space-2);min-width:0}
+.compute-node-pairing-box h3{margin:0;font-size:var(--font-size-2);color:var(--color-info)}
+.compute-node-command{margin:0;padding:var(--space-3);border-radius:var(--radius-2);background:var(--color-surface);border:1px solid var(--color-border);font-size:var(--font-size-1);white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-all;max-width:100%}
+.compute-node-actions{display:flex;flex-wrap:wrap;gap:var(--space-2);margin-top:var(--space-1)}
+.compute-node-edit .project-form{margin-top:var(--space-3)}
+.machine-node-binding-body{display:grid;gap:var(--space-3);min-width:0;max-width:100%}
+.machine-node-rebind-form select{width:100%;max-width:100%;min-width:0;box-sizing:border-box}
+@media (max-width: 600px){
+  .compute-node-actions button{flex:1 1 auto}
+}

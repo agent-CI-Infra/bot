@@ -2,6 +2,7 @@ import {reviewDependencySql} from './readiness.js';
 import type {Store,Row} from '../storage/database.js';
 import {fail,randomId} from '../core/security.js';
 import {traceEvent} from './trace.js';
+import {isRepositoryNodeClaimable} from '../cluster/storage.js';
 
 export const priorities=['P0','P1','P2','P3'] as const;
 export const priorityInstructions=`Task priority is decided by Task Manager, not QA. P0: observed or credibly imminent major damage requiring immediate containment (ongoing data loss, credential exposure/unauthorized access, widespread core-service outage without an alternative). P1: a core goal or critical delivery is blocked with no acceptable workaround. P2: ordinary planned work, final integration/acceptance, or bounded defects with an acceptable workaround. P3: non-core polish, wording, or verification beyond required acceptance. Cite occurrence conditions, affected scope, evidence, workaround and delivery impact; adjectives or your own task's importance are not evidence. Missing facts default to P2 with an explicit uncertainty; credible major risk may justify containment. Higher priority takes the next free slot; never preempt a running task. Same-priority tasks are FIFO. Changed priority joins the new priority's tail; setting the same value does not move it. Retries receive a new queue ticket when scheduled, unless the user continues a task they paused: that one resumes at the queue position it already held. A retry is eligible only after its retry time/dependencies are ready.`;
@@ -53,6 +54,7 @@ export function claimQueuedTask(s:Store,repo:string,kinds:string,limit:number,no
  return s.transaction(()=>{
  if(s.get("SELECT 1 FROM environment_operations WHERE repository_id=? AND state='pending'",repo))return;
  if(s.get('SELECT 1 FROM project_environments WHERE repository_id=? AND toolchain_pending=1',repo))return;
+ if(!isRepositoryNodeClaimable(s,repo))return;
  if(s.get("SELECT count(*) n FROM task_claims c JOIN tasks t ON t.id=c.task_id WHERE c.repository_id=? AND t.status='running'",repo)!.n>=limit)return;
  const exclusion=excluded.length?' AND id NOT IN ('+excluded.map(()=>'?').join(',')+')':'';
  const task=s.get(`SELECT * FROM tasks WHERE repository_id=? AND ${kinds} AND ${queueEligible}${exclusion} ORDER BY priority,queue_seq,id LIMIT 1`,repo,now,...excluded);if(!task)return;

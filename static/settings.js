@@ -7,6 +7,7 @@
  * settings/agent-tools.js
  * settings/projects.js
  * settings/resources.js
+ * settings/compute-nodes.js
  * settings/assistant-computers.js
  * settings/rate-limits.js
  * settings/lists.js

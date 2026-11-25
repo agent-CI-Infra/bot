@@ -221,10 +221,12 @@ function machineSection(globalSettings = false) {
   toolbar.after(sourceReadError);
   if(unread)toolbar.after(note('已保存的机器配置读取失败，不能区分项目自己的值和默认值。请重新读取配置后保存。'));
   const concurrency = globalSettings ? null : concurrencyForm();
+  const nodeBinding = globalSettings ? null : nodeBindingCard(isSuper);
   const projectTools = globalSettings ? null : projectToolsCard(canConfigure);
   const cliConfig = globalSettings ? null : cliConfigCard(canConfigure);
   const page = element('div', '', 'machine-settings');
   if (concurrency) page.append(concurrency);
+  if (nodeBinding) page.append(nodeBinding);
   page.append(form);
   if (projectTools) page.append(projectTools);
   if (cliConfig) page.append(cliConfig);
@@ -239,6 +241,129 @@ function machineSection(globalSettings = false) {
     attachUnifiedSettingsBar(page, [concurrency]);
   }
   return [status, page];
+}
+
+// #1380: Per-project compute node binding card inside「机器配置」.
+// Super administrators can rebind a repository to another online Linux Docker node; project members see read-only binding state.
+function nodeBindingCard(isSuper) {
+  const target = current, id = target.id, token = typeof renderToken === 'number' ? renderToken : 0;
+  const section = card('计算节点绑定');
+  section.dataset.testid = 'machine-node-binding';
+  const body = element('div', '', 'machine-node-binding-body');
+  body.append(note('正在读取计算节点绑定状态…'));
+  const feedback = element('p', '', 'view-error');
+  feedback.setAttribute('role', 'status');
+  section.append(body, feedback);
+
+  const live = () => current === target && (typeof renderToken !== 'number' || renderToken === token) && section.isConnected;
+  const nodeStateMap = { online: ['在线', 'success'], draining: ['排水中', 'warning'], offline: ['离线', 'danger'], pending: ['待配对', ''], pending_pair: ['待配对', ''], revoked: ['已撤销', 'danger'] };
+  const bindStateMap = { bound: '已绑定', active: '运行中', draining: '排水中', offline: '节点离线', rebinding: '改绑迁移中' };
+
+  const renderBinding = data => {
+    const b = data?.binding || { node_id: 'local', node_name: '本机节点 (local)', node_status: 'online', node_arch: 'amd64', node_os: 'linux', node_labels: {}, state: 'bound', binding_epoch: 1 };
+    const [nLabel, nTone] = nodeStateMap[b.node_status] || [String(b.node_status || '未知'), ''];
+    const labelsText = b.node_labels && typeof b.node_labels === 'object' && Object.keys(b.node_labels).length
+      ? Object.entries(b.node_labels).sort(([a], [c]) => a.localeCompare(c)).map(([k, v]) => `${k}=${v}`).join(', ')
+      : '无';
+
+    const badges = element('div', '', 'actions project-tools-badges');
+    badges.append(
+      badge(`当前节点：${b.node_name || b.node_id}`, 'info'),
+      badge(nLabel, nTone),
+      badge(`绑定状态：${bindStateMap[b.state] || b.state}（epoch #${b.binding_epoch ?? 1}）`, b.state === 'draining' || b.state === 'rebinding' ? 'warning' : ''),
+    );
+
+    const rows = facts([
+      ['绑定节点 ID', b.node_id],
+      ['平台与架构', `${b.node_os || 'linux'}/${b.node_arch || 'amd64'}`],
+      ['节点调度标签', labelsText],
+    ]);
+
+    const controls = [];
+    if (isSuper && data?.can_rebind && Array.isArray(data?.nodes)) {
+      const form = element('form', '', 'project-form machine-node-rebind-form');
+      const select = document.createElement('select');
+      select.name = 'target_node_id';
+      select.setAttribute('aria-label', '目标计算节点');
+      for (const n of data.nodes) {
+        const opt = document.createElement('option');
+        opt.value = n.id;
+        const [st] = nodeStateMap[n.status] || [n.status];
+        opt.textContent = `${n.name} (${n.id} · ${n.arch || 'amd64'} · ${st})`;
+        if (n.id === b.node_id) opt.selected = true;
+        select.append(opt);
+      }
+      const submit = element('button', '切换绑定节点');
+      submit.type = 'submit';
+      submit.disabled = data.nodes.length <= 1;
+      const formActions = element('div', '', 'actions form-actions');
+      formActions.append(submit);
+      form.append(
+        field('切换目标节点', select),
+        note('切换前会先将项目笔记经同步引擎写回控制面，停止并回收旧节点工作区与容器，再在目标节点重建项目电脑（不跨节点拷贝工作卷）。如需接入新节点，请前往「全局设置 → 计算节点」。'),
+        formActions,
+      );
+      form.addEventListener('submit', async event => {
+        event.preventDefault();
+        feedback.className = 'view-error';
+        announceSave(feedback, '', false);
+        const targetId = select.value;
+        if (!targetId || targetId === b.node_id) {
+          announceSave(feedback, '目标节点与当前绑定一致，无需切换。', false);
+          return;
+        }
+        const targetMeta = data.nodes.find(n => n.id === targetId);
+        const confirmed = await askConfirm({
+          title: `将本项目改绑到节点「${targetMeta?.name || targetId}」？`,
+          body: [
+            '改绑期间将暂停新任务认领，并停止回收旧节点上的项目容器与本地工作卷（项目笔记保留在控制面）。',
+            '目标节点在线后会自动拉起新的项目电脑。',
+          ],
+          action: '确认切换节点',
+        });
+        if (!confirmed || !live()) return;
+        submit.disabled = true;
+        try {
+          const res = await api(`/api/repositories/${id}/node`, 'PUT', { node_id: targetId });
+          if (!live()) return;
+          feedback.className = 'view-success';
+          announceSave(feedback, `已切换绑定到「${res.binding?.node_name || targetId}」（epoch #${res.binding?.binding_epoch ?? ''}）。`, false);
+          await loadBinding();
+        } catch (err) {
+          if (!live()) return;
+          feedback.className = 'view-error';
+          const code = String(err?.message || '');
+          const reason = ({
+            target_node_not_online: '目标节点当前不在线，请先确认目标节点已连接上线。',
+            repository_has_running_tasks: '当前项目仍有正在执行的任务，请等待任务结束或停止后再切换节点。',
+            previous_node_unreachable: '旧节点当前不可达，暂无法自动清理旧节点工作区。',
+            repository_already_rebinding: '该项目正在执行改绑操作，请稍候刷新。',
+          })[code] || readErrorText(err);
+          announceSave(feedback, reason, true);
+        } finally {
+          if (live()) submit.disabled = data.nodes.length <= 1;
+        }
+      });
+      controls.push(form);
+    } else {
+      controls.push(note('当前项目绑定节点由超级管理员统一维护；如需迁移节点请联系超级管理员。'));
+    }
+
+    body.replaceChildren(badges, rows, ...controls);
+  };
+
+  const loadBinding = async () => {
+    try {
+      const data = await api(`/api/repositories/${id}/node`);
+      if (!live()) return;
+      renderBinding(data);
+    } catch (err) {
+      if (!live()) return;
+      body.replaceChildren(note('读取计算节点绑定失败：' + readErrorText(err)));
+    }
+  };
+  void loadBinding();
+  return section;
 }
 
 // #1322: Per-project isolated read-only binary tools volume (/opt/project-tools).

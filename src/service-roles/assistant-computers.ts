@@ -578,7 +578,7 @@ export class AssistantComputerService {
       : this.store.get('SELECT u.username FROM principals p JOIN users u ON u.id=p.user_id WHERE p.id=?', row.subject)?.username ?? null;
     const homes = this.store.all('SELECT * FROM assistant_homes ORDER BY coalesce(bytes,0) DESC,active_at DESC').map(row => ({ owner: row.owner, kind: row.kind, subject: row.subject,
       name: name(row), tenant: row.tenant || null, generation: row.generation, bytes: row.bytes, files: row.files, measured_at: row.measured_at, active_at: row.active_at,
-      read_only: !!row.over_limit, computer: running.get(row.owner)?.state ?? null,
+      read_only: !!row.over_limit, computer: running.get(row.owner)?.state ?? null, node_id: running.get(row.owner)?.node_id ?? null,
       sealed: this.store.all('SELECT generation,sealed_at,reason,bytes FROM assistant_home_sealed WHERE owner=? ORDER BY generation', row.owner) }));
     const disk = await statfs(this.homes!.root).then(s => ({ free_bytes: s.bavail * s.bsize, total_bytes: s.blocks * s.bsize })).catch(() => null);
     return { homes, totals: this.homes!.totals(), disk, computers: computers === null ? null : { running: computers.length, busy: computers.filter(c => c.state === 'busy').length }, settings: this.homes!.settings() };
@@ -655,7 +655,7 @@ export class AssistantComputer {
         { turn: this.options.turn, fence: this.options.fence(), home_generation: home.generation, home_mode: home.mode, ...(runtime ? { harness: true } : {}), ...(projectTools.length ? { project_tools: projectTools } : {}) }, 120_000).catch(error => {
         if (error instanceof HttpError && error.code === 'disk_full') throw new Refusal({ error: 'assistant_computer_disk_full', detail: '宿主机数据盘剩余空间低于安全预留，已拒绝创建助手电脑以保护控制面与持久化数据。' });
         // No fallback to a project computer or the host: the turn learns that the computer is unavailable.
-        if (error instanceof HttpError && ['manager_unavailable', 'docker_operation_failed', 'assistant_computer_create_failed', 'runner_not_ready', 'assistant_homes_unavailable', 'assistant_home_missing', 'not_found'].includes(error.code)) fail(503, 'assistant_computer_unavailable');
+        if (error instanceof HttpError && ['manager_unavailable', 'docker_operation_failed', 'assistant_computer_create_failed', 'runner_not_ready', 'assistant_homes_unavailable', 'assistant_home_missing', 'not_found', 'no_eligible_compute_node', 'node_unavailable', 'node_offline', 'node_revoked'].includes(error.code)) fail(503, 'assistant_computer_unavailable');
         // Removed while it was being created: the turn is not in `active` until this call returns, so the first reconcile
         // after a start of the control plane removes it (the periodic sweep never sees a computer being created). It is
         // taken again once, after check() (a turn whose permission or source changed ends there), like an execute that

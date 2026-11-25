@@ -31,6 +31,8 @@ import { activeCliVersions } from './roles/role-run.js';
 import { ensureServiceSkillScope, resolveSkillStoreRoot } from './roles/skill-store.js';
 import { migrateLegacyProjectMemories } from './memory/migration.js';
 import { DEFAULT_MODEL_GATEWAY_SOCKET, resolveControlPlaneModelGatewaySocket, startModelGatewayServer } from './harness/model-gateway.js';
+import { ClusterManager } from './cluster/index.js';
+import { SyncTokenService } from './sync/index.js';
 
 process.umask(0o077);
 commandTimeoutLimit();
@@ -60,7 +62,9 @@ githubLogin.identity;
 const githubRefresh = new GitHubRefresh(store, () => githubLogin.identity, { apiUrl: process.env.BOT_GITHUB_API_URL }); githubRefresh.start();
 const tokenFile = process.env.BOT_MANAGER_TOKEN_FILE;
 if (!tokenFile) throw new Error('BOT_MANAGER_TOKEN_FILE is required');
-const manager=new ManagerClient(process.env.BOT_MANAGER_URL || 'http://manager:8793',readFileSync(tokenFile));
+const localManager=new ManagerClient(process.env.BOT_MANAGER_URL || 'http://manager:8793',readFileSync(tokenFile));
+const syncTokens = new SyncTokenService(store);
+const manager = new ClusterManager({ store, localManager, syncTokens, imageTag: process.env.BOT_IMAGE_TAG });
 const projects = new ProjectService(store, manager);
 // Repository mirrors live next to the database on the control plane's own volume.
 const gitCache = new GitCache(process.env.BOT_GIT_CACHE_DIR || resolve(dirname(databasePath), 'git-cache'));
@@ -159,6 +163,7 @@ const agentToolsAuto = new AgentToolsAutoInstaller(agentTools, {
 const { server } = createControlPlane({ store, staticDirectory: resolve(import.meta.dirname, '../static'),
   secureCookies: process.env.BOT_COOKIE_SECURE === 'true', publicOrigin, projects, engine, installations, external, onboarding, integrations, releases, boards,
   imageTag: process.env.BOT_IMAGE_TAG, githubUrl: process.env.BOT_GITHUB_API_URL, githubLogin, stalls, storage, agentTools, projectTools,
+  cluster: manager, syncOptions: { tokens: syncTokens },
   // The thresholds are configuration, not magic numbers: who operates the deployment sets what it tolerates (#771).
   notesReclaimer: reclaimer,
   notesOrphanThreshold: count('BOT_NOTES_ORPHAN_THRESHOLD', 10),
