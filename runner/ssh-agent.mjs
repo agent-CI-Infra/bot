@@ -177,9 +177,9 @@ export class SshAgentBroker {
   /**
    * Called synchronously from the spawn of a detached leader. Node's spawn() returns after the child has called setsid
    * and exec'd, and this process accepts a connection only once the current turn ends, so the child's first request
-   * to this socket always finds its registration.
+   * to this socket always finds its registration. workspace is the task directory the daemon started an agent for.
    */
-  register(pid, payload, kind = 'command') {
+  register(pid, payload, kind = 'command', workspace = null) {
     let grant;
     try { grant = validSshGrant(payload); } catch { return false; }
     const leader = this.stat(pid);
@@ -187,20 +187,22 @@ export class SshAgentBroker {
     const key = createHash('sha256').update(grant.grant).digest('hex');
     const shared = this.grants.get(key) ?? new Grant(grant);
     shared.update(grant); this.grants.set(key, shared);
-    const registration = { pid, start: leader.start, grant: shared, kind };
+    const registration = { pid, start: leader.start, grant: shared, kind, workspace };
     this.groups.set(pid, registration);
     if (kind === 'agent') this.agents.set(pid, registration);
     return true;
   }
   /**
    * Moves an agent process this daemon started to a newer grant: the same session resumed or continued for another run
-   * (or after a control-plane restart, which forgot the old secret). A pid the daemon did not register is ignored.
+   * (or after a control-plane restart, which forgot the old secret). The pid comes from the task's agent/state.json,
+   * which any process of the computer can write, so it counts only for an agent the daemon started for the same task
+   * directory (workspace) as the call that brings the grant: another task's agent, or any other pid, is refused.
    */
-  rearm(pid, payload) {
+  rearm(pid, payload, workspace) {
     let grant;
     try { grant = validSshGrant(payload); } catch { return false; }
     const registration = this.agents.get(pid);
-    if (!registration || !this.alive(registration)) return false;
+    if (!registration || !workspace || registration.workspace !== workspace || !this.alive(registration)) return false;
     const previous = registration.grant, key = createHash('sha256').update(grant.grant).digest('hex');
     const shared = this.grants.get(key) ?? new Grant(grant);
     shared.update(grant); this.grants.set(key, shared);
