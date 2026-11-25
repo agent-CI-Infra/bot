@@ -69,8 +69,9 @@ test('a management command that failed inside the server does not claim it did n
   assert.ok(!notice.includes('没有完成'), 'the catch-all tool error must not claim the command did not complete');
 });
 
-test('a receipt sentence is not used for a tool that is not a management command', async () => {
+test('a catch-all tool error on any tool does not claim the action was not completed', async () => {
   const [notice] = await failureNotices([[['model_start', { turn: 0 }], call('github_write'),
     ['tool_error', { call_id: 'b1', name: 'github_write', error: 'management_tool_failed' }], ['done']]]);
-  assert.equal(notice, '操作未完成：management_tool_failed');
+  assert.equal(notice, '无法确认这一步是否完成：management_tool_failed');
+  assert.ok(!notice.includes('未完成'), 'the catch-all tool error must not claim the write did not complete');
 });

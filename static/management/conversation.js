@@ -125,12 +125,13 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   // A code the console cannot explain keeps its bare value, exactly as before, rather than being guessed at.
   // authorization_changed is also raised by the mid-turn guard after the command or the write has already finished
   // (src/management/agent.ts), so it must not claim that nothing ran, nor that the step did.
-  // management_tool_failed is the catch-all for everything thrown after the command was submitted and can therefore
-  // arrive after the service completed or persisted it: the receipt sentence says the command did not complete, which the
-  // code cannot support, so this one speaks in the same unsure terms and keeps the bare code.
+  // management_tool_failed is the catch-all thrown after the action was already attempted, and it is emitted for every
+  // tool (a github write runs before the guard too), so it can arrive after the write landed: the receipt sentence says
+  // the command did not complete, which the code cannot support, so any tool speaks in the same unsure terms here and
+  // keeps the bare code.
   const failedNotice = data => data.error === 'authorization_changed'
     ? '无法确认这一步是否完成：执行过程中权限变了，请在回执与执行进展里核对后再重试。（authorization_changed）'
-    : data.name === 'management_command' && data.error === 'management_tool_failed' ? '无法确认这一步是否完成：' + data.error
+    : data.error === 'management_tool_failed' ? '无法确认这一步是否完成：' + data.error
     : data.name === 'management_command' && managementFailureHints[data.error] ? '操作未完成：' + managementFailureHints[data.error] + '（' + data.error + '）'
     : '操作未完成：' + data.error;
   // A turn-level failure can stop before any command was submitted (the permission guard runs mid-turn), so it speaks in
