@@ -192,8 +192,11 @@ export async function startRunnerDaemon(options = {}) {
     try { grant = kind && sshBroker ? validSshGrant(ssh) : null; } catch { grant = null; }
     return { request, grant, kind, spawned: [] };
   };
+  // onSpawn runs in the same turn that spawn() returns, after the child's setsid and exec: the registration is in
+  // place before this process can accept the child's first connection to the agent socket.
   const sshHooks = (taken, onSpawn) => taken.grant ? {
     onSpawn: pid => { onSpawn?.(pid); if (sshBroker.register(pid, taken.grant, taken.kind)) taken.spawned.push(pid); },
+    onAttach: pid => { if (taken.kind === 'agent') sshBroker.rearm(pid, taken.grant); },
     sshEnv: sshBroker.environment(taken.grant),
   } : (onSpawn ? { onSpawn } : {});
   // A finished command's group is released; agents and kept background services stay until their leader exits.

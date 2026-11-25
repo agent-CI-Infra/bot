@@ -176,9 +176,13 @@ async function piRuntime(){
   return manifest?{agent:'pi',package:manifest.name,version:manifest.version,node:process.version}:{error:'pi_runtime_missing'};
 }
 // Starts the Pi process on the configuration in input.json; a session that already has a state answers instead.
-async function startAgent(dir,root,boot,workspaceId,{onSpawn,env}={}){
+// onAttach hands a session that is already running to the daemon, which moves it to this run's SSH grant only if the
+// daemon started that process itself (runner/ssh-agent.mjs rearm); state.json alone proves nothing.
+async function startAgent(dir,root,boot,workspaceId,{onSpawn,onAttach,env}={}){
   const old=await readFile(dir+'/state.json','utf8').then(JSON.parse).catch(()=>null);
-  if(old){if(old.state==='running')try{if(old.boot!==boot)throw new Error();process.kill(old.pid,0);}catch{return {error:'agent_interrupted'};}return {started:true};}
+  if(old){if(old.state==='running')try{if(old.boot!==boot)throw new Error();process.kill(old.pid,0);}catch{return {error:'agent_interrupted'};}
+    if(old.state==='running'&&Number.isSafeInteger(old.pid))try{onAttach?.(old.pid);}catch{}
+    return {started:true};}
   JSON.parse(await readFile(dir+'/input.json','utf8'));
   const out=await open(dir+'/process.log','a',0o600);
   // A task gets its worktree when it first needs one (#769): until then the session starts in the task directory.
@@ -267,6 +271,8 @@ export async function agentOperation(input,root){
     const {output_file,...details}=live;return {...details,running:true,output,offset,state:'running'};
   }
   if(input.type==='workspace_agent_continue'){
+    // The next turn of a living session runs under the grant this call brings, before the session sees continue.json.
+    if(input._onAttach){const state=await readFile(dir+'/state.json','utf8').then(JSON.parse).catch(()=>null);if(state?.state==='running'&&Number.isSafeInteger(state.pid))try{input._onAttach(state.pid);}catch{}}
     await writeFile(dir+'/continue.json','{}',{mode:0o600});return {written:true};
   }
   if(input.type==='workspace_agent_boundary'){
@@ -300,9 +306,9 @@ export async function agentOperation(input,root){
     const path=dir+'/input.tmp',file=await open(path,input.offset===0?'w':'r+',0o600);
     try{if((await file.stat()).size!==input.offset)throw new Error('agent_config_offset');const bytes=Buffer.from(input.base64,'base64');await file.write(bytes,0,bytes.length,input.offset);}finally{await file.close();}
     if(input.final)await rename(path,dir+'/input.json');
-    return launch?{written:true,...await startAgent(dir,root,boot,input.workspace_id,{onSpawn:input._onSpawn,env:input._sshEnv}),runtime}:{written:true};
+    return launch?{written:true,...await startAgent(dir,root,boot,input.workspace_id,{onSpawn:input._onSpawn,onAttach:input._onAttach,env:input._sshEnv}),runtime}:{written:true};
   }
-  if(input.type==='workspace_agent_start')return startAgent(dir,root,boot,input.workspace_id,{onSpawn:input._onSpawn,env:input._sshEnv});
+  if(input.type==='workspace_agent_start')return startAgent(dir,root,boot,input.workspace_id,{onSpawn:input._onSpawn,onAttach:input._onAttach,env:input._sshEnv});
   if(input.type==='workspace_agent_poll'){
     const offset=Number(input.offset)||0;
     const known={tools:knownIds(input.known_tool_ids),tokens:knownIds(input.known_token_ids),boundaries:knownIds(input.known_boundary_ids)};
@@ -411,6 +417,7 @@ export async function agentOperation(input,root){
     const old=await readFile(dir+'/harness-state.json','utf8').then(JSON.parse).catch(()=>null);
     if(old?.pid&&await isLiveHarnessProcess(old.pid,old.boot,boot,root)){
       if(old.state==='running'&&(!targetInstanceId||!old.instance_id||old.instance_id===targetInstanceId)){
+        if(Number.isSafeInteger(old.pid))try{input._onAttach?.(old.pid);}catch{}
         return {started:true,...old};
       }
       await terminateHarnessState(old,boot,root,input.workspace_id);

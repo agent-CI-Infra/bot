@@ -174,7 +174,11 @@ export class SshAgentBroker {
     return { BOT_SSH_BROKER: '1', SSH_AUTH_SOCK: this.socketPath,
       ...(payload.password ? { SSH_ASKPASS: fileURLToPath(new URL('./ssh-askpass.mjs', import.meta.url)), SSH_ASKPASS_REQUIRE: 'force' } : {}) };
   }
-  /** Called synchronously from the spawn of a detached leader, before its first instruction can reach this socket. */
+  /**
+   * Called synchronously from the spawn of a detached leader. Node's spawn() returns after the child has called setsid
+   * and exec'd, and this process accepts a connection only once the current turn ends, so the child's first request
+   * to this socket always finds its registration.
+   */
   register(pid, payload, kind = 'command') {
     let grant;
     try { grant = validSshGrant(payload); } catch { return false; }
@@ -186,6 +190,22 @@ export class SshAgentBroker {
     const registration = { pid, start: leader.start, grant: shared, kind };
     this.groups.set(pid, registration);
     if (kind === 'agent') this.agents.set(pid, registration);
+    return true;
+  }
+  /**
+   * Moves an agent process this daemon started to a newer grant: the same session resumed or continued for another run
+   * (or after a control-plane restart, which forgot the old secret). A pid the daemon did not register is ignored.
+   */
+  rearm(pid, payload) {
+    let grant;
+    try { grant = validSshGrant(payload); } catch { return false; }
+    const registration = this.agents.get(pid);
+    if (!registration || !this.alive(registration)) return false;
+    const previous = registration.grant, key = createHash('sha256').update(grant.grant).digest('hex');
+    const shared = this.grants.get(key) ?? new Grant(grant);
+    shared.update(grant); this.grants.set(key, shared);
+    registration.grant = shared;
+    if (previous !== shared) this.forget(previous);
     return true;
   }
   release(pid) {

@@ -1,3 +1,4 @@
+import { taskSsh } from '../tasks/ssh-context.js';
 import { readToolResult } from './tool-results.js';
 import { submissionFeedback } from '../roles/submission-feedback.js';
 import { resolveCommandTimeout, retimeCommandTool, runCommand } from './command.js';
@@ -94,7 +95,9 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
     ? `Correct the submission and call the finish tool again using the evidence already available. ${error.code}: ${error.detail ?? ''}` : undefined;
   if(profile.completion==='publication'&&createPullRequest&&controlled(store,task,'development'))return developmentTeam(workspace,system,config.prompt,createPullRequest,profile.capabilities.workspace,platform.github_write&&(args=>platform.github_write!(randomId(),args)),platform[milestoneToolName]&&(args=>platform[milestoneToolName]!(randomId(),args)),tokens?.allowedScopes().includes('contents')?async()=>{const github=new GitHub(store,tokens.repository,redactor,guard,tokens.apiUrl);await github.connect(false,undefined,{contents:'read',...(tokens.allowedScopes().includes('pull_requests')?{pull_requests:'read'}:{})},false);return github;}:undefined,explorer??undefined);
   // The work type's own executor: one Pi session in the task workspace (the formal Pi harness, src/agent/pi.ts).
-  const session: PiSession<any> = { store, taskId: task.id, task, guard, workspace, redactor, config, conversation, platform, createPullRequest, ensureWorkspace: async () => workspace.ensure?.() ?? {},
+  // A legacy single-executor entry has no run token: its SSH context follows the task's claim (#1379).
+  const ssh = taskSsh(store, task, 'dev') ?? undefined;
+  const session: PiSession<any> = { store, taskId: task.id, task, guard, workspace, redactor, config, conversation, platform, createPullRequest, ssh, ensureWorkspace: async () => workspace.ensure?.() ?? {},
     offered: name => profile.tools.some(tool => tool.function.name === name), publication: profile.capabilities.github.publication,
     repository: async (name, args) => {
       const allowed = workspaceRepositoryTools.some(tool => tool.function.name === name);

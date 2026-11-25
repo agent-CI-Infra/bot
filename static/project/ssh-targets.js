@@ -34,7 +34,7 @@ function sshTargetsCard(project, canManage) {
     let secret;
     function changeAuth() {
       secret = auth.value === 'key' ? textarea('private_key','',{rows:4,spellcheck:false,autocomplete:'off'}) :
-        input('password','',{type:'password',autocomplete:'new-password'});
+        input('password','',{type:'password',autocomplete:'new-password',minLength:4});
       secret.required = !target || target.auth !== auth.value;
       credential.replaceChildren(field(auth.value === 'key' ? 'SSH 私钥' : 'SSH 密码',secret));
       if (target) credential.append(note('保留原凭据请留空。更换主机、端口、用户、主机指纹或认证方式时需重新填写。'));
@@ -69,8 +69,9 @@ function sshTargetsCard(project, canManage) {
       if (canManage) listing.append(button('新增' + title, () => edit(null,path,rows)));
       if (!rows.length) { listing.append(note('尚未登记主机')); return; }
       const {table,body} = projectTable(['别名','地址','连接方式','操作'], title);
+      table.classList.add('ssh-target-table');
       for (const row of rows) {
-        const tr = document.createElement('tr'), actions = element('div');
+        const tr = document.createElement('tr'), actions = element('div', '', 'ssh-target-actions');
         tableCell(tr,'别名',element('strong',row.alias));
         tableCell(tr,'地址',element('code',row.username + '@' + row.host + ':' + row.port));
         tableCell(tr,'连接方式',element('span',({direct:'直连',proxy_jump:'跳板',tunnel:'控制面隧道'})[row.route]));
@@ -99,7 +100,7 @@ function sshTargetsCard(project, canManage) {
         }
         if (path === poolPath) {
           const linked = bound.has(row.id);
-          const bind = button(linked ? '解除本项目绑定' : '绑定到本项目', () =>
+          const bind = button(linked ? '解除绑定' : '绑定', () =>
             act(bind,() => api(projectPath + '/' + row.id + '/binding',linked ? 'DELETE' : 'PUT',{})));
           actions.append(bind);
         } else if (!row.owner_project) actions.append(element('span','全局绑定'));

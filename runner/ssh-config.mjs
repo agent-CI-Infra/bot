@@ -18,7 +18,7 @@ export const SSH_RUNNER_CODE = '/opt/runner';
 // Request types that start processes which may use SSH: a command's shell, or an agent process whose direct children run
 // the model's commands (runner/ssh-agent.mjs).
 export const SSH_COMMAND_TYPES = Object.freeze(['command', 'workspace_command']);
-export const SSH_AGENT_TYPES = Object.freeze(['workspace_agent_config', 'workspace_agent_start', 'workspace_harness_start']);
+export const SSH_AGENT_TYPES = Object.freeze(['workspace_agent_config', 'workspace_agent_start', 'workspace_agent_continue', 'workspace_harness_start']);
 export const SSH_TARGET_LIMIT = 256;
 
 const id = /^[a-f0-9]{48}$/;

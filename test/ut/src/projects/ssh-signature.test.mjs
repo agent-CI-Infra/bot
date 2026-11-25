@@ -4,6 +4,15 @@ import { createPublicKey, verify } from 'node:crypto';
 import ssh2 from 'ssh2';
 import { sshPublicKey, sshSignature } from '../../../../dist/projects/ssh-access.js';
 
+// ssh2's generator drops a leading zero byte of some ed25519 keys (about 1 in 250) and then cannot parse them itself;
+// ssh-keygen keys are not affected. Draw again until both halves parse.
+function generated(type, options) {
+  for (;;) {
+    const pair = ssh2.utils.generateKeyPairSync(type, options);
+    if (!(ssh2.utils.parseKey(pair.private) instanceof Error) && !(ssh2.utils.parseKey(pair.public) instanceof Error)) return pair;
+  }
+}
+
 // What an OpenSSH agent returns for SIGN_REQUEST: string(algorithm) string(signature), with ECDSA as mpint r, mpint s.
 function decode(blob) {
   const read = offset => { const length = blob.readUInt32BE(offset); return [blob.subarray(offset + 4, offset + 4 + length), offset + 4 + length]; };
@@ -29,7 +38,7 @@ test('targets sign with their own ed25519, RSA and ECDSA keys in the agent forma
     ['ecdsa', { bits: 521 }, 0, 'ecdsa-sha2-nistp521', 'sha512'],
   ];
   for (const [type, options, flags, algorithm, hash] of cases) {
-    const pair = ssh2.utils.generateKeyPairSync(type, options), parsed = ssh2.utils.parseKey(pair.public);
+    const pair = generated(type, options), parsed = ssh2.utils.parseKey(pair.public);
     assert.equal(sshPublicKey(pair.private), parsed.getPublicSSH().toString('base64'));
     const decoded = decode(sshSignature(pair.private, data, flags)), key = createPublicKey(parsed.getPublicPEM());
     assert.equal(decoded.algorithm, algorithm);

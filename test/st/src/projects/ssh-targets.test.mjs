@@ -12,7 +12,9 @@ test('SSH inventory seals credentials, scopes global bindings, pins updates, and
   for (const id of ['101','202']) await repository(admin,acc.id,id);
   const pool = '/api/ssh-targets', project = '/api/repositories/101/ssh-targets';
   const spec = {alias:'board',host:'board.invalid',username:'tester',host_key_sha256:'SHA256:'+'A'.repeat(43),
-    auth:'password',password:'p!4',allowed_roles:['qa']};
+    auth:'password',password:'p!4z',allowed_roles:['qa']};
+  // A one-to-three character password would be redacted out of ordinary text: four is the minimum (short is fine).
+  assert.equal((await admin(pool,'POST',{...spec,password:'p!4'})).status,400);
   const created = await admin(pool,'POST',spec);
   assert.equal(created.status,201);
   const id = created.value.id, binding = project+'/'+id+'/binding';
@@ -37,16 +39,16 @@ test('SSH inventory seals credentials, scopes global bindings, pins updates, and
   assert.equal((await projectUser(project)).status,200);
   assert.equal((await projectUser('/api/repositories/202/ssh-targets')).status,403);
   assert.equal((await projectUser(binding,'DELETE',{})).status,403);
-  assert.equal(configuredRedactor(h.store,'101').text('got p!4'),'got [REDACTED]');
-  assert.equal(configuredRedactor(h.store,'202').text('got p!4'),'got p!4');
+  assert.equal(configuredRedactor(h.store,'101').text('got p!4z'),'got [REDACTED]');
+  assert.equal(configuredRedactor(h.store,'202').text('got p!4z'),'got p!4z');
   const scope = h.store.trajectories.scopeOf({id:'turn',repository_id:'101',conversation_id:'chat'});
   const session = new ResultSession(h.store,scope,()=>'owner',()=>{});
-  const parts = ['got p','!','4.'];
+  const parts = ['got p','!','4z.'];
   let offset = 0;
-  const ref = await commandResult({output:'got p!4.',truncated:true,output_file:'journal'},'command',async pos=>{
+  const ref = await commandResult({output:'got p!4z.',truncated:true,output_file:'journal'},'command',async pos=>{
     assert.equal(pos,offset);
     const part = parts.shift(); offset += Buffer.byteLength(part);
-    return {data:part,offset,size:8};
+    return {data:part,offset,size:9};
   },session);
   assert.equal(ref.output,'got [REDACTED].');
   assert.equal((await session.read({file:ref.file})).content,ref.output);
@@ -69,7 +71,7 @@ test('console authentication checks verify the registered host and credential, t
     client.on('authentication',ctx=>{
       auth.push(ctx.method);
       if (ctx.username === 'tester') {
-        if (ctx.method === 'password' && ctx.password === 'p!4') return ctx.accept();
+        if (ctx.method === 'password' && ctx.password === 'p!4z') return ctx.accept();
         if (ctx.method === 'publickey' && ctx.key.data.equals(verifier.getPublicSSH()) &&
             (!ctx.signature || verifier.verify(ctx.blob,ctx.signature,ctx.hashAlgo) === true)) return ctx.accept();
       }
@@ -80,7 +82,7 @@ test('console authentication checks verify the registered host and credential, t
   server.listen(0,'127.0.0.1'); await once(server,'listening');
   t.after(()=>new Promise(resolve=>server.close(resolve)));
   const pool='/api/ssh-targets', projects='/api/repositories/101/ssh-targets';
-  const config={alias:'probe',username:'tester',auth:'password',password:'p!4',host:'127.0.0.1',port:server.address().port,
+  const config={alias:'probe',username:'tester',auth:'password',password:'p!4z',host:'127.0.0.1',port:server.address().port,
     host_key_sha256:'SHA256:'+createHash('sha256').update(ssh2.utils.parseKey(hostKey).getPublicSSH()).digest('base64').replace(/=+$/,'')};
   const {id}=(await admin(pool,'POST',config)).value;
   const probe = async (path,body={})=>(await admin(path+'/'+id+'/test','POST',body)).value;
@@ -93,7 +95,7 @@ test('console authentication checks verify the registered host and credential, t
   await change({password:'invalid'});
   assert.deepEqual(await probe(pool),{ok:false,error:'ssh_auth_failed'});
   const count=auth.length;
-  await change({host_key_sha256:'SHA256:'+'A'.repeat(43), password:'p!4'});
+  await change({host_key_sha256:'SHA256:'+'A'.repeat(43), password:'p!4z'});
   assert.deepEqual(await probe(pool),{ok:false,error:'ssh_host_key_mismatch'});
   assert.equal(auth.length,count);
   await change({host_key_sha256:config.host_key_sha256,auth:'key',private_key:userKey});

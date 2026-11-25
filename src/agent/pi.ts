@@ -99,8 +99,9 @@ export interface PiSession<T> {
   signal?: AbortSignal;
   /** Runs the session as one service assistant turn (#1253). */
   service?: PiServiceTurn;
-  /** A role run's SSH context (#1379): its role and whether its checkout was trusted when it started. Needs runAccess. */
-  ssh?: { role: string; trusted: boolean };
+  /** The SSH context (#1379): role, whether the checkout was trusted at the start, and how long the run lives (the run
+   * token when absent). */
+  ssh?: { role: string; trusted: boolean; live?: () => boolean };
 }
 
 function toolNameOf(tool: any): string {
@@ -332,11 +333,12 @@ export function piAdapter<T>(session: PiSession<T>) {
       onSessionFault: err => failSession(err),
     });
 
-    // The SSH grant lives as long as the run token: commands of the Pi process (#1379) may use the targets this role may
-    // use, until the run ends, is cancelled or a target is revoked. Only the call that starts the process carries it.
-    const sshGrant = session.ssh && session.runAccess && task.repository_id ? sshAccess.issue({
-      store, repository: String(task.repository_id), task: String(task.id), role: session.ssh.role, trusted: session.ssh.trusted,
-      live: () => { runAccess.check(runAccess.token); return true; },
+    // The SSH grant lives as long as the run: commands of the Pi process (#1379) may use the targets this role may use,
+    // until the run ends, is cancelled or a target is revoked. The call that starts, reattaches or continues the process
+    // carries it; the daemon moves a session it started earlier to the new grant.
+    const sshLive = session.ssh?.live ?? (session.runAccess ? () => { runAccess.check(runAccess.token); return true; } : null);
+    const sshGrant = session.ssh && sshLive && task.repository_id ? sshAccess.issue({
+      store, repository: String(task.repository_id), task: String(task.id), role: session.ssh.role, trusted: session.ssh.trusted, live: sshLive,
     }) : null;
     const starting = sshGrant ? { ssh: sshGrant.payload } : {};
     try {
@@ -381,7 +383,7 @@ export function piAdapter<T>(session: PiSession<T>) {
       // A stored started receipt is not evidence that its PID still exists. Ask the runner again on every entry;
       // it checks the saved process before returning started, including after a control-plane restart. A start that rode
       // with the configuration can be such a receipt too: the first poll checks the saved process the same way.
-      const started = launched ?? await workspace.call(key + ':' + (conversation?.resume ? 'continue:' : 'start:') + randomId(), { type: conversation?.resume ? 'workspace_agent_continue' : 'workspace_agent_start' }, conversation?.resume ? {} : starting);
+      const started = launched ?? await workspace.call(key + ':' + (conversation?.resume ? 'continue:' : 'start:') + randomId(), { type: conversation?.resume ? 'workspace_agent_continue' : 'workspace_agent_start' }, starting);
       if (started.error || launched && started.started !== true) stop('execution_interrupted', 'waiting_environment', '启动任务执行进程时中断。');
 
       // What the last poll showed that this loop already handles, so a long poll waits past it (#1277): tool and token
