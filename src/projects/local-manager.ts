@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync, renameSync, readdirSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync, writeFileSync, renameSync, readdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { concurrencyValue } from '../app/settings.js';
 import { randomId, fail, type Json } from '../core/security.js';
@@ -79,7 +79,13 @@ export class LocalManager implements Manager {
       }
       const action = fileTreeMatch[3], directories = id === 'directories', body = (input ?? {}) as Record<string, any>;
       const actor = typeof body.actor === 'string' ? body.actor : 'console';
-      const tree = new FileTree(this.root + '/project-notes');
+      const notesDir = this.root + '/project-notes';
+      if (method === 'GET' && url.searchParams.get('require_existing') === '1') {
+        let info;
+        try { info = lstatSync(notesDir); } catch { info = null; }
+        if (!info || info.isSymbolicLink() || !info.isDirectory()) fail(503, 'notes_volume_unavailable');
+      }
+      const tree = new FileTree(notesDir);
       try {
         if (directories && method === 'POST') return await tree.createDirectory(body.path);
         if (directories && method === 'DELETE') return await tree.deleteDirectory(body.path);

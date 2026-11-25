@@ -69,7 +69,7 @@ export function createDefaultSyncRuntime(options: CreateDefaultSyncRuntimeOption
   if (options.projectNotesRoot) {
     adapters.push(createProjectNotesDirectoryAdapter(options.projectNotesRoot, options.store));
   } else if (options.manager) {
-    adapters.push(new ManagerProjectNotesAdapter(options.manager));
+    adapters.push(new ManagerProjectNotesAdapter(options.manager, options.store));
   }
 
   if (options.assistantHomes || options.assistantHomesRoot) {

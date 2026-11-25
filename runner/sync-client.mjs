@@ -21,8 +21,14 @@ export const SYNC_BASE_FILENAME = '.sync-base.json';
 export const SYNC_BASE_SCHEMA = 'bot.sync-base/1';
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const CONTROL_CHAR_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+const SENSITIVE_SYNC_PATH_RE =
+  /(^|\/)(?:\.env(?:\.[^/]*)?|\.git|\.ssh|\.aws|\.gnupg|\.npmrc|\.netrc|\.pypirc|\.docker\/config\.json|secrets\.json|credentials(?:\.(?!ts$|tsx$|js$|mjs$|cjs$|jsx$|py$|md$|mdx$|html$|css$|scss$|vue$|svelte$|rs$|go$|java$|kt$|rb$|php$|sh$)[^/]*)?|id_(?:rsa|ed25519|ecdsa|dsa)|[^/]+\.(?:pem|key|p12|pfx|jks|keystore))(?:\/|$)/i;
 const DEFAULT_BATCH_BLOBS = 64;
 const DEFAULT_BATCH_BYTES = 4 * 1024 * 1024;
+
+export function isSensitiveSyncPath(relPath) {
+  return typeof relPath === 'string' && SENSITIVE_SYNC_PATH_RE.test(relPath);
+}
 
 export class SyncClientError extends Error {
   constructor(code, status = 400, detail = null) {
@@ -373,6 +379,7 @@ export class SyncClient {
       revision: Number(base.revision ?? 0),
       updated_at: new Date().toISOString(),
       ...(base.limits ? { limits: base.limits } : {}),
+      ...(typeof base.reject_sensitive_paths === 'boolean' ? { reject_sensitive_paths: base.reject_sensitive_paths } : {}),
       files: base.files ?? {},
     };
     await writeAtomicFile(file, JSON.stringify(next, null, 2) + '\n', 0o644);
@@ -603,7 +610,15 @@ export class SyncClient {
       ? Number(base.revision ?? 0)
       : Number(manifest.revision ?? 0);
     await this.writeBaseline(
-      { revision: updatedRevision, limits: manifest.limits ?? base.limits ?? null, files: nextFiles },
+      {
+        revision: updatedRevision,
+        limits: manifest.limits ?? base.limits ?? null,
+        reject_sensitive_paths:
+          typeof manifest.reject_sensitive_paths === 'boolean'
+            ? manifest.reject_sensitive_paths
+            : base.reject_sensitive_paths,
+        files: nextFiles,
+      },
       mode,
     );
 
@@ -700,6 +715,10 @@ export class SyncClient {
         ? base.limits.max_file_bytes
         : null);
     const allowSkipOversized = options.skipOversized === true || (options.skipOversized !== false && pushMode === 'background');
+    const rejectSensitivePaths =
+      typeof base.reject_sensitive_paths === 'boolean'
+        ? base.reject_sensitive_paths
+        : (this.namespace === 'project-notes' || this.namespace === 'assistant-homes');
 
     const changes = [];
     const blobsToUpload = new Map();
@@ -710,6 +729,9 @@ export class SyncClient {
       if (pathFilter && !pathFilter.has(rel)) continue;
       const prev = base.files?.[rel];
       if (prev && prev.sha256 === file.sha256) continue;
+      if (rejectSensitivePaths && isSensitiveSyncPath(rel)) {
+        throw new SyncClientError('sync_sensitive_path', 400, { path: rel });
+      }
       if (effectiveMaxFileBytes !== null && file.size > effectiveMaxFileBytes) {
         if (allowSkipOversized) {
           skippedOversized.push({ path: rel, size: file.size, limit: effectiveMaxFileBytes, reason: 'sync_file_too_large' });
@@ -1005,7 +1027,15 @@ export class SyncClient {
     const nextScopeRev = overallOk && skippedOversized.length === 0
       ? latestRevision
       : Number(base.revision ?? 0);
-    await this.writeBaseline({ revision: nextScopeRev, limits: base.limits ?? null, files: nextFiles }, 'rw');
+    await this.writeBaseline(
+      {
+        revision: nextScopeRev,
+        limits: base.limits ?? null,
+        reject_sensitive_paths: base.reject_sensitive_paths,
+        files: nextFiles,
+      },
+      'rw',
+    );
 
     return {
       ok: overallOk,
