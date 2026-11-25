@@ -35,6 +35,8 @@ export interface SyncClientOptions {
   fetchImpl?: typeof fetch;
   baseFile?: string;
   maxBatchBlobs?: number;
+  maxBatchBytes?: number;
+  maxFileBytes?: number;
 }
 
 export class SyncClient {
@@ -62,7 +64,7 @@ export class SyncClient {
     deleted_files: number;
     skipped_dirty: string[];
   }>;
-  push(options?: { mode?: 'interactive' | 'background'; actorTag?: string; skipIfHumanEdited?: boolean; paths?: string[] }): Promise<{
+  push(options?: { mode?: 'interactive' | 'background'; actorTag?: string; skipIfHumanEdited?: boolean; skipOversized?: boolean; paths?: string[] }): Promise<{
     ok: boolean;
     status: number;
     error?: string;
@@ -71,5 +73,6 @@ export class SyncClient {
     uploaded_bytes: number;
     results: any[];
     conflicts: any[];
+    skipped_oversized: { path: string; size: number; limit?: number | null; reason: string }[];
   }>;
 }

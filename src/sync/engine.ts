@@ -162,6 +162,11 @@ export class FileSyncEngine {
       : undefined;
 
     const snap = await adapter.snapshot(scope, normalizedPaths ? { paths: normalizedPaths } : undefined);
+    const limits = {
+      max_file_bytes: adapter.policy.maxFileBytes,
+      max_batch_blobs: adapter.policy.maxBatchBlobs,
+      max_batch_bytes: adapter.policy.maxBatchBytes,
+    };
 
     // Lazy filtered single-path requests (e.g. tool-results) return exact matched entries directly without mutating full-scope delta state.
     if (normalizedPaths) {
@@ -171,6 +176,7 @@ export class FileSyncEngine {
         mode: adapter.policy.mode,
         immutable: adapter.policy.immutable,
         allow_internal_symlinks: adapter.policy.allowInternalSymlinks,
+        limits,
         revision: snap.revision,
         since_rev: sinceRev,
         full: false,
@@ -190,6 +196,7 @@ export class FileSyncEngine {
         mode: adapter.policy.mode,
         immutable: adapter.policy.immutable,
         allow_internal_symlinks: adapter.policy.allowInternalSymlinks,
+        limits,
         revision: currentRevision,
         since_rev: sinceRev,
         full: true,
@@ -204,6 +211,7 @@ export class FileSyncEngine {
         mode: adapter.policy.mode,
         immutable: adapter.policy.immutable,
         allow_internal_symlinks: adapter.policy.allowInternalSymlinks,
+        limits,
         revision: currentRevision,
         since_rev: sinceRev,
         full: false,
@@ -237,6 +245,7 @@ export class FileSyncEngine {
       mode: adapter.policy.mode,
       immutable: adapter.policy.immutable,
       allow_internal_symlinks: adapter.policy.allowInternalSymlinks,
+      limits,
       revision: currentRevision,
       since_rev: sinceRev,
       full: false,

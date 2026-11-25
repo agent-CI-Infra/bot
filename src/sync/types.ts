@@ -54,6 +54,11 @@ export interface SyncManifestResponse {
   mode: SyncMode;
   immutable: boolean;
   allow_internal_symlinks: boolean;
+  limits?: {
+    max_file_bytes: number;
+    max_batch_blobs: number;
+    max_batch_bytes: number;
+  };
   revision: number;
   since_rev: number;
   full: boolean;
