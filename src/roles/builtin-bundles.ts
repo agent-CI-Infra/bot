@@ -154,10 +154,11 @@ export function defaultProjectRoleBundleIds(roleId: string, root?: string | URL)
     .map(bundle => bundle.id);
 }
 
-/** Default built-in bundle IDs bound to one service role (`management-assistant` or `group-assistant`). */
+/** Default built-in bundle IDs bound to one service role (`management-assistant`, `group-assistant`, or legacy `repository-assistant`). */
 export function defaultServiceRoleBundleIds(serviceRoleId: string, root?: string | URL): string[] {
+  const effectiveRoleId = serviceRoleId === 'repository-assistant' ? 'group-assistant' : serviceRoleId;
   return loadBuiltinBundles(root)
-    .filter(bundle => bundle.service_roles.includes(serviceRoleId))
+    .filter(bundle => bundle.service_roles.includes(effectiveRoleId))
     .map(bundle => bundle.id);
 }
 

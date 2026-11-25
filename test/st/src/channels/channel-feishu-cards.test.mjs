@@ -480,3 +480,39 @@ test('private chat supports rich interactive cards with owner isolation, Web con
   assert.equal(pSchedMsg.content.schema, '2.0');
   assert.match(JSON.stringify(pSchedMsg.content), /定时任务「私聊巡检」/);
 });
+
+test('untouched pre-#1249 legacy repository-assistant group binding keeps feishu-cards and read_skill without re-saving (#1359)', async t => {
+  const f = await channelFixture(t);
+  await repositoryAssistant(f);
+  const group = await boundGroup(f, ['101'], 'oc_group_legacy_repo_assistant');
+  // Simulate an untouched pre-#1249 binding: legacy service_role row + service_role_id='repository-assistant' and skill_bundle_ids=NULL.
+  const now = new Date().toISOString();
+  f.h.store.run(
+    `INSERT OR REPLACE INTO service_roles(id,builtin,enabled,name,responsibility,prompt,model_id,permissions,budget,revision,created_at,updated_at,harness)
+     VALUES('repository-assistant',1,1,'仓库问答助手','legacy','',?,?,NULL,1,?,?,'pi')`,
+    f.assistantModel.id, JSON.stringify({ github: 'read' }), now, now,
+  );
+  f.h.store.run(
+    "UPDATE channel_service_bindings SET service_role_id='repository-assistant', skill_bundle_ids=NULL WHERE chat_id=?",
+    group.id,
+  );
+
+  scriptedModel(f, [
+    ['read_skill', { path: 'feishu-cards/SKILL.md' }],
+    ['set_feishu_card', sampleRichCard],
+    '已按旧绑定默认 feishu-cards 输出卡片。',
+  ]);
+  const msg = inGroup('请输出一张状态卡片', 'ou_alice');
+  msg.event.message.chat_id = 'oc_group_legacy_repo_assistant';
+  const r = await post(f.h, f.id, msg);
+  assert.equal((await finished(f.h, r.value.operation_id)).state, 'completed');
+  await until(() => f.wire.sent.length >= 1);
+
+  const sysPrompt = String(f.requests[0]?.messages?.[0]?.content ?? '');
+  assert.match(sysPrompt, /Read feishu-cards\/SKILL\.md via read_skill/);
+  assert.ok((f.requests[0]?.tools ?? []).some(tool => tool.function.name === 'read_skill'));
+  const readSkillToolMsg = f.requests[1]?.messages?.find(m => m.role === 'tool');
+  assert.ok(readSkillToolMsg && String(readSkillToolMsg.content).includes('feishu-cards/SKILL.md'));
+  assert.equal(f.wire.sent[0].msg_type, 'interactive');
+  assert.equal(f.wire.sent[0].content.schema, '2.0');
+});

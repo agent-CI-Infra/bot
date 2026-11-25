@@ -9,14 +9,14 @@ function skillLibraryErrorText(err) {
     skill_already_exists: '当前项目已存在同名控制台 Skill（slug 重复），请更换 slug 或直接编辑现有 Skill。',
     skill_read_only: '内置或仓库导入的 Skill 不能直接在线编辑，请重新从仓库导入或新建控制台 Skill。',
     skill_revision_conflict: '该 Skill 已被其他操作更新，请刷新技能库核对最新版本后重试。',
-    invalid_skill_slug: 'Skill slug 仅支持小写字母、数字和连字符（1-64 个字符，以字母或数字开头）。',
+    invalid_skill_slug: 'Skill slug 仅支持小写字母、数字、点号、下划线和连字符（1-64 个字符，以字母或数字开头）。',
     invalid_skill_frontmatter: 'SKILL.md 必须包含合法的 YAML frontmatter，并声明 name 与 description。',
     skill_md_required: 'Skill 必须包含根目录下的 SKILL.md 文件。',
     skill_source_not_found: '在可信基准分支中未找到目标 .agents/skills/ 目录或 SKILL.md。',
     skill_source_commit_unavailable: '请求的仓库提交不再与当前可信基准分支或缓存一致，请刷新后重试。',
     invalid_skill_file: '包含不合法的文件路径或非普通文件（如符号链接、路径越界或受限二进制文件）。',
     skill_file_too_large: '文件大小超过上限（单文件 512 KiB，单 Skill 总计 8 MiB）。',
-    too_many_skill_files: '文件数量超过上限（单 Skill 最多 64 个文件）。',
+    too_many_skill_files: '文件数量超过上限（单 Skill 最多 256 个文件）。',
   };
   const base = (err && map[err.code]) || readErrorText(err);
   return err?.detail && typeof err.detail === 'string' && !base.includes(err.detail) ? `${base}（${err.detail}）` : base;

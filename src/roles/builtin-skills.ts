@@ -4,8 +4,11 @@ import {join, resolve} from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 
 /**
- * Skills shipped with the bot under skills/<id>/. A bundle is its SKILL.md, SOURCES.json and the Markdown under
- * references/; LICENSE stays in the repository and image. Contents are read when used, so an image always serves its own.
+ * Skills shipped with the bot under skills/<id>/.
+ * - `readBuiltinSkillDirectory` reads the full directory (including `SKILL.md`, `SOURCES.json`, `LICENSE`, `references/**`,
+ *   `scripts/**`, `assets/**`) for the immutable Skill Library and versioned project bundles.
+ * - `builtinSkillFiles` (and service-role `read_skill`) expose `SKILL.md`, `SOURCES.json` and `references/*.md` while keeping
+ *   top-level `LICENSE` out of the service-role file listing.
  */
 export interface BuiltinSkillFile { path:string; content:string; sha256:string; bytes:number }
 export interface BuiltinSkillDirectoryFile {
