@@ -1,7 +1,10 @@
 import { test, expect } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { harness, setup, account, repository } from '../../fixtures/helpers.mjs';
+import { harness, setup, account, repository, testPassword } from '../../fixtures/helpers.mjs';
+import { beginModelRequest, finishModelRequest } from '../../../dist/metrics/accounting.js';
+import { channelFixture, boundGroup, repositoryAssistant } from '../../fixtures/channel-fixture.mjs';
+import { login as channelLogin } from '../helpers/channel-console-login.mjs';
 
 // #750 phase 1: the console follows the system theme and offers light / dark / system by hand. The four surfaces in
 // scope (login, project list, global settings, confirmation dialog) must be readable in dark, must not overflow
@@ -10,9 +13,9 @@ const out = resolve('.tmp/theme-750');
 const LIGHT_BG = 'rgb(245, 247, 251)';
 const DARK_TOKENS = { bg: '#0f141b', surface: '#161d27' };
 
-async function signIn(page, h, password, hash = '#/projects') {
+async function signIn(page, h, password, hash = '#/projects', username = 'administrator') {
   await page.goto(h.admin + '/' + hash);
-  await page.getByLabel('用户名', { exact: true }).fill('administrator');
+  await page.getByLabel('用户名', { exact: true }).fill(username);
   await page.getByLabel('密码', { exact: true }).fill(password);
   await page.getByRole('button', { name: '登录', exact: true }).click();
   await expect(page.locator('#workspace')).toBeVisible();
@@ -611,7 +614,7 @@ const PIN_ROWS = [
   ['task', '.task-next-text'], ['task', '.task-ext-label'], ['task', '.step-fold-num'], ['task', '.step-fold-meta'], ['task', '.step-fold-stat'],
   ['task', '.step-fold-body'], ['task', '.step-fold-body .muted'], ['task', '.step-fold-body pre.output'], ['task', '.task-archive-body pre.output'],
   ['task', '.role-run-brief'], ['task', '.role-run-meta'], ['task', '.task-archive-fold > summary'],
-  ['task', '.task-metrics'], ['task', '.live'], ['task', '.task-cancel-btn'], ['task', '.task-elapsed-chip'],
+  ['task', '.task-metrics'], ['task', '.task-metrics .metric-incomplete'], ['task', '.live'], ['task', '.task-cancel-btn'], ['task', '.task-elapsed-chip'],
   ['task', '.role-run-fold'], ['task', '.role-run-fold.role-run-running'],
   ['task', '.role-run-fold.role-run-returned'], ['taskpaused', '.role-run-fold.role-run-paused'],
   ['task', '.role-run-findings'],
@@ -705,6 +708,10 @@ const PIN_TABLE = [
   ['confirm', '.confirm-status.progress', ['rgb(168, 198, 245)', 'rgb(22, 29, 39)'], ['rgb(44, 87, 145)', 'rgb(255, 255, 255)']],
   ['task', '.step-fold-body pre.output', ['rgb(231, 237, 246)', 'rgb(27, 36, 48)'], ['rgb(23, 36, 59)', 'rgb(245, 248, 250)']],
   ['task', '.task-archive-body pre.output', ['rgb(231, 237, 246)', 'rgb(27, 36, 48)'], ['rgb(96, 112, 135)', 'rgb(245, 248, 250)']],
+  // #1067 F: the incomplete-metrics note is a child of `.task-metrics`, so the `.task-metrics` row above never sampled
+  // it. `complete=0` on the fixture task makes metrics.js append it; the pair is the note's own colour on the surface
+  // the side card paints.
+  ['task', '.task-metrics .metric-incomplete', ['rgb(240, 200, 130)', 'rgb(22, 29, 39)'], ['rgb(135, 90, 10)', 'rgb(255, 255, 255)']],
 ];
 
 async function pinValues(page, rows) {
@@ -769,6 +776,7 @@ test('#750 every dark-block rule keeps its measured value in dark and in light',
       JSON.stringify({ assignment_id: 'asg-750', role: 'reviewer', purpose: '核对深色主题的对比度' }));
     h.store.run("INSERT INTO task_history(task_id,type,data,created_at,run_id,actor) VALUES('t-750','role_result',?,'2026-11-18T08:13:00Z','run-3','role:reviewer')",
       JSON.stringify({ role: 'reviewer', assignment_id: 'asg-750', result: { summary: '退回 1 项问题', findings: [{ description: '深色下折叠体仍是白纸', evidence: ['static/views.css'] }], inspected_scope: ['static/'], unknowns: [] } }));
+    h.store.run("INSERT OR REPLACE INTO task_metrics(task_id,complete) VALUES('t-750',0)");
     h.store.run("INSERT INTO tasks(id,repository_id,kind,status,priority,summary,object_number,phase,created_at,updated_at) VALUES('t-750p','101','development.issue','paused','P2','暂停中的任务：折叠体边框',751,'model','2026-11-18T09:00:00Z','2026-11-18T09:10:00Z')");
     h.store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,context_snapshot,config_snapshot,role) VALUES('run-p1','t-750p','execution',1,1,'2026-11-18T09:00:00Z','paused','{}','{}','dev')");
     await page.setViewportSize({ width: 1440, height: 900 });
@@ -979,5 +987,179 @@ test('#1067-D the knowledge tree current entry renders at 4.5:1 under system dar
     expect(stroke, `knowledge tree icon stroke ${icon.stroke}`).not.toBeNull();
     const iconRatio = contrast(stroke, rgb(icon.background));
     expect(iconRatio, `knowledge tree icon ${icon.stroke} on ${icon.background} is ${iconRatio.toFixed(2)}:1, needs 3:1`).toBeGreaterThanOrEqual(3);
+  } finally { await h.stop(); }
+});
+
+// #1067 E/F: the Review `6049572396` swept the same token misuse out of six more nodes. The five text nodes below
+// paint `--color-brand`, which the design note reserves for fills; the sixth keeps the light literal `#875a0a` for the
+// incomplete-metrics note. Each is measured where the app renders it, and the rendered pair is pinned by value at all
+// three layouts so a later palette edit cannot pass by only keeping the ratio.
+const BRAND_TEXT_RENDERED = { dark: 'rgb(150, 180, 255)', light: 'rgb(36, 93, 224)' };
+
+test('#1067-E the issue, cost and pending-repo links render at 4.5:1 under system dark', async ({ page }) => {
+  test.setTimeout(300000);
+  const manager = { call: async (_method, path) => ({ repository_id: path.split('/')[3], generation: 1, state: 'ready', desired: 'ready', revision: 1, computer: {} }) };
+  const h = await harness(undefined, manager);
+  try {
+    const { admin, password } = await setup(h);
+    const a = await account(admin);
+    await repository(admin, a.id, '101');
+    await repository(admin, a.id, '202');
+    const store = h.store;
+    const at = '2026-11-04T08:00:00.000Z';
+    store.run(`INSERT INTO board_objects(repository_id,object_type,object_number,title,github_state,draft,title_at,state_at,draft_at,last_seen)
+      VALUES('101','issue',101,'Dark theme link fixture','open',0,?,?,?,?)`, at, at, at, at);
+    store.run(`INSERT INTO tasks(id,repository_id,kind,status,summary,input,result,object_number,created_at,updated_at)
+      VALUES('t-e-101','101','task.request','pr_opened','开发 Issue #101',?,?,101,?,?)`,
+      JSON.stringify({ target: { type: 'issue', number: 101 }, executor_role: 'dev' }),
+      JSON.stringify({ pr_number: 205, pr_url: 'https://github.com/org/repo/pull/205' }), at, at);
+    store.run('INSERT INTO task_write_grants VALUES(?,?,1,?)', 't-e-101', JSON.stringify(['pull_request']), at);
+    store.run(`INSERT INTO bot_pull_requests(repository_id,number,pr_id,author_id,head_repository_id,branch,sha,source_task_id,revisions)
+      VALUES('101',205,'pr-e-205','999','101','bot/issue-101','${'e'.repeat(40)}','t-e-101',0)`);
+    store.run(`INSERT INTO commit_checks(repository_id,head_sha,check_key,name,status,conclusion,details_url,updated_at)
+      VALUES('101','${'e'.repeat(40)}','ci:unit','unit','completed','success','https://github.com/org/repo/runs/1',?)`, at);
+    // The costs page needs a costed request per project: the project column only draws a link when it has usage.
+    for (const [id, repo, cost] of [['t-cost-101', '101', 2], ['t-cost-202', '202', 3]]) {
+      store.run(`INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,created_at,updated_at)
+        VALUES(?,?,'review.pr','succeeded',?,1,?,?)`, id, repo, `cost fixture ${repo}`, at, at);
+      const task = store.get('SELECT * FROM tasks WHERE id=?', id);
+      const request = beginModelRequest(store, task, id + '-request', { id: 'fixture-model', model: 'fixture', pricing: { currency: 'USD', input_per_million: cost, output_per_million: 10, cache_per_million: 0.2 } }, at);
+      finishModelRequest(store, request, { prompt_tokens: 1000000, completion_tokens: 0, prompt_tokens_details: { cached_tokens: 0 } }, 200);
+    }
+    await page.clock.setFixedTime(new Date('2026-11-04T04:00:00Z'));
+    let signedIn = false;
+    for (const width of [390, 768, 1440]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+      await page.emulateMedia({ colorScheme: 'dark' });
+      if (!signedIn) { await signIn(page, h, password, '#/projects/101/overview/issues'); signedIn = true; }
+      const measure = async key => {
+        const sample = await renderedPair(page, key);
+        const ratio = pairRatio(sample, key);
+        expect(ratio, `${key} ${sample.color} on ${sample.background} is ${ratio.toFixed(2)}:1, needs 4.5:1`).toBeGreaterThanOrEqual(4.5);
+        expect(sample.color, `${key} keeps --color-brand-text in dark at ${width}`).toBe(BRAND_TEXT_RENDERED.dark);
+        return sample;
+      };
+      // 1. The issue row's PR link, and 2. the task link inside the same issue's chain panel.
+      await page.goto(h.admin + '/#/projects/101/overview/issues');
+      await page.locator('.issue-pr-link').first().waitFor({ timeout: 30000 });
+      const pr = await measure('.issue-pr-link');
+      expect(pr.background, `.issue-pr-link keeps its brand-weak fill at ${width}`).toBe('rgb(27, 44, 77)');
+      await page.locator('[data-issue-toggle="101"]').click();
+      await page.locator('[data-issue-chain="101"] .issue-chain-link').first().waitFor({ timeout: 30000 });
+      await measure('[data-issue-chain="101"] .issue-chain-link');
+      // 3. The global costs page's project link.
+      await page.goto(h.admin + '/#/costs');
+      await page.locator('.cost-project-link').first().waitFor({ state: 'attached', timeout: 30000 });
+      await page.evaluate(() => document.querySelectorAll('details').forEach(node => { node.open = true; }));
+      await page.waitForLoadState('networkidle').catch(() => {});
+      await measure('.cost-project-link');
+    }
+    // Light must keep its own rendered pair: `--color-brand-text` is the same #245de0 as the fill token it replaced.
+    await page.emulateMedia({ colorScheme: 'light' });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(h.admin + '/#/projects/101/overview/issues');
+    await page.locator('.issue-pr-link').first().waitFor({ timeout: 30000 });
+    const light = await renderedPair(page, '.issue-pr-link');
+    expect(light.color, 'the issue PR link keeps its light brand colour').toBe(BRAND_TEXT_RENDERED.light);
+    expect(light.background, 'the issue PR link keeps its light brand-weak fill').toBe('rgb(237, 242, 255)');
+  } finally { await h.stop(); }
+});
+
+// The installed-but-unstarted fold is drawn for a project administrator: `render.js:44` makes the super administrator's
+// project tab the installations view, which never carries the pending group. The identity read has no pending rows for
+// this fixture, so the route appends the installed-but-unstarted set the way the installation list reaches the page.
+test('#1067-E the pending-repository fold title renders at 4.5:1 under system dark', async ({ page, browser }) => {
+  test.setTimeout(240000);
+  const h = await harness();
+  try {
+    const { admin } = await setup(h);
+    const a = await account(admin);
+    for (const id of ['101', '202']) await repository(admin, a.id, id);
+    const memberPassword = testPassword();
+    const created = await admin('/api/users', 'POST', { username: 'pending-admin', password: memberPassword, role: 'project_admin', repository_ids: ['101', '202'] });
+    expect(created.status).toBe(201);
+    const pending = Array.from({ length: 12 }, (_, index) => ({ id: String(700 + index), full_name: `pending/repo-${index + 1}`, self_start: index === 0 }));
+    const context = await browser.newContext({ locale: 'zh-CN' });
+    const list = await context.newPage();
+    try {
+      let signedIn = false;
+      for (const width of [390, 768, 1440]) {
+        await list.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+        await list.emulateMedia({ colorScheme: 'dark' });
+        if (!signedIn) {
+          // The route must exist before the sign-in render: the page reads /api/identity on first load and a route added
+          // afterwards only affects the next navigation, where the identity read may still answer from cache.
+          await list.route('**/api/**', async route => {
+            if (!route.request().url().includes('/api/identity')) return route.fallback();
+            const response = await route.fetch(), body = await response.json();
+            body.github_connection = { ...(body.github_connection || {}), pending_repositories: pending };
+            return route.fulfill({ response, json: body });
+          });
+          await signIn(list, h, memberPassword, '#/projects', 'pending-admin');
+          signedIn = true;
+        }
+        await list.goto(h.admin + '/#/projects');
+        await list.locator('[data-testid="pending-repo-fold"] > summary').first().waitFor({ timeout: 30000 });
+        const sample = await renderedPair(list, '[data-testid="pending-repo-fold"] > summary');
+        const ratio = pairRatio(sample, 'pending-repository fold title');
+        expect(ratio, `pending-repository fold title ${sample.color} on ${sample.background} is ${ratio.toFixed(2)}:1, needs 4.5:1`).toBeGreaterThanOrEqual(4.5);
+        expect(sample.color, `the pending fold title keeps --color-brand-text in dark at ${width}`).toBe(BRAND_TEXT_RENDERED.dark);
+      }
+    } finally { await context.close(); }
+  } finally { await h.stop(); }
+});
+
+test('#1067-E the Feishu binding badge renders at 4.5:1 under system dark', async ({ page }) => {
+  test.setTimeout(240000);
+  const f = await channelFixture();
+  try {
+    await repositoryAssistant(f);
+    const chat = await boundGroup(f);
+    let signedIn = false;
+    for (const width of [390, 768, 1440]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+      await page.emulateMedia({ colorScheme: 'dark' });
+      if (!signedIn) { await channelLogin(page, f, '#/identity/feishu'); signedIn = true; }
+      await page.goto(f.h.admin + '/#/identity/feishu');
+      const badge = page.locator('.feishu-row-title > span.feishu-binding-badge[class="feishu-binding-badge"]').first();
+      await badge.waitFor({ timeout: 30000 });
+      const selector = '.feishu-row-title > span.feishu-binding-badge[class="feishu-binding-badge"]';
+      const sample = await renderedPair(page, selector);
+      const ratio = pairRatio(sample, 'feishu binding badge');
+      expect(ratio, `feishu binding badge ${sample.color} on ${sample.background} is ${ratio.toFixed(2)}:1, needs 4.5:1`).toBeGreaterThanOrEqual(4.5);
+      expect(sample.color, `the badge keeps --color-brand-text in dark at ${width}`).toBe(BRAND_TEXT_RENDERED.dark);
+      expect(sample.background, `the badge keeps its brand-weak fill at ${width}`).toBe('rgb(27, 44, 77)');
+    }
+  } finally { await f.close(); }
+});
+
+test('#1067-F the incomplete-metrics note renders at 4.5:1 under system dark', async ({ page }) => {
+  test.setTimeout(180000);
+  const h = await harness();
+  try {
+    const { admin, password } = await setup(h);
+    const a = await account(admin);
+    await repository(admin, a.id, '101');
+    h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,created_at,updated_at) VALUES('t-f','101','development.issue','running','统计不完整提示',901,'2026-11-04T08:00:00Z','2026-11-04T08:10:00Z')");
+    // `complete=0` is the state metrics.js:16 reads to append the `metric-incomplete` span; do not hand-build the node.
+    h.store.run("INSERT OR REPLACE INTO task_metrics(task_id,complete) VALUES('t-f',0)");
+    let signedIn = false;
+    // The side card that carries the metrics note is folded away on the narrow layout, the same rule PIN_TABLE uses:
+    // every width must be sampled where it lays the node out, and 1440 must always render it.
+    for (const width of [1440, 768, 390]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+      await page.emulateMedia({ colorScheme: 'dark' });
+      if (!signedIn) { await signIn(page, h, password, '#/tasks/t-f'); signedIn = true; }
+      await page.goto(h.admin + '/#/tasks/t-f');
+      await page.evaluate(() => document.querySelectorAll('details').forEach(node => { node.open = true; }));
+      const note = page.locator('.task-metrics .metric-incomplete').first();
+      await note.waitFor({ timeout: 30000 });
+      const shown = await note.evaluate(el => el.getBoundingClientRect().width > 1);
+      if (!shown) { expect(width, 'only the narrow layout may fold the metrics note away').toBeLessThan(1440); continue; }
+      const sample = await renderedPair(page, '.task-metrics .metric-incomplete');
+      const ratio = pairRatio(sample, 'incomplete-metrics note');
+      expect(ratio, `incomplete-metrics note ${sample.color} on ${sample.background} is ${ratio.toFixed(2)}:1, needs 4.5:1`).toBeGreaterThanOrEqual(4.5);
+      expect(sample.color, `the incomplete note keeps --color-warning in dark at ${width}`).toBe('rgb(240, 200, 130)');
+    }
   } finally { await h.stop(); }
 });

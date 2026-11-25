@@ -165,7 +165,7 @@ button.mc-file-pill {
 button.mc-file-pill:hover {
   background: var(--color-brand-weak);
   border-color: var(--color-brand);
-  color: var(--color-brand);
+  color: var(--color-brand-text);
 }
 
 .mc-file-pill-deleted,
@@ -283,7 +283,7 @@ button.mc-file-pill-deleted:hover,
 
 .mc-browser-file-btn[aria-current="page"] {
   background: var(--color-brand-weak);
-  color: var(--color-brand);
+  color: var(--color-brand-text);
   border-color: var(--color-info-border);
 }
 

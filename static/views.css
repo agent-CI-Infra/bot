@@ -498,7 +498,7 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 @media(max-width:767px){.role-save{top:0;bottom:auto;padding:10px;background:var(--surface,#fff)}.role-save button{min-height:44px}.role-compare-values{grid-template-columns:minmax(0,1fr)}}
 .audit-filters{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 8px}
 .audit-filters button{font-size:var(--font-size-1);padding:4px 10px}
-.audit-filters button[aria-pressed=true]{border-color:var(--color-brand);color:var(--color-brand);background:#e8f3f4}
+.audit-filters button[aria-pressed=true]{border-color:var(--color-brand);color:var(--color-brand-text);background:#e8f3f4}
 /* #698: one audit row reads as a sentence (action · who), then time and the object link; codes fold under 技术信息. */
 .history li.audit-row{display:block;padding:9px 0}
 .audit-row-head{font-size:var(--font-size-row,14px);overflow-wrap:anywhere}.audit-row-head .audit-actor{color:var(--color-text-muted,#4b5563)}

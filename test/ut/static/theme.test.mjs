@@ -4,7 +4,7 @@
 // dark palette itself meets WCAG AA on the surfaces phase 1 covers.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 
 const root = new URL('../../../', import.meta.url);
 const read = (path) => readFileSync(new URL(path, root), 'utf8');
@@ -170,4 +170,62 @@ test('#750 the flash notice keeps a dark plate in both dark blocks', () => {
   }
   const ratio = contrast(darkManual.get('--color-text'), darkManual.get('--color-success-bg'));
   assert.ok(ratio >= 4.5, `text on the dark flash plate is ${ratio.toFixed(2)}:1, needs 4.5:1`);
+});
+
+
+test('#750 no stylesheet in static/ paints text with the fill token', () => {
+  // #1067 E/F: the Review swept six more nodes that still painted text with `--color-brand`, the token the design note
+  // reserves for fills (docs/design/console-and-api.md:13 says text, links and icons take `--color-brand-text`). The
+  // guard scans the WHOLE `static/` tree by declaration, not a list of known selectors: a new `.foo { color:
+  // var(--color-brand) }` written later fails here as well, which a pinned selector list would miss. The light values of
+  // the two tokens are the same #245de0, so swapping them moves no light pixel.
+  const styles = [];
+  const walk = (dir) => {
+    for (const entry of readdirSync(new URL(dir, root), { withFileTypes: true })) {
+      const path = `${dir}${entry.name}`;
+      if (entry.isDirectory()) walk(path + '/');
+      else if (entry.name.endsWith('.css')) styles.push(path);
+    }
+  };
+  walk('static/');
+  assert.ok(styles.length > 10, 'the guard reads the whole static/ tree');
+  const violations = [];
+  for (const path of styles) {
+    const text = read(path).replace(/\/\*[\s\S]*?\*\//g, '');
+    for (const [, selector, body] of text.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      for (const declaration of body.split(';')) {
+        // Only the `color` property counts: `border-color` and `background-color` legitimately keep the fill token.
+        const match = declaration.match(/^\s*color\s*:\s*(.+)$/);
+        if (match && /var\(\s*--color-brand\s*\)/.test(match[1])) violations.push(`${path}: ${selector.trim()} { color: ${match[1].trim()} }`);
+      }
+    }
+  }
+  assert.deepEqual(violations, [], 'no static/ rule may paint text with var(--color-brand)');
+  // The other half of the same guard: a row that carries the fill itself must keep `--color-brand` as its text colour,
+  // because the dark text token is the light #96b4ff and the dark fill is the saturated #245de0 — swapping a filled
+  // control's label to the text token lowers its contrast instead of raising it. A rule that sets both at once is the
+  // shape this catches; the 22 swapped rows all paint text on a neutral or brand-weak plate, none on the fill.
+  const hardSwaps = [];
+  for (const path of styles) {
+    const text = read(path).replace(/\/\*[\s\S]*?\*\//g, '');
+    for (const [, selector, body] of text.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      const declarations = body.split(';').map((entry) => entry.trim());
+      const paintsFill = declarations.some((entry) => /^background(-color)?\s*:\s*var\(--color-brand\)$/.test(entry));
+      const paintsText = declarations.some((entry) => /^color\s*:\s*var\(--color-brand-text\)$/.test(entry));
+      if (paintsFill && paintsText) hardSwaps.push(`${path}: ${selector.trim()} paints text with the text token on the fill token`);
+    }
+  }
+  assert.deepEqual(hardSwaps, [], 'a filled control must not take the text token for its label');
+  // The light-invariance claim is structural: both tokens carry the same light value, so every swap above is a no-op in
+  // light, and the dark text token is the palette's own light blue rather than the fill colour.
+  assert.equal(light.get('--color-brand-text'), light.get('--color-brand'), 'light --color-brand-text keeps the fill value');
+  for (const rule of dark) assert.notEqual(rule.tokens.get('--color-brand-text'), rule.tokens.get('--color-brand'), `${rule.selector} separates the text token from the fill`);
+  // The incomplete-metrics note was the one node in this family that painted a light literal instead of a token; it now
+  // reads the warning token, whose light value is the old #875a0a (shell.css :root) and whose dark value is #f0c882.
+  const costs = read('static/costs.css').replace(/\/\*[\s\S]*?\*\//g, '');
+  const incomplete = [...costs.matchAll(/([^{}]*\.metric-incomplete[^{}]*)\{([^{}]*)\}/g)].map(([, selector, body]) => ({ selector, body }));
+  const note = incomplete.find((rule) => rule.selector.includes('.task-metrics .metric-incomplete'));
+  assert.ok(note, 'costs.css still declares .task-metrics .metric-incomplete');
+  assert.match(note.body, /color:\s*var\(--color-warning\)/, '.metric-incomplete takes the warning token');
+  assert.doesNotMatch(note.body, /#875a0a/i, '.metric-incomplete no longer carries the light literal');
 });

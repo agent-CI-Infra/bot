@@ -54,7 +54,7 @@
 .feishu-row-info > p { margin: 0; }
 .feishu-row-info > p:empty { display: none; }
 .feishu-row-title:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); min-width: 0; overflow-wrap: anywhere; }
-.feishu-binding-badge:not([hidden]) { display: inline-flex; align-items: center; padding: 2px var(--space-3); border-radius: var(--radius-3); background: var(--color-brand-weak); color: var(--color-brand); font-size: var(--font-size-1); font-weight: 600; }
+.feishu-binding-badge:not([hidden]) { display: inline-flex; align-items: center; padding: 2px var(--space-3); border-radius: var(--radius-3); background: var(--color-brand-weak); color: var(--color-brand-text); font-size: var(--font-size-1); font-weight: 600; }
 .feishu-binding-badge.feishu-binding-badge-muted:not([hidden]) { background: var(--color-status-neutral-bg); color: var(--color-status-neutral); border: 1px solid var(--color-border); }
 .feishu-binding-badge.feishu-binding-badge-success:not([hidden]) { background: var(--color-success-bg); color: var(--color-success); }
 .feishu-binding-badge.feishu-binding-badge-warning:not([hidden]) { background: var(--color-warning-bg); color: var(--color-warning); border: 1px solid var(--color-warning-border); }
