@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { fail, type Json } from '../core/security.js';
 import { builtinSkillFiles, builtinSkillSummary } from '../roles/builtin-skills.js';
 
@@ -5,10 +6,22 @@ import { builtinSkillFiles, builtinSkillSummary } from '../roles/builtin-skills.
  * Built-in skills a service role reads on demand (#1136): the tool description names each skill and when to use it, and
  * the body is read only when the job comes up. Skills are working material and never widen tools or permissions.
  */
-const assistantSkills = ['layered-ci-gates'];
+export const assistantSkills = ['layered-ci-gates'];
 export const feishuAssistantSkills = ['layered-ci-gates', 'feishu-cards'];
 export const feishuGroupSkills = ['feishu-cards'];
 export const readSkillName = 'read_skill';
+
+export function serviceSkillFiles(skills: readonly string[] = assistantSkills) {
+  return skills.flatMap(id => builtinSkillFiles(id).map(file => ({ ...file, path: `${id}/${file.path}` })));
+}
+
+export function serviceSkillRevisions(skills: readonly string[] = assistantSkills): string[] {
+  return skills.map(id => {
+    const files = builtinSkillFiles(id);
+    const digest = createHash('sha256').update(JSON.stringify(files.map(f => [f.path, f.sha256]))).digest('hex').slice(0, 16);
+    return `service-builtin:${id}@${digest}`;
+  });
+}
 
 export function makeReadSkillTool(skills: readonly string[] = assistantSkills) {
   return {

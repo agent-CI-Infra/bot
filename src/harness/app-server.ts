@@ -15,7 +15,7 @@ import type { HarnessEvent } from './session.js';
  */
 export const codexAppServer = {
   cli: '0.166.0',
-  schemaDigest: '723ea781a3f0d5be4ddefb69e58f7c48fc8c77fa070234bf2f603088c38023ec',
+  schemaDigest: '3878fdfc51de450491de79c8f5652cb074eb838e03f19fb61b43ff9973ff6445',
   definitions: [
     'InitializeParams', 'InitializeResponse', 'ThreadStartParams', 'ThreadStartResponse', 'ThreadResumeParams', 'ThreadResumeResponse', 'ThreadTurnsListParams', 'ThreadTurnsListResponse',
     'TurnStartParams', 'TurnStartResponse', 'TurnInterruptParams', 'Turn', 'TurnStatus', 'TurnError', 'CodexErrorInfo', 'ThreadItem', 'ItemStartedNotification', 'ItemCompletedNotification', 'TurnCompletedNotification',
@@ -23,6 +23,7 @@ export const codexAppServer = {
     'CommandExecutionRequestApprovalParams', 'CommandExecutionApprovalDecision', 'FileChangeRequestApprovalParams', 'FileChangeApprovalDecision', 'PermissionsRequestApprovalParams', 'PermissionsRequestApprovalResponse', 'GrantedPermissionProfile',
     'McpServerElicitationRequestParams', 'McpServerElicitationRequestResponse', 'ToolRequestUserInputParams', 'ToolRequestUserInputResponse', 'DynamicToolCallParams', 'DynamicToolCallResponse',
     'ExperimentalFeatureListParams', 'ExperimentalFeatureListResponse', 'ExperimentalFeature', 'AskForApproval', 'SandboxPolicy',
+    'SkillsExtraRootsSetParams', 'SkillsExtraRootsSetResponse', 'SkillsListParams', 'SkillsListResponse', 'SkillsListEntry', 'SkillMetadata', 'SkillScope', 'SkillsConfigWriteParams', 'SkillsConfigWriteResponse',
   ],
   /** Server requests of the locked version; each one gets an explicit answer below. */
   serverRequests: [
@@ -40,6 +41,7 @@ export interface CodexDialectContext {
   expectedVersion: string;
   codexHome: string;
   cwd: string;
+  skillDir?: string;
   egress: boolean;
   sandbox: 'danger-full-access' | 'workspace-write' | 'read-only';
   computerAllowed?: boolean;
@@ -700,6 +702,48 @@ export function appServerDialect(ctx: CodexDialectContext): CodexDialect {
       }
       rpc.notify('initialized');
 
+      // Mount only the control-plane skill-store root and disable every non-system skill outside it
+      // (both checkout repo skills in .agents/skills/.codex/skills and writable $CODEX_HOME/skills user skills).
+      // Await extraRoots registration before listing so skills/list cannot race extra-root installation.
+      if (ctx.skillDir) {
+        await rpc.request('skills/extraRoots/set', { extraRoots: [ctx.skillDir] });
+      }
+      const initialListed = await rpc.request('skills/list', { cwds: [cwd], forceReload: true });
+      const allowedSkillRoot = ctx.skillDir ? resolve(ctx.skillDir) : null;
+      const insideSkillStore = (skillPath: string) => {
+        if (!allowedSkillRoot) return false;
+        const abs = resolve(skillPath);
+        return abs === allowedSkillRoot || abs.startsWith(allowedSkillRoot + '/');
+      };
+      const collectSkills = (listed: any): { name: string; path: string; scope?: string; enabled: boolean }[] => {
+        const groups = Array.isArray(listed?.data) ? listed.data : [];
+        const out: { name: string; path: string; scope?: string; enabled: boolean }[] = [];
+        for (const group of groups) {
+          if (!Array.isArray(group?.skills)) continue;
+          for (const sk of group.skills) {
+            if (sk && typeof sk.path === 'string' && typeof sk.name === 'string') {
+              out.push({ name: sk.name, path: sk.path, scope: typeof sk.scope === 'string' ? sk.scope : undefined, enabled: sk.enabled !== false });
+            }
+          }
+        }
+        return out;
+      };
+      const initialSkills = collectSkills(initialListed);
+      const foreignSkills = initialSkills.filter(sk => sk.enabled && sk.scope !== 'system' && !insideSkillStore(sk.path));
+      for (const sk of foreignSkills) {
+        const written = await rpc.request('skills/config/write', { path: sk.path, enabled: false });
+        if (written?.effectiveEnabled !== false) {
+          stop('harness_permission_mismatch', 'waiting_configuration', 'Codex failed to disable a non-mounted skill.');
+        }
+      }
+      const finalSkills = foreignSkills.length
+        ? collectSkills(await rpc.request('skills/list', { cwds: [cwd], forceReload: true }))
+        : initialSkills;
+      if (finalSkills.some(sk => sk.enabled && sk.scope !== 'system' && !insideSkillStore(sk.path))) {
+        stop('harness_permission_mismatch', 'waiting_configuration', 'Codex retained an enabled non-mounted skill.');
+      }
+      const loadedSkills = finalSkills.filter(sk => sk.enabled && insideSkillStore(sk.path)).map(sk => sk.name).sort();
+
       const overrides = {
         cwd,
         approvalPolicy: 'never' as const,
@@ -839,6 +883,7 @@ export function appServerDialect(ctx: CodexDialectContext): CodexDialect {
           enabledBuiltins: [...enabledFeatures],
           disabledBuiltins: builtins,
           instructionSources: redactor.clean(thread.instructionSources ?? []),
+          skills: loadedSkills,
           tools,
           reconciled,
         },

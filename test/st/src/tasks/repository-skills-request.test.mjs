@@ -293,11 +293,11 @@ test('#1171 Pi role auto-mounts whole .agents/skills/ directory with companion f
 
       observed.systemTexts.push(sys);
 
-      // Extract staged skill locations injected by Pi's DefaultResourceLoader (must come from staged bot-role/repository, never untrusted checkout .agents/skills)
-      const calcMatch = /<location>([^<]*\/repository\/calc-ops\/SKILL\.md)<\/location>/.exec(sys);
-      const plainMatch = /<location>([^<]*\/repository\/plain-guide\/SKILL\.md)<\/location>/.exec(sys);
-      assert.ok(calcMatch, `Pi resource loader must discover staged calc-ops/SKILL.md; sys tail=${sys.slice(-1200)}`);
-      assert.ok(plainMatch, `Pi resource loader must discover staged plain-guide/SKILL.md (without frontmatter); sys tail=${sys.slice(-1200)}`);
+      // Extract mounted skill locations injected by Pi's DefaultResourceLoader (must come from read-only skill-store sets/<hash>/bot/skills, never untrusted checkout .agents/skills)
+      const calcMatch = /<location>([^<]*\/sets\/[a-f0-9]{64}\/bot\/skills\/calc-ops\/SKILL\.md)<\/location>/.exec(sys);
+      const plainMatch = /<location>([^<]*\/sets\/[a-f0-9]{64}\/bot\/skills\/plain-guide\/SKILL\.md)<\/location>/.exec(sys);
+      assert.ok(calcMatch, `Pi resource loader must discover mounted calc-ops/SKILL.md; sys tail=${sys.slice(-1200)}`);
+      assert.ok(plainMatch, `Pi resource loader must discover mounted plain-guide/SKILL.md (without frontmatter); sys tail=${sys.slice(-1200)}`);
       assert.ok(!sys.includes('billing-plugin') && !sys.includes('DO_NOT_MOUNT_PLUGIN_SKILL'), 'Business directory SKILL.md must never be mounted');
       assert.ok(!sys.includes('EVIL_UNTRUSTED_PR_OVERRIDE') && !sys.includes('INJECTED_UNTRUSTED_PR_SKILL') && !sys.includes('/injected/SKILL.md'), 'Untrusted PR .agents/skills in checkout must never be loaded by Pi');
       assert.ok(!sys.includes('evil-pi') && !sys.includes('EVIL_PI_SKILL_1171') && !sys.includes('EVIL_PI_BODY_1171'), 'Untrusted PR .pi/skills in checkout must never be loaded by Pi');
@@ -541,6 +541,12 @@ test('#1171 untrusted PR/branch/commit targets never load untrusted skills; in-p
       } else if (userPayload.event.summary === 'Warm dispatch event') {
         seen.dispatchWarmSummaries = userPayload.repository_skills;
         reply = callTool('ignore_event', { reason: '已核对缓存的仓库 skill 摘要。' });
+      } else if (userPayload.event.summary === 'Native warm dispatch event') {
+        seen.dispatchNativeWarm = { tools, repository_skills: userPayload.repository_skills };
+        reply = callTool('ignore_event', { reason: '已核对原生只读挂载的仓库 skill 摘要。' });
+      } else if (userPayload.event.summary === 'Unmounted warm dispatch event') {
+        seen.dispatchUnmountedWarm = { tools, repository_skills: userPayload.repository_skills };
+        reply = callTool('ignore_event', { reason: '已核对未挂载回退 read_skill 的仓库 skill 摘要。' });
       } else if (calls.length === 0) {
         assert.ok(tools.includes('read_skill'), 'dispatch manager must offer read_skill');
         reply = callTool('read_skill', {});
@@ -697,11 +703,53 @@ test('#1171 untrusted PR/branch/commit targets never load untrusted skills; in-p
   assert.ok(seen.dispatchRestrictedTools && !seen.dispatchRestrictedTools.includes('read_skill'), 'restricted Manager without Contents read must not be offered read_skill');
   assert.equal(seen.dispatchRestrictedPayload?.repository_skills, undefined, 'restricted Manager without Contents read must not receive cached repository_skills');
   assert.ok(!seen.dispatchRestrictedSys.includes('calc-ops') && !seen.dispatchRestrictedSys.includes('plain-guide'), 'restricted Manager harnessResources must not stage cached repository skills');
-  const { role_id: _rid, enabled, name, responsibility, persona_prompt, model_profile_ref, skill_bundle_ref, harness_ref, permissions, environment_profile_ref, budget_policy_ref, output_schema_ref } = managerDef;
-  await admin('/api/repositories/101/roles', 'PUT', {
+  const { role_id: _rid, enabled, name, responsibility, persona_prompt, model_profile_ref, skill_bundle_ref, permissions, environment_profile_ref, budget_policy_ref, output_schema_ref } = managerDef;
+  const restoredPi = await admin('/api/repositories/101/roles', 'PUT', {
     expected_revision: savedRestricted.value.configuration.revision,
-    roles: [{ role_id: 'manager', enabled, name, responsibility, persona_prompt, model_profile_ref, skill_bundle_ref, harness_ref, permissions, environment_profile_ref, budget_policy_ref, output_schema_ref }],
+    roles: [{ role_id: 'manager', enabled, name, responsibility, persona_prompt, model_profile_ref, skill_bundle_ref, harness_ref: { id: 'pi' }, permissions, environment_profile_ref, budget_policy_ref, output_schema_ref }],
   });
+  assert.equal(restoredPi.status, 200, JSON.stringify(restoredPi.value));
+  // B3 (#1359): On Pi warm-cache dispatch, mounted computer omits read_skill and aligns repository_skills.instruction;
+  // while pre-rotation computer with skills_mounted=false keeps read_skill fallback so skills are never silently lost.
+  recordEvent(h.store, {
+    repositoryId: '101',
+    key: 'native-warm-dispatch-1359',
+    type: 'issue.mention',
+    source: 'webhook',
+    objectType: 'issue',
+    objectNumber: 301,
+    summary: 'Native warm dispatch event',
+    facts: {},
+    options: [{ id: 'opt301', work: 'task.request', title: 'Review', spec: { type: 'request', key: 'k301', request: 'Inspect', principal: null } }],
+  });
+  dispatcher.tick();
+  await dispatcher.idle();
+  assert.ok(seen.dispatchNativeWarm && !seen.dispatchNativeWarm.tools.includes('read_skill'), 'native Pi warm dispatch must omit read_skill');
+  assert.match(seen.dispatchNativeWarm.repository_skills.instruction, /loaded natively from read-only mounted skill files/);
+  assert.ok(!seen.dispatchNativeWarm.repository_skills.instruction.includes('Call read_skill'));
+
+  h.store.db.exec('CREATE TABLE IF NOT EXISTS computer_console_specs(repository_id TEXT PRIMARY KEY,spec TEXT NOT NULL)');
+  h.store.run("INSERT INTO computer_console_specs VALUES('101',?) ON CONFLICT(repository_id) DO UPDATE SET spec=excluded.spec", JSON.stringify({ skills_mounted: false, skills_pending: true }));
+  recordEvent(h.store, {
+    repositoryId: '101',
+    key: 'unmounted-warm-dispatch-1359',
+    type: 'issue.mention',
+    source: 'webhook',
+    objectType: 'issue',
+    objectNumber: 302,
+    summary: 'Unmounted warm dispatch event',
+    facts: {},
+    options: [{ id: 'opt302', work: 'task.request', title: 'Review', spec: { type: 'request', key: 'k302', request: 'Inspect', principal: null } }],
+  });
+  dispatcher.tick();
+  await dispatcher.idle();
+  assert.ok(seen.dispatchUnmountedWarm && seen.dispatchUnmountedWarm.tools.includes('read_skill'), 'pre-rotation unmounted computer must retain read_skill fallback');
+  assert.match(seen.dispatchUnmountedWarm.repository_skills.instruction, /Call read_skill/);
+  h.store.run("DELETE FROM computer_console_specs WHERE repository_id='101'");
+
+  // PUT /api/repositories/101/roles migrates the legacy scripted fixture to V2 (`pi`, which uses native read-only mounted
+  // skills instead of `read_skill`); restore scripted roles for the in-process scripted-driver assertions below.
+  scriptedRoles(h.store, '101');
 
   // C. External PR #88 modifies .agents/skills/calc-ops/SKILL.md and adds .agents/skills/injected/SKILL.md:
   // reviewer MUST load trusted main skills, never PR head skills, while flagging behavior_changes.

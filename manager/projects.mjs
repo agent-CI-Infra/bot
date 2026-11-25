@@ -2,7 +2,7 @@ import { storageFootprint, managerLocations } from './storage-footprint.mjs';
 import { computerResultOwner } from '../runner/result-owner.mjs';
 import { lstat } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync, statSync } from 'node:fs';
+import { lstatSync, mkdirSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { rm } from 'node:fs/promises';
 import { randomBytes, createHash } from 'node:crypto';
@@ -93,11 +93,11 @@ export function sanitizeTrajectoryResult(type, result) {
 export const walSizeLimit = 512 * 1024 * 1024;
 
 export class Projects {
-  constructor({ database, docker, deployment, image, egress = true, tools = '/opt/agent-tools', projectTools = null, results = null }) {
+  constructor({ database, docker, deployment, image, egress = true, tools = '/opt/agent-tools', projectTools = null, skillStore = null, results = null }) {
     // background: repository -> task workspaces whose kept processes may outlive a command.
     // gates: repository -> runner calls running now, whether a lifecycle action holds the computer, and who waits.
     // restarting: computers with a restart queued under the exclusive lock (restartAlone).
-    this.resultsMount = results; this.egress = egress; this.toolsMount = tools; this.projectToolsMount = projectTools; this.background = new Map(); this.usage = new Map(); this.gates = new Map(); this.pending = new Set(); this.restarting = new Set();
+    this.resultsMount = results; this.egress = egress; this.toolsMount = tools; this.projectToolsMount = projectTools; this.skillStoreMount = skillStore; this.background = new Map(); this.usage = new Map(); this.gates = new Map(); this.pending = new Set(); this.restarting = new Set();
     // pruned: when each computer's journal was last pruned; pruning: computers with a prune running now.
     this.pruned = new Map(); this.pruning = new Set();
     // scanning: the work volume scan running now (one computer at a time); dockerUsageAt: when Docker's usage was read.
@@ -150,6 +150,8 @@ export class Projects {
     // tools_revision: desired immutable revision of /opt/project-tools; applied_tools_revision: what the current container mounted (#1322).
     if (!this.db.prepare('PRAGMA table_info(projects)').all().some(row => row.name === 'tools_revision')) this.db.exec('ALTER TABLE projects ADD COLUMN tools_revision INTEGER');
     if (!this.db.prepare('PRAGMA table_info(projects)').all().some(row => row.name === 'applied_tools_revision')) this.db.exec('ALTER TABLE projects ADD COLUMN applied_tools_revision INTEGER');
+    // applied_skills_mounted: whether the current container mounted the read-only skill-store subpath at /opt/bot-skills (#1359).
+    if (!this.db.prepare('PRAGMA table_info(projects)').all().some(row => row.name === 'applied_skills_mounted')) this.db.exec('ALTER TABLE projects ADD COLUMN applied_skills_mounted INTEGER NOT NULL DEFAULT 0');
     this.db.exec('CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)');
     // The last answer of each computer's work volume scan (#671): written by scanStorage, read by the storage page.
     this.db.exec('CREATE TABLE IF NOT EXISTS computer_storage(repository_id TEXT PRIMARY KEY,generation INTEGER NOT NULL,scanned_at TEXT NOT NULL,result TEXT NOT NULL)');
@@ -405,6 +407,10 @@ export class Projects {
       tools_pending: ['ready', 'busy'].includes(project.state)
         && ((Number.isSafeInteger(project.applied_tools_revision) && project.applied_tools_revision >= 1 ? project.applied_tools_revision : null)
           !== (Number.isSafeInteger(project.tools_revision) && project.tools_revision >= 1 ? project.tools_revision : null)),
+      skills_mounted: Number(project.applied_skills_mounted) === 1,
+      skills_pending: ['ready', 'busy'].includes(project.state)
+        && Number(project.applied_skills_mounted) !== 1
+        && this.hasProjectSkillsDir(repo),
       image_pending: imagePending,
       toolchain_pending: toolchainPending,
       toolchain_missing: toolchainMissing } };
@@ -879,6 +885,44 @@ export class Projects {
     }
     return { Type: 'volume', Source: volume, Target: '/opt/project-tools', ReadOnly: true, VolumeOptions: { NoCopy: true, Subpath: subpath } };
   }
+  hasProjectSkillsDir(repo) {
+    if (!this.skillStoreMount) return false;
+    try {
+      const rootInfo = lstatSync(`${this.skillStoreMount}/projects`);
+      if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) return false;
+      const repoInfo = lstatSync(`${this.skillStoreMount}/projects/${repo}`);
+      return !repoInfo.isSymbolicLink() && repoInfo.isDirectory();
+    } catch {
+      return false;
+    }
+  }
+  async skillStoreVolume() {
+    if (!this.skillStoreMount) return null;
+    const name = await this.docker.volumeName(this.skillStoreMount);
+    if (!name) return null;
+    const volume = await this.docker.request('GET', '/volumes/' + encodeURIComponent(name));
+    const labels = volume?.Labels;
+    const trusted = typeof name === 'string' && /^(?:[a-z0-9][a-z0-9._-]*[_-])?skill-store$/i.test(name) &&
+      labels && typeof labels === 'object' &&
+      (labels['com.docker.compose.volume'] === 'skill-store' || labels['department.bot.kind'] === 'skill-store');
+    if (!volume || !trusted) throw new ManagerError('skill_store_volume_invalid', 503);
+    return name;
+  }
+  async projectSkillsMount(repo) {
+    this.validate(repo);
+    if (!this.skillStoreMount) return [];
+    const volume = await this.skillStoreVolume();
+    if (!volume) return [];
+    const subpath = `projects/${repo}`;
+    for (const checkPath of [`${this.skillStoreMount}/projects`, `${this.skillStoreMount}/${subpath}`]) {
+      const info = await lstat(checkPath).catch(() => null);
+      // Graceful upgrade boot order: manager recovers projects before bot creates projects/<repo>;
+      // describe() reports skills_pending once bot creates it so idle refresh attaches the mount.
+      if (!info) return [];
+      if (info.isSymbolicLink() || !info.isDirectory()) throw new ManagerError('skill_store_path_invalid', 409);
+    }
+    return [{ Type: 'volume', Source: volume, Target: '/opt/bot-skills', ReadOnly: true, VolumeOptions: { NoCopy: true, Subpath: subpath } }];
+  }
   setToolsRevision(repo, revision) {
     this.validate(repo);
     if (revision !== null && (!Number.isSafeInteger(revision) || revision < 1)) throw new ManagerError('invalid_tools_revision', 400);
@@ -964,6 +1008,7 @@ export class Projects {
     const toolsVolume = await this.agentToolsVolume();
     const desiredToolsRevision = Number.isSafeInteger(project.tools_revision) && project.tools_revision >= 1 ? project.tools_revision : null;
     const projectToolsMounts = desiredToolsRevision ? [await this.projectToolsSpecMount(repo, desiredToolsRevision)] : [];
+    const projectSkillsMounts = await this.projectSkillsMount(repo);
     const resultMounts = await this.resultMount(computerResultOwner('project',repo));
     let network = await this.inspect(repo, generation, 'network'), container = await this.inspect(repo, generation, 'container');
     // A container whose template or spec differs (approved image, init, resources, network policy) is replaced in place when
@@ -979,10 +1024,13 @@ export class Projects {
     const existingProjectToolsMounts = host?.Mounts?.filter(m => m.Target === '/opt/project-tools') ?? [];
     const projectToolsMountStale = existingProjectToolsMounts.length !== projectToolsMounts.length
       || projectToolsMounts.some(expected => !existingProjectToolsMounts.some(m => m.Type === expected.Type && m.Source === expected.Source && m.ReadOnly === true && m.VolumeOptions?.Subpath === expected.VolumeOptions.Subpath));
+    const existingSkillsMounts = host?.Mounts?.filter(m => m.Target === '/opt/bot-skills') ?? [];
+    const skillsMountStale = existingSkillsMounts.length !== projectSkillsMounts.length
+      || projectSkillsMounts.some(expected => !existingSkillsMounts.some(m => m.Type === expected.Type && m.Source === expected.Source && m.ReadOnly === true && m.VolumeOptions?.Subpath === expected.VolumeOptions.Subpath));
     if (container && (container.Image !== approved.Id || host?.Init !== true || networkStale || envStale || host?.Memory !== memory || host?.MemorySwap !== memory
       || host?.NanoCpus !== Math.round(spec.cpus * 1e9) || host?.PidsLimit !== spec.pids || host?.Tmpfs?.['/tmp'] !== tmpfs
       || !host?.Mounts?.some(m => m.Type === 'volume' && m.Source === this.notesName(repo) && m.Target === '/workspace/project-notes' && !m.ReadOnly)
-      || toolsMountStale || projectToolsMountStale || (host?.Mounts?.filter(m => m.Target === '/results').length ?? 0) !== resultMounts.length || resultMounts.some(expected => !host?.Mounts?.some(m => m.Target === '/results' && m.Type === expected.Type && m.Source === expected.Source && m.ReadOnly === true && m.VolumeOptions?.Subpath === expected.VolumeOptions.Subpath)))) {
+      || toolsMountStale || projectToolsMountStale || skillsMountStale || (host?.Mounts?.filter(m => m.Target === '/results').length ?? 0) !== resultMounts.length || resultMounts.some(expected => !host?.Mounts?.some(m => m.Target === '/results' && m.Type === expected.Type && m.Source === expected.Source && m.ReadOnly === true && m.VolumeOptions?.Subpath === expected.VolumeOptions.Subpath)))) {
       if (container.State.Running) await this.docker.request('POST', `/containers/${names.container}/stop?t=2`);
       await this.docker.request('DELETE', `/containers/${names.container}?force=true`); container = null;
     }
@@ -996,6 +1044,7 @@ export class Projects {
         { Type: 'volume', Source: this.notesName(repo), Target: '/workspace/project-notes', ReadOnly: false },
         ...(toolsVolume ? [{ Type: 'volume', Source: toolsVolume, Target: '/opt/agent-tools', ReadOnly: true }] : []),
         ...projectToolsMounts,
+        ...projectSkillsMounts,
         ...resultMounts,
       ];
       await this.docker.request('POST', `/containers/create?name=${names.container}`, { Image: resource.image, User: '10001:10001', WorkingDir: '/workspace',
@@ -1006,7 +1055,7 @@ export class Projects {
           Mounts: mounts } });
       container = await this.inspect(repo, generation, 'container');
     }
-    this.db.prepare('UPDATE projects SET applied=?,applied_tools_revision=? WHERE repository_id=?').run(JSON.stringify(resources(effectiveSpec)), desiredToolsRevision, repo);
+    this.db.prepare('UPDATE projects SET applied=?,applied_tools_revision=?,applied_skills_mounted=? WHERE repository_id=?').run(JSON.stringify(resources(effectiveSpec)), desiredToolsRevision, projectSkillsMounts.length > 0 ? 1 : 0, repo);
     if (!container.State.Running) await this.docker.request('POST', `/containers/${names.container}/start`);
     // Readiness is a protocol and journal check, not a Docker running flag.
     const health = await this.docker.runner(names.container, { operation_id: randomId(), type: 'health' });

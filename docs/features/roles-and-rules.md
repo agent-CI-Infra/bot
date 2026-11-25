@@ -59,7 +59,7 @@ launchpad 把单个仓库的行为集中收敛在控制台的项目配置里（�
 
 代码仓库可在基准分支的 `.agents/skills/<名称>/` 目录下放置 `SKILL.md` 及同目录配套文本文件（`references/`、`scripts/`、`assets/` 等），作为本仓专属协作 Skill：
 
-- **可信来源与自动挂载**：任务始终从项目的**基准分支**（未配置时为默认分支）读取 `.agents/skills/` 并按需提供给 Agent，绝不从外部 PR 或未合入分支加载（防止提示词/规则投毒）。
+- **可信来源与自动挂载**：任务始终从项目的**基准分支**（未配置时为默认分支）读取 `.agents/skills/` 并按需提供给 Agent，非 QA 角色即便显式绑定了技能包也会自动叠加可信基准分支的仓库 Skill；控制面统一物化后通过只读卷 `/opt/bot-skills` 供 Pi、Claude Code、Codex 与 iCode 原生按需读取（WorkSwarm 及无文件读取权限场景保留受控 `read_skill`），绝不从外部 PR 或未合入分支自动加载检出内 Skill（防止提示词/规则投毒）。
 - **限制与边界**：仅加载文本文件，SKILL.md 份数不设上限，`.agents/skills/` 下最多 256 个文件、单文件 512 KiB、总计 1 MiB；仓库其他业务目录里的 `SKILL.md` 不当作协作 Skill 加载。Skill 只指导工作方法，不能扩大权限或绕过控制面规则。
 - **刷新与查看**：在「角色 → Manager」的「仓库 skill」区查看当前已加载列表并手动刷新。
 

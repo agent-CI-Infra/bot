@@ -255,3 +255,37 @@ test('a private timer on Pi with nothing to report ends silently; nothing is sen
   assert.equal(reply.text, ''); assert.equal(reply.silent, true); assert.equal(reply.reason, '没有失败的任务');
   await f.service.tick(); assert.deepEqual(sent(f).filter(s => s.includes('每日汇总') || s.includes('没有失败')), []);
 });
+
+for (const personal of [false, true]) test(`#1359 Feishu ${personal ? 'private' : 'group'} card turn with assistant computer omits read_skill, aligns card instructions, and loads mounted feishu-cards natively`, { skip: piSkip, timeout: 120000 }, async t => {
+  const f = personal ? await channelFixture(t) : await piGroup(t, { commands: true });
+  if (personal) {
+    await privateChat(f);
+    await piManagement(t, f, { commands: true });
+  } else {
+    const binding = f.service.serviceBindings.get(f.chat.id);
+    const saved = await f.admin(`/api/channels/chats/${f.chat.id}/service-binding`, 'PUT', {
+      scope: { kind: 'repositories', repositories: ['101'] },
+      participation: 'all',
+      harness: 'pi',
+      permissions: { computer: 'allow' },
+      enabled: true,
+      expected_revision: binding.revision,
+    });
+    assert.equal(saved.status, 200);
+  }
+  const bodies = [];
+  f.modelState.respond = async (body, res) => {
+    bodies.push(body);
+    return say(res, '已收到。');
+  };
+  const req = await post(f.h, f.id, personal ? envelope('整理一下状态卡片') : inGroup('整理一下状态卡片', 'ou_alice'));
+  assert.equal((await done(f, req)).state, 'completed');
+  assert.ok(bodies.length >= 1);
+  const offeredTools = (bodies[0].tools ?? []).map(tool => tool.function.name);
+  assert.ok(offeredTools.includes('set_feishu_card'), 'Feishu card turn must offer set_feishu_card');
+  assert.ok(!offeredTools.includes('read_skill'), 'native Pi service turn with assistant computer must omit read_skill');
+  const systemText = bodies[0].messages.filter(m => m.role === 'system' || m.role === 'developer').map(text).join('\n');
+  assert.ok(!systemText.includes('via read_skill'), 'card instructions must not direct the model to call omitted read_skill');
+  assert.match(systemText, /Consult the natively loaded feishu-cards skill/, 'card instructions must match native skill loading');
+  assert.match(systemText, /<location>[^<]*\/sets\/[a-f0-9]{64}\/bot\/skills\/feishu-cards\/SKILL\.md<\/location>/, 'Pi must natively load mounted feishu-cards/SKILL.md');
+});

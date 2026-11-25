@@ -6,7 +6,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {Store} from '../../../../dist/storage/database.js';
 import {roleConfiguration,resolveRole,saveConfiguration,skillFiles} from '../../../../dist/roles/definition.js';
-import {stageSessionSkills} from '../../../../runner/session-resources.mjs';
+import {materializeSkillSet,projectSkillScope} from '../../../../dist/roles/skill-store.js';
 
 function fixture(t){
  const s=new Store(':memory:',randomBytes(32));t.after(()=>s.close());
@@ -64,8 +64,8 @@ test('native Pi discovers defaults beside a project root SKILL and keeps its sup
  const s=fixture(t);bind(s,source('Read notes.txt relative to this Skill.'));
  const root=await mkdtemp(join(tmpdir(),'manager-skills-'));t.after(()=>rm(root,{recursive:true,force:true}));
  const {loadSkillsFromDir}=await import('../../../../runner/node_modules/@earendil-works/pi-coding-agent/dist/core/skills.js');
- await stageSessionSkills(root,skillFiles(s,'r',resolve(s).snapshot.skills));
- const loaded=loadSkillsFromDir({dir:join(root,'skills'),source:'user'});
+ const set=materializeSkillSet({root,scope:projectSkillScope('r'),files:skillFiles(s,'r',resolve(s).snapshot.skills)});
+ const loaded=loadSkillsFromDir({dir:set.hostSkillsDir,source:'user'});
  assert.deepEqual(loaded.skills.map(s=>s.name).sort(),['project','roadmap-decomposition']);
 });
 
@@ -78,9 +78,9 @@ test('repository skill roots stay discoverable rather than hiding below .agents'
  s.run('INSERT INTO skill_bundle_revisions VALUES(?,?,?,?,?,?,?)','r',ref.id,1,JSON.stringify(bundle.source),JSON.stringify(files),ref.content_hash,'now');
  const configuration={...config,skills:[bundle],roles:config.roles.map(r=>r.role_id==='manager'?{...r,skill_bundle_ref:ref}:r)};
  const resolved=resolve(s,{configuration}),root=await mkdtemp(join(tmpdir(),'manager-repo-skills-'));t.after(()=>rm(root,{recursive:true,force:true}));
- await stageSessionSkills(root,skillFiles(s,'r',resolved.snapshot.skills));
+ const set=materializeSkillSet({root,scope:projectSkillScope('r'),files:skillFiles(s,'r',resolved.snapshot.skills)});
  const {loadSkillsFromDir}=await import('../../../../runner/node_modules/@earendil-works/pi-coding-agent/dist/core/skills.js');
- assert.deepEqual(loadSkillsFromDir({dir:join(root,'skills'),source:'user'}).skills.map(s=>s.name).sort(),['roadmap-decomposition','team']);
+ assert.deepEqual(loadSkillsFromDir({dir:set.hostSkillsDir,source:'user'}).skills.map(s=>s.name).sort(),['roadmap-decomposition','team']);
  assert.equal(resolved.snapshot.skills.source.configured.source_path_root,'.agents/skills/');
 });
 
@@ -107,8 +107,29 @@ test('a CI workflow task gives its planning and writing roles the CI gate skill;
  assert.equal(bound.snapshot.skills.source.configured.id,'dev-custom');
  const root=await mkdtemp(join(tmpdir(),'ci-change-skills-'));t.after(()=>rm(root,{recursive:true,force:true}));
  const {loadSkillsFromDir}=await import('../../../../runner/node_modules/@earendil-works/pi-coding-agent/dist/core/skills.js');
- await stageSessionSkills(root,files);
- const loaded=loadSkillsFromDir({dir:join(root,'skills'),source:'user'});
+ const set=materializeSkillSet({root,scope:projectSkillScope('r'),files});
+ const loaded=loadSkillsFromDir({dir:set.hostSkillsDir,source:'user'});
  assert.deepEqual(loaded.skills.map(s=>s.name).sort(),['layered-ci-gates','project']);
  assert.deepEqual(loaded.diagnostics??[],[]);
+});
+
+test('configured custom skill bundles on non-QA roles coexist with trusted base-branch .agents/skills/ while QA stays excluded (#1359)',async t=>{
+ const s=fixture(t);
+ const config=bind(s,{...source('Custom Dev conventions.'),id:'dev-custom'});
+ saveConfiguration(s,'r',{expected_revision:config.revision,roles:[
+  {role_id:'dev',skill_bundle_ref:{id:'dev-custom'}},
+  {role_id:'reviewer',skill_bundle_ref:{id:'dev-custom'}},
+  {role_id:'qa',skill_bundle_ref:{id:'dev-custom'}},
+ ]},'fixture');
+ const repositorySkills={sha:'b'.repeat(40),files:{'.agents/skills/repo-ops/SKILL.md':'---\nname: repo-ops\ndescription: Trusted repo operations.\n---\nRun repo checks.'}};
+ for(const roleId of ['dev','reviewer','manager']){
+  const resolved=resolveRole(s,'r',roleId,'task.request',{repositorySkills});
+  const paths=resolved.snapshot.skills.files.map(f=>f.path);
+  assert.ok(paths.includes('repository/repo-ops/SKILL.md'),`${roleId} must auto-overlay trusted .agents/skills/ alongside configured bundle`);
+  if(roleId!=='manager')assert.ok(paths.includes('project/SKILL.md'),`${roleId} must retain configured custom bundle`);
+ }
+ const qa=resolveRole(s,'r','qa','task.request',{repositorySkills});
+ const qaPaths=qa.snapshot.skills.files.map(f=>f.path);
+ assert.ok(qaPaths.includes('SKILL.md'), 'QA retains explicit custom bundle');
+ assert.ok(!qaPaths.some(p=>p.includes('repo-ops')), 'QA (evaluator) must not auto-overlay repository .agents/skills/');
 });

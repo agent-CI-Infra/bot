@@ -33,7 +33,8 @@ export function claudeMessage(v: any): any {
     if (v.subtype === 'api_retry') return { type: 'api_retry', error: fault(v), attempt: count(v.attempt) ? v.attempt : null };
     if (v.subtype !== 'init') return { type: 'ignored' };
     if (typeof v.model !== 'string' || !Array.isArray(v.tools) || v.tools.some((t: any) => typeof t !== 'string')) return incompatible();
-    return { type: 'init', session_id: v.session_id, model: v.model, tools: v.tools, mcp_servers: v.mcp_servers };
+    const skills = Array.isArray(v.skills) ? v.skills.filter((s: unknown): s is string => typeof s === 'string') : [];
+    return { type: 'init', session_id: v.session_id, model: v.model, tools: v.tools, mcp_servers: v.mcp_servers, skills };
   }
   if (v.type === 'assistant' || v.type === 'user') {
     if (!object(v.message) || !Array.isArray(v.message.content)) return incompatible();

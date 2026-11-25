@@ -15,7 +15,7 @@ flowchart LR
   Bot --> Manager["manager (control net + Docker socket)"]
   Manager --> ProjComp["Project Computers (per-repo bridge net, UID 10001)"]
   Manager --> AsstComp["Assistant Computers (isolated ICC-off bridge or none, UID 10001)"]
-  Bot -. "read-only /opt/agent-tools & /results" .-> ProjComp
+  Bot -. "read-only /opt/agent-tools, /opt/bot-skills & /results" .-> ProjComp
 ```
 
 | 服务 | 源码目录 | 核心职责 |
@@ -46,12 +46,12 @@ flowchart LR
 - **项目电脑（每仓库一台长期容器）**：
   - 非特权用户 UID `10001`、只读根文件系统、`cap_drop: [ALL]`、`no-new-privileges`、`init` 回收僵尸进程、禁宿主 swap。
   - 每个仓库独立 bridge 网络，项目间互不可达，与控制面 `control` 网络隔离；默认开启外网（可按部署或项目关闭）。
-  - 通过共享工作卷（`/workspace`）、独立持久笔记卷（`/workspace/project-notes`）、只读工具卷（`/opt/agent-tools`）与只读工具结果卷（`/results`）划分数据边界。
+  - 通过共享工作卷（`/workspace`）、独立持久笔记卷（`/workspace/project-notes`）、只读工具卷（`/opt/agent-tools`）、只读项目工具卷（`/opt/project-tools`）、只读 Skill 卷（`/opt/bot-skills`，`skill-store` 子路径 `projects/<repository_id>`）与只读工具结果卷（`/results`）划分数据边界。
 - **助手电脑（按对话归属短时容器）**：
-  - 按飞书群或个人归属隔离，仅经 Docker volume subpath 挂载自身当前代次的持久 HOME 目录（`assistant-homes`）；`/workspace` 与 `/tmp` 为随容器生命周期自动创建与回收的临时磁盘卷（默认各 20 GB，不计入 16 GB 内存上限）。
+  - 按飞书群或个人归属隔离，仅经 Docker volume subpath 挂载自身当前代次的持久 HOME 目录（`assistant-homes`）以及公共服务 Skill 只读子路径（`/opt/bot-skills`，`skill-store` 子路径 `service`）；`/workspace` 与 `/tmp` 为随容器生命周期自动创建与回收的临时磁盘卷（默认各 20 GB，不计入 16 GB 内存上限）。
   - 默认连接关闭容器间通信（`enable_icc=false`）的独立外网 bridge 网络，与 `control` 及其他助手容器隔离；全局关闭外网时切换为 `NetworkMode: none`。
 - **可信与不可信代码检出区分**：
-  - PR 检视、续修未合入 bot PR 属于非受信任检出：控制面禁止从该检出自动加载 `.agents/skills/`、`.pi/skills/`、根目录 `AGENTS.md`/`CLAUDE.md` 或任何本地 hooks/MCP，仅从受控基准分支注入可信配置。
+  - PR 检视、续修未合入 bot PR 属于非受信任检出：控制面禁止任何后端从该检出自动加载 `.agents/skills/`、`.pi/skills/`、`.codex/skills/`、根目录 `AGENTS.md`/`CLAUDE.md` 或任何本地 hooks/MCP，仅从受控基准分支注入可信配置并将可信 Skill 物化至只读 `/opt/bot-skills` 卷。
 
 ## 4. 模块分层总览
 

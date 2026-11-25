@@ -37,10 +37,16 @@
 
 | 后端 | 运行位置 | 关键设计要点 |
 | --- | --- | --- |
-| `pi`（默认推荐） | 项目/助手容器内（固定版本 Pi SDK） | 嵌入式 Node 会话，会话文件持久化在独立 `cli-state/pi/` 目录；支持原生工具、SDK 压缩与跨重启会话续接；经文件邮箱与控制面通信。 |
-| `claude_code` | 项目/助手容器内（`/opt/agent-tools` 只读卷） | NDJSON 流协议启动受控版本 CLI，开放容器原生终端/文件/子 Agent，经 stdio MCP 桥（`runner/mcp-bridge.mjs`）调用平台工具，禁用不可信检出的本地 hooks/settings/MCP；支持平台模型（原生直连或回环中转）与「项目电脑内自行配置」（`model_source: 'local_config'`）两种模式。 |
-| `codex` | 项目/助手容器内（`/opt/agent-tools` 只读卷） | 启动 `codex app-server` JSON-RPC 协议，首轮前核验特性开关与唯一 `bot` MCP 服务，运行中实时拦截未授权工具或 `model/rerouted`，支持 `thread/resume` 与 turn 对账；支持平台模型与「项目电脑内自行配置」（`model_source: 'local_config'`）两种模式。 |
-| `icode`、`workswarm` | 项目容器任务工作区（`/opt/agent-tools` 只读卷） | ACP v1 stdio。会话、工具、审批和流式输出遵循 ACP，模型请求经现有邮箱中转，平台工具走回环 HTTP MCP 或 stdio MCP。 |
+| `pi`（默认推荐） | 项目/助手容器内（固定版本 Pi SDK） | 嵌入式 Node 会话，会话文件持久化在独立 `cli-state/pi/` 目录；经 `DefaultResourceLoader` 的 `additionalSkillPaths` 原生读取 `/opt/bot-skills/sets/<hash>/bot/skills` 只读 Skill；支持原生工具、SDK 压缩与跨重启会话续接；经文件邮箱与控制面通信。 |
+| `claude_code` | 项目/助手容器内（`/opt/agent-tools` 只读卷） | NDJSON 流协议启动受控版本 CLI，开放容器原生终端/文件/子 Agent，经 `--plugin-dir /opt/bot-skills/sets/<hash>/bot` 与 `--setting-sources ''`（`local_config` 为 `user`）原生按需加载只读 Skill 并隔离检出本地配置/hooks/MCP，经 stdio MCP 桥（`runner/mcp-bridge.mjs`）调用平台工具；支持平台模型与 `local_config` 两种模式。 |
+| `codex` | 项目/助手容器内（`/opt/agent-tools` 只读卷） | 启动 `codex app-server` JSON-RPC 协议，首轮前通过 `skills/extraRoots/set` 挂入 `/opt/bot-skills/sets/<hash>/bot/skills` 并经 `skills/list` + `skills/config/write` 显式禁用检出内自动发现的 repo/cwd Skill（复核失败关闭），同时核验特性开关与唯一 `bot` MCP 服务，运行中实时拦截未授权工具或 `model/rerouted`，支持 `thread/resume` 与 turn 对账；支持平台模型与 `local_config` 两种模式。 |
+| `icode`、`workswarm` | 项目容器任务工作区（`/opt/agent-tools` 只读卷） | ACP v1 stdio。iCode 通过 `agents/launchpad.yaml` 的 `skills.paths` 原生加载只读 Skill 并恒定关闭 `project.skills_enabled` / `auto_load_cwd_agents_skills`；WorkSwarm 因原生工具全禁而继续经受控 MCP `read_skill` 读取；模型请求经邮箱中转，平台工具走回环 HTTP MCP 或 stdio MCP。 |
+
+- **统一只读 Skill 卷与五后端收敛（`skill-store`、`src/roles/skill-store.ts`）**：
+  - 控制面独占 `skill-store` 卷可写挂载（`BOT_SKILL_STORE_DIR=/skill-store`，内置 `skills/` 目录亦支持 `BOT_SKILLS_DIR` 环境变量覆盖），在启动各入口（任务角色、事件分派 Manager、管理/群聊服务助手）前将有效 Skill 集合按内容寻址原子物化为单层目录 `sets/<hash>/bot/skills/<slug>/SKILL.md`（同步生成合法 frontmatter 与 `.claude-plugin/plugin.json`，并在 `umask 0077` 下显式赋予 `0755`/`0644` 权限），不再经配置邮箱传正文或落盘至容器可写 HOME（已移除 `runner/session-resources.mjs`）。
+  - `manager` 只读挂载 `skill-store` 并按隔离域经 `VolumeOptions: { NoCopy: true, Subpath }` 挂入容器 `/opt/bot-skills`（项目电脑挂 `projects/<repository_id>`，助手电脑挂 `service`，严格拒绝符号链接；首次升级若目录尚未由控制面创建则宽容跳过并在创建后经 `skills_pending` 空闲轮换挂入）。
+  - 四个原生加载后端（`pi`、`claude_code`、`codex`、`icode`）在只读挂载就绪且具备文件读取权限时不再重复暴露控制面 `read_skill` 工具（消除双轨重复）；仅在 WorkSwarm、无文件读取权限、冷缓存事件分派懒拉取或无挂载运行环境时保留 `read_skill` 兜底。
+  - 非 QA 角色绑定自定义 Skill 包时仍自动叠加受信任基准分支 `.agents/skills/`（高优先级规则覆盖同 slug），非受信任检出（外部 PR / 未合入分支）对所有后端均不自动发现检出自带 Skill。`RunContext` 同步记录 `skill_revisions` 与 `skill_set_hash`，每日保留清理与手动回收在保护运行中 `task_runs` 引用及 24 小时宽限期后清理过期集合，删除项目时同步移除其 `projects/<repository_id>` 目录。
 
 - **容器内短期 Git/`gh` 只读凭证（支持单仓与多仓按需签发）**：`pi`、`claude_code`、`codex`、`icode` 和 `workswarm` 均配置 `credential.useHttpPath=true`、`core.hooksPath=/dev/null` 与 `core.fsmonitor=false`，由 `runner/git-credential-bot.mjs`（解析仓库路径）与 `runner/gh-wrapper.mjs`（解析 `-R`/`--repo`、`gh api repos/...`、`gh repo`、`GH_REPO` 或当前仓库 remote）向回环凭证助手按 `(purpose, repository)` 申请并缓存短期只读安装令牌。控制面 `ScopedReadTokens` 实时校验当前会话仓库范围与 GitHub 读权限（`git` 用途仅签发 `contents: read + metadata: read`），对 PAT 仓库明确提示改用 `checkout_repository` 而不泄露长期凭据，全程经 `Redactor` 流式脱敏并在回合结束统一吊销。
 - **Claude Code / Codex「项目电脑内自行配置」（`model_source: 'local_config'`）**：
@@ -120,7 +126,7 @@ WorkSwarm 的 ACP 桥不接受客户端注入的 HTTP MCP。runner 用 WorkSwarm
 
 #### iCode
 
-`icode` 注册为独立后端，复用 ACP 会话和工具转发。控制面读取选定的离线包清单，runner 在项目电脑内启动 `icode acp --approval bypass`，并核对握手版本与 HTTP MCP、会话关闭能力。每次运行写入独立 HOME 及最小配置，API 样式遵循平台选定模型，凭据字段保留运行令牌占位。仓库设置、钩子及自带 MCP 均关闭。仓库指令和 Skill 仅从可信检出按 iCode 原生方式加载，不可信检出由平台提供基准分支指令。角色权限决定是否开放原生文件读取、写入、命令和 Skill 脚本。
+`icode` 注册为独立后端，复用 ACP 会话和工具转发。控制面读取选定的离线包清单，runner 在项目电脑内启动 `icode acp --approval bypass`，并核对握手版本与 HTTP MCP、会话关闭能力。每次运行写入独立 HOME 及最小配置，API 样式遵循平台选定模型，凭据字段保留运行令牌占位。仓库设置、钩子、自带 MCP 与 `cwd` 自动 Skill 扫描均关闭；可信仓库与角色 Skill 统一由控制面物化到只读 `/opt/bot-skills` 卷并经 `agents/launchpad.yaml` 的 `skills.paths` 原生加载，不可信检出仅使用平台提供的基准分支指令与只读 Skill。角色权限决定是否开放原生文件读取、写入、命令和 Skill 脚本。
 
 会话状态由 `CHRYS_SESSION_ROOT_DIR` 写入角色实例持久目录。恢复在相同工作目录用 `session/load`，依上游工作目录校验和任务记录决定恢复或重建。iCode 的 `_chrys/request_input` 按问题即时用英文告知模型无人可答，请根据任务自行判断，并设置五秒超时。结束先发 `session/close`，取消、超时或失去租约时也走有时限的会话关闭。runner 用运行实例标识回收脱离进程组的后台 Shell，并移除该次 HOME。
 

@@ -28,6 +28,7 @@ import { commandTimeoutLimit } from './agent/command.js';
 import { AgentToolManager, AgentToolsAutoInstaller, DEFAULT_AGENT_TOOLS_ROOT } from './harness/agent-tools.js';
 import { agentToolsRetainCount } from './app/agent-tools.js';
 import { activeCliVersions } from './roles/role-run.js';
+import { ensureServiceSkillScope, resolveSkillStoreRoot } from './roles/skill-store.js';
 import { migrateLegacyProjectMemories } from './memory/migration.js';
 
 process.umask(0o077);
@@ -122,8 +123,13 @@ const projectTools = new ProjectToolsService(store, {
   manager,
   reconcile: () => { void projects.reconcile().catch(() => {}); },
 });
+const skillStoreRoot = resolveSkillStoreRoot(store);
+if (skillStoreRoot) {
+  try { ensureServiceSkillScope(skillStoreRoot); }
+  catch (error) { console.error('[skill-store] initializing service scope failed:', error); }
+}
 const migration = new PayloadMigration(store), storage = new StorageReport(store, manager, { git_cache: gitCache.root, public_boards: resolve(dirname(databasePath), 'public-boards'),
-  homes: process.env.BOT_ASSISTANT_HOMES || '/assistant-homes', tools: '/opt/agent-tools', project_tools: projectToolsRoot, machine: process.env.BOT_HOST_STORAGE_DIR }, vacuum, retention, workspaces);
+  homes: process.env.BOT_ASSISTANT_HOMES || '/assistant-homes', tools: '/opt/agent-tools', project_tools: projectToolsRoot, ...(skillStoreRoot ? { skill_store: skillStoreRoot } : {}), machine: process.env.BOT_HOST_STORAGE_DIR }, vacuum, retention, workspaces);
 const agentTools = new AgentToolManager({
   volumeRoot: process.env.BOT_AGENT_TOOLS_DIR || DEFAULT_AGENT_TOOLS_ROOT,
   protectedVersions: cli => activeCliVersions(store, cli),

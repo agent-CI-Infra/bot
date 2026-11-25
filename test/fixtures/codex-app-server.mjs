@@ -1,7 +1,7 @@
 // Protocol fixture of `codex app-server` 0.166.0 (stdio JSON-RPC lines without a "jsonrpc" member). It is a contract test
 // double for the client, never a substitute for a real Codex run. Scenarios are selected with FIXTURE_* variables.
 import { createInterface } from 'node:readline';
-import { mkdirSync, readFileSync, writeFileSync, existsSync, appendFileSync, statSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, appendFileSync, statSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawn, execFileSync } from 'node:child_process';
@@ -51,7 +51,25 @@ const load = id => (existsSync(join(threads, id + '.json')) ? JSON.parse(readFil
 const store = t => writeFileSync(join(threads, t.id + '.json'), JSON.stringify(t));
 
 let thread = null, mcpConfig = null, policy = null;
+let extraSkillRoots = [];
+const disabledSkillPaths = new Set();
 let mcpChild = null, mcpSeq = 1;
+
+function scanSkillsDir(dir, scope) {
+  if (!dir || !existsSync(dir)) return [];
+  const entries = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const skillMd = join(dir, entry.name, 'SKILL.md');
+    if (!existsSync(skillMd)) continue;
+    const content = readFileSync(skillMd, 'utf8');
+    const name = /^name:\s*(.+)$/m.exec(content)?.[1]?.trim().replace(/^['"]|['"]$/g, '') || entry.name;
+    const description = /^description:\s*(.+)$/m.exec(content)?.[1]?.trim().replace(/^['"]|['"]$/g, '') || '';
+    const disabled = disabledSkillPaths.has(skillMd) && !flag('IGNORE_SKILL_DISABLE');
+    entries.push({ name, description, path: skillMd, scope, enabled: !disabled });
+  }
+  return entries;
+}
 const mcpPending = new Map();
 
 function stopMcpChild() {
@@ -428,6 +446,34 @@ createInterface({ input: process.stdin }).on('line', async line => {
   if (m.method === 'initialize') {
     reply({ userAgent: `${m.params.clientInfo.name}/${env.FIXTURE_VERSION ?? '0.166.0'} (fixture) unknown`, codexHome: env.FIXTURE_HOME ?? home, platformFamily: 'unix', platformOs: 'linux' });
   } else if (m.method === 'initialized') {
+  } else if (m.method === 'skills/extraRoots/set') {
+    extraSkillRoots = Array.isArray(m.params?.extraRoots) ? m.params.extraRoots.map(String) : [];
+    log('skills-rpc.jsonl', { method: m.method, extraRoots: extraSkillRoots });
+    reply({});
+  } else if (m.method === 'skills/list') {
+    const cwds = Array.isArray(m.params?.cwds) && m.params.cwds.length ? m.params.cwds.map(String) : [process.cwd()];
+    const data = cwds.map(cwdPath => ({
+      cwd: cwdPath,
+      skills: [
+        ...scanSkillsDir(join(cwdPath, '.agents', 'skills'), 'repo'),
+        ...scanSkillsDir(join(cwdPath, '.codex', 'skills'), 'repo'),
+        ...scanSkillsDir(join(home, 'skills'), 'user'),
+        ...extraSkillRoots.flatMap(rootDir => scanSkillsDir(rootDir, 'user')),
+      ],
+      errors: [],
+    }));
+    log('skills-rpc.jsonl', { method: m.method, cwds, count: data.reduce((n, g) => n + g.skills.length, 0) });
+    reply({ data });
+  } else if (m.method === 'skills/config/write') {
+    const targetPath = String(m.params?.path ?? '');
+    const enabled = Boolean(m.params?.enabled);
+    if (!flag('IGNORE_SKILL_DISABLE')) {
+      if (enabled) disabledSkillPaths.delete(targetPath);
+      else disabledSkillPaths.add(targetPath);
+    }
+    const effectiveEnabled = flag('IGNORE_SKILL_DISABLE') ? true : enabled;
+    log('skills-rpc.jsonl', { method: m.method, path: targetPath, enabled, effectiveEnabled });
+    reply({ effectiveEnabled });
   } else if (m.method === 'thread/start') {
     bind(m.params);
     thread = { id: randomUUID(), cwd: m.params.cwd, model: env.FIXTURE_MODEL ?? m.params.model ?? 'gpt-fixture', modelProvider: env.FIXTURE_PROVIDER ?? m.params.modelProvider ?? 'openai', turns: [], usage: null };

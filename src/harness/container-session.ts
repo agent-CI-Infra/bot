@@ -23,6 +23,8 @@ import { COMPATIBLE_CLI_RANGES, DEFAULT_AGENT_TOOLS_ROOT, selectCompatibleCliVer
 import type { HarnessModelSource } from './subscription.js';
 import { createMailboxModelGateway, type FileBackedModelProvider, type PolledModelRequestEntry } from './model-gateway.js';
 import { modelTransport, nativeModelConnection, type ModelTransport } from './model-connection.js';
+import { LocalManager } from '../projects/local-manager.js';
+import { toHarnessSkillSetConfig } from '../roles/skill-store.js';
 
 /**
  * Low-level repository/command/sub-agent tools replaced by the container CLI's native tools and credential helpers.
@@ -136,6 +138,7 @@ function createDirectLocalRunner(root: string) {
           BOT_LOCAL_EXECUTION: 'true',
           BOT_LOCAL_WORKSPACE: root,
           ...(process.env.BOT_AGENT_TOOLS_DIR ? { BOT_AGENT_TOOLS_DIR: process.env.BOT_AGENT_TOOLS_DIR } : {}),
+          ...(process.env.BOT_SKILL_STORE_DIR ? { BOT_SKILL_STORE_DIR: process.env.BOT_SKILL_STORE_DIR } : {}),
           ...(process.env.BOT_REAL_GH_BIN ? { BOT_REAL_GH_BIN: process.env.BOT_REAL_GH_BIN } : {}),
         },
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -463,6 +466,11 @@ export async function withContainerHarnessSession<T, R>(
     inputSchema: t.function.parameters,
   }));
 
+  const isLocalTransport = transport.kind === 'local'
+    || (spec.roleWorkspace as any)?.manager instanceof LocalManager
+    || (spec.pi?.workspace as any)?.manager instanceof LocalManager
+    || spec.containerOptions?.manager instanceof LocalManager;
+  const skillSetConfig = toHarnessSkillSetConfig(spec.harnessSkillSet, isLocalTransport);
   const instanceId = randomId();
   const harnessConfig = {
     instance_id: instanceId,
@@ -487,7 +495,7 @@ export async function withContainerHarnessSession<T, R>(
     system_prompt: launch.systemPrompt ?? '',
     max_turns: spec.harnessAccess ? spec.harnessTurnLimit : launch.maxTurns ?? spec.maxTurns,
     execution_access: spec.harnessAccess,
-    resources:spec.harnessResources,
+    ...(skillSetConfig ? { skill_set: skillSetConfig } : {}),
     max_output_tokens: launch.maxOutputTokens ?? spec.maxOutputTokens ?? 8192,
     session_id: launch.sessionId ?? null,
     resume: Boolean(launch.resume),

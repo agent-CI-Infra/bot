@@ -242,14 +242,14 @@ export function runBudget(snapshot: RoleSnapshot): Budget {
   return { policy_ref: `${b.id}@${b.version}`, accounting: b.id === 'metered' ? 'role_instance' : 'per_run', max_turns: n(b.max_turns), max_output_tokens: n(b.max_output_tokens), max_total_tokens: n(b.max_total_tokens), max_model_requests: n(b.max_model_requests),
     max_tool_calls: n(b.max_tool_calls), max_wall_ms: n(b.max_wall_seconds) ? b.max_wall_seconds * 1000 : null, max_concurrency: 1 };
 }
-export function buildRunContext(s: Store, input: { task: Row; scope: string; run_id: string; lease_epoch: number; resume_from_run_id?: string; instance: Row; role: string; snapshot: RoleSnapshot; snapshot_id: string; candidate: CandidateRef | null }): RunContext {
+export function buildRunContext(s: Store, input: { task: Row; scope: string; run_id: string; lease_epoch: number; resume_from_run_id?: string; instance: Row; role: string; snapshot: RoleSnapshot; snapshot_id: string; candidate: CandidateRef | null; skill_set_hash?: string }): RunContext {
   const { task, snapshot } = input;
   const conversation=task.kind==='role.conversation'&&!!task.conversation_id;
   const ctx: RunContext = { protocol: roleRunProtocol.id, task_id:conversation?null:String(task.id),...(conversation?{conversation_id:String(task.conversation_id)}:{}),assignment_id: input.scope, run_id: input.run_id, tenant_id: tenantOf(s, String(task.repository_id)), project_id: String(task.repository_id),
     principal_ref:conversation?'principal:'+task.principal_id:principalOf(s, task),source_ref:conversation?'conversation_message:'+task.source_message:sourceRef(s, task), candidate_ref: input.candidate, configuration_snapshot_ref: 'role_snapshots:' + input.snapshot_id, lease_epoch: input.lease_epoch,
     ...(input.resume_from_run_id ? { resume_from_run_id: input.resume_from_run_id } : {}), contract_revision: Number(s.get('SELECT revision FROM task_records WHERE task_id=?', task.id)?.revision ?? 0),
     policy_revision: `${snapshot.capability.id}@${snapshot.capability.version}`, role_revision: `${input.role}@${snapshot.role_revision}:config:${snapshot.config_revision}`, harness_revision: `${snapshot.harness.id}@${snapshot.harness.version}`,
-    skill_revisions: snapshot.skills ? [`${snapshot.skills.id}@${snapshot.skills.revision}:${snapshot.skills.content_hash}`] : [], model_revision: modelRevision(snapshot), budget: runBudget(snapshot),
+    skill_revisions: snapshot.skills ? [`${snapshot.skills.id}@${snapshot.skills.revision}:${snapshot.skills.content_hash}`] : [], ...(input.skill_set_hash ? { skill_set_hash: input.skill_set_hash } : {}), model_revision: modelRevision(snapshot), budget: runBudget(snapshot),
     execution_context: { role_instance_id: String(input.instance.id), role: input.role, kind: snapshot.kind, environment_profile: `${snapshot.environment.id}@${snapshot.environment.version}` } };
   return validateRunContext(ctx);
 }

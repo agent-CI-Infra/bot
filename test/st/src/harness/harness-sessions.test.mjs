@@ -46,9 +46,13 @@ test('real Pi Manager uses native shell, repository instructions and project Ski
  const root=mkdtempSync(join(tmpdir(),'bot-native-pi-')),s=new Store(':memory:',randomBytes(32)),manager=new LocalManager('101',root),requests=[],logs=[];
  const model=createServer(async(req,res)=>{let raw='';for await(const chunk of req)raw+=chunk;const body=JSON.parse(raw);requests.push(body);
   const names=body.tools.map(t=>t.function.name);assert.ok(names.includes('bash'));assert.ok(names.includes('read'));assert.ok(names.includes('write'));assert.ok(!names.includes('read_ci_evidence'));
-  assert.match(JSON.stringify(body.messages),/PROJECT_INSTRUCTION_834/);assert.match(JSON.stringify(body.messages),/triage834/);
-  assert.match(JSON.stringify(body.messages),/roadmap-decomposition/);
-  const message=requests.length===1?call('read_skill',{path:'defaults/roadmap-decomposition/SKILL.md'}):requests.length===2?call('bash',{command:'cat evidence.txt; printf "native-result" > native-result.txt'}):call('finish_coordination',{action:'wait',reason:'Read actual evidence: fixture-ci-infrastructure-unavailable',resume_condition:'CI service is restored'});
+  assert.ok(!names.includes('read_skill'),'native Pi loads mounted read-only skills without duplicate read_skill tool');
+  const payload=JSON.stringify(body.messages);
+  assert.match(payload,/PROJECT_INSTRUCTION_834/);assert.match(payload,/triage834/);
+  assert.match(payload,/roadmap-decomposition/);
+  const skillPathMatch=/([^\s"'<>]+\/roadmap-decomposition\/SKILL\.md)/.exec(payload);
+  assert.ok(skillPathMatch,'mounted roadmap-decomposition SKILL.md path must be advertised natively by Pi');
+  const message=requests.length===1?call('read',{path:skillPathMatch[1]}):requests.length===2?call('bash',{command:'cat evidence.txt; printf "native-result" > native-result.txt'}):call('finish_coordination',{action:'wait',reason:'Read actual evidence: fixture-ci-infrastructure-unavailable',resume_condition:'CI service is restored'});
   res.setHeader('content-type','application/json');res.end(JSON.stringify({choices:[{message}],usage:{prompt_tokens:20,completion_tokens:20}}));
  });model.listen(0,'127.0.0.1');await once(model,'listening');
  t.after(async()=>{await manager.recover();model.closeAllConnections();await new Promise(r=>model.close(r));s.close();rmSync(root,{recursive:true,force:true});});
@@ -69,7 +73,7 @@ test('real Pi Manager uses native shell, repository instructions and project Ski
  assert.equal(readFileSync(join(repo,'native-result.txt'),'utf8'),'native-result');
  assert.equal(requests.length,3);assert.match(JSON.stringify(requests[1].messages),/current allocation of responsibility/);assert.match(JSON.stringify(requests[2].messages),/fixture-ci-infrastructure-unavailable/);
  const bound=logs.find(e=>e.type==='session_bound');assert.ok(bound.session_id);assert.ok(bound.transcript);assert.ok(bound.resources.skills.includes('triage834'));assert.ok(bound.resources.skills.includes('roadmap-decomposition'));
- assert.ok(s.get("SELECT 1 FROM task_history WHERE type='skill_read' AND json_extract(data,'$.path')='defaults/roadmap-decomposition/SKILL.md'"));
+ assert.equal(s.get("SELECT count(*) n FROM task_history WHERE type='skill_read'").n,0,'mounted native read does not go through legacy read_skill MCP');
 });
 
 test('effective access is prepared from one permission definition and respects entry ceilings',()=>{

@@ -38,6 +38,7 @@ export class LocalManager implements Manager {
           BOT_LOCAL_EXECUTION: 'true',
           BOT_LOCAL_WORKSPACE: this.root,
           ...(process.env.BOT_AGENT_TOOLS_DIR ? { BOT_AGENT_TOOLS_DIR: process.env.BOT_AGENT_TOOLS_DIR } : {}),
+          ...(process.env.BOT_SKILL_STORE_DIR ? { BOT_SKILL_STORE_DIR: process.env.BOT_SKILL_STORE_DIR } : {}),
           ...(process.env.BOT_REAL_GH_BIN ? { BOT_REAL_GH_BIN: process.env.BOT_REAL_GH_BIN } : {}),
           ...(process.env.BOT_BROWSER_EXECUTABLE ? { BOT_BROWSER_EXECUTABLE: process.env.BOT_BROWSER_EXECUTABLE } : {}),
           ...(process.env.PLAYWRIGHT_BROWSERS_PATH ? { PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH } : {}),

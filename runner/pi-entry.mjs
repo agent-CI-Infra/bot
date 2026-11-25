@@ -1,5 +1,4 @@
-import {stageSessionSkills} from './session-resources.mjs';
-import {dirname,join,resolve} from 'node:path';
+import {dirname,isAbsolute,join,resolve} from 'node:path';
 import {existsSync} from 'node:fs';
 import {startCredentialHelperServer} from './credential-helper.mjs';
 import {buildGitConfigEnv} from './git-credential-bot.mjs';
@@ -232,15 +231,24 @@ try{
     }catch{}
     return {manager:SessionManager.create(cwd,sessionDir),mode:config.native_fresh?'fresh_evaluation':bound?.id?'rebuilt_from_task_records':'new_session'};
   }
+  function mapSkillPath(containerPath,skillSet){
+    if(!containerPath||typeof containerPath!=='string')return null;
+    if(!local)return containerPath;
+    const prefix='/opt/bot-skills/';
+    if(!containerPath.startsWith(prefix))return containerPath;
+    const baseRoot=process.env.BOT_SKILL_STORE_DIR?.trim()||(typeof skillSet?.local_root==='string'&&isAbsolute(skillSet.local_root)?skillSet.local_root:'');
+    const scope=typeof skillSet?.scope==='string'?skillSet.scope:'';
+    if(!baseRoot||!scope||scope.includes('..')||scope.startsWith('/')||scope.includes('\\'))return null;
+    return resolve(baseRoot,scope,containerPath.slice(prefix.length));
+  }
   // A Pi session from one configuration: its system prompt and its tools. Pi's own settings apply, compaction and retry
   // included; a session without native access reads no repository settings, as it loads none of its other resources.
   async function createSession(cfg,agent){
-    await mkdir(join(nativeDir,'skills'),{recursive:true,mode:0o700});
-    if(native)await stageSessionSkills(nativeDir,cfg.resources);
     const checkoutTrusted=Boolean(native&&native.trustedCheckout!==false);
     const settingsManager=SettingsManager.create(cwd,nativeDir,{projectTrusted:checkoutTrusted});
+    const mountedSkillsDir=native&&cfg.skill_set?.skills_dir?mapSkillPath(cfg.skill_set.skills_dir,cfg.skill_set):null;
     // On untrusted checkouts (external PRs, untrusted branches/commits), never load checkout-owned `.pi/*`, `.agents/skills`, or `AGENTS.md`/`CLAUDE.md`.
-    const skillDirs=[join(nativeDir,'skills'),...(checkoutTrusted&&existsSync(join(cwd,'.pi','skills'))?[join(cwd,'.pi','skills')]:[])];
+    const skillDirs=[...(mountedSkillsDir&&existsSync(mountedSkillsDir)?[mountedSkillsDir]:[]),...(checkoutTrusted&&existsSync(join(cwd,'.pi','skills'))?[join(cwd,'.pi','skills')]:[])];
     const trustedAgentsMd=typeof native?.trustedAgentsMd==='string'&&native.trustedAgentsMd.trim()?native.trustedAgentsMd:null;
     const loader=native?new DefaultResourceLoader({cwd,agentDir:nativeDir,settingsManager,noExtensions:!checkoutTrusted,noPromptTemplates:!checkoutTrusted,noThemes:!checkoutTrusted,noSkills:true,noContextFiles:!checkoutTrusted,additionalSkillPaths:skillDirs,...(checkoutTrusted||!trustedAgentsMd?{}:{agentsFilesOverride:()=>({agentsFiles:[{path:'AGENTS.md',content:trustedAgentsMd}]})}),appendSystemPrompt:[cfg.system]}):{getExtensions:()=>({extensions:[],errors:[],runtime:createExtensionRuntime()}),getSkills:()=>({skills:[],diagnostics:[]}),getPrompts:()=>({prompts:[],diagnostics:[]}),getThemes:()=>({themes:[],diagnostics:[]}),getAgentsFiles:()=>({agentsFiles:[]}),getSystemPrompt:()=>cfg.system,getSystemPromptSource:()=>undefined,getAppendSystemPrompt:()=>[],getAppendSystemPromptSources:()=>[],extendResources:()=>{},reload:async()=>{}};
     if(native)await loader.reload();

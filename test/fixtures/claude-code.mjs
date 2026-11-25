@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Protocol fixture only. This executable is not Claude Code and is never used as live-model evidence.
 import { createInterface } from 'node:readline';
-import { existsSync, mkdirSync, writeFileSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, statSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 
@@ -94,6 +94,22 @@ for await (const line of createInterface({ input: process.stdin })) {
 
     const disallowed = (arg('--disallowedTools') ?? '').split(',').filter(Boolean);
     const nativeBuiltins = ['Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep', 'Agent'];
+    const pluginDir = arg('--plugin-dir');
+    const discoveredSkills = [];
+    if (pluginDir && existsSync(join(pluginDir, 'skills'))) {
+      let pluginName = 'bot';
+      const manifestPath = join(pluginDir, '.claude-plugin', 'plugin.json');
+      if (existsSync(manifestPath)) {
+        try { pluginName = JSON.parse(readFileSync(manifestPath, 'utf8'))?.name || pluginName; } catch {}
+      }
+      for (const entry of readdirSync(join(pluginDir, 'skills'), { withFileTypes: true })) {
+        if (entry.isDirectory() && existsSync(join(pluginDir, 'skills', entry.name, 'SKILL.md'))) {
+          discoveredSkills.push(`${pluginName}:${entry.name}`);
+        }
+      }
+      discoveredSkills.sort();
+      nativeBuiltins.push('Skill');
+    }
     if (!disallowed.includes('WebFetch')) nativeBuiltins.push('WebFetch', 'WebSearch');
     const allTools = [...nativeBuiltins, ...offeredMcpTools];
 
@@ -126,6 +142,7 @@ for await (const line of createInterface({ input: process.stdin })) {
       subtype: 'init',
       model: arg('--model') ?? localModel ?? 'claude-local-default',
       tools: mode === 'extra_tool' ? [...allTools, 'EnterWorktree'] : allTools,
+      ...(discoveredSkills.length ? { skills: discoveredSkills } : {}),
       mcp_servers: [{ name: 'bot', status: 'connected' }],
     });
   }

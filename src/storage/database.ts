@@ -14,7 +14,7 @@ import { traceStorage } from '../tasks/trace.js';
 import { taskStorage } from '../tasks/storage.js';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { chmodSync, mkdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { Trajectories, trajectoryStorage } from './trajectories.js';
 import { DiskGuard } from './disk.js';
 import { SecretBox, randomId } from '../core/security.js';
@@ -78,6 +78,8 @@ export class Store {
   readonly channelCardsDir: string;
   // Plaintext gzipped role feedback payloads beside the database (temp dir inside trajectories root for :memory: stores).
   readonly feedbackDir: string;
+  // Content-addressed materialized skill sets (/skill-store in Compose, temp dir inside trajectories root for :memory: stores).
+  readonly skillStoreDir: string;
   // Free space of the disk the database is on (#671); null for an in-memory store.
   readonly disk: DiskGuard | null;
   private readonly authorizationGuard = new AsyncLocalStorage<() => void>();
@@ -96,6 +98,9 @@ export class Store {
     this.channelResourcesDir = path === ':memory:' ? join(this.trajectories.root, '.channel-resources') : join(dirname(path), 'channel-resources');
     this.channelCardsDir = path === ':memory:' ? join(this.trajectories.root, '.channel-cards') : join(dirname(path), 'channel-cards');
     this.feedbackDir = path === ':memory:' ? join(this.trajectories.root, '.feedback') : join(dirname(path), 'feedback');
+    this.skillStoreDir = process.env.BOT_SKILL_STORE_DIR?.trim()
+      ? resolve(process.env.BOT_SKILL_STORE_DIR.trim())
+      : (path === ':memory:' ? join(this.trajectories.root, '.skill-store') : join(dirname(path), 'skill-store'));
     // One place turns a post-commit cleanup failure into an audit row, whether the files belonged to a project or a
     // conversation, and whether the removal came from a deletion, a retention sweep or a retried reclaim (#771).
     this.trajectories.onCleanupFailure = (where, error) => {

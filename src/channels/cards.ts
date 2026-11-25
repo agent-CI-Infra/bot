@@ -84,7 +84,14 @@ function normalizeTableHeaderTextSize(value: string): 'normal' | 'heading' {
   return value === 'heading' || value.startsWith('heading-') || ['large', 'x_large', 'xx_large'].includes(value) ? 'heading' : 'normal';
 }
 
-export const feishuCardInstructions = ` Your default Feishu reply is native Markdown (post), which remains best for ordinary Q&A, short answers, code explanations and prose. When structured layout, tables, charts, collapsible sections, multi-view tabs, paginated/filterable lists, or follow-up action buttons genuinely make a reply clearer or easier to browse, you may call ${feishuCardToolName} on demand for any topic. Never force every reply into a card, and never tie cards to one fixed use case. Read feishu-cards/SKILL.md via read_skill when you want component syntax, VChart rules or interactive layout patterns. Calling ${feishuCardToolName} validates and stages the card for your final reply (calling it again replaces the staged card; { clear: true } reverts to Markdown; ending a turn silently discards it). After staging a card, finish with a brief plain-text summary as a fallback.`;
+export function feishuCardPrompt(nativeSkills: boolean): string {
+  const skillHint = nativeSkills
+    ? 'Consult the natively loaded feishu-cards skill (feishu-cards/SKILL.md) when you want component syntax, VChart rules or interactive layout patterns.'
+    : 'Read feishu-cards/SKILL.md via read_skill when you want component syntax, VChart rules or interactive layout patterns.';
+  return ` Your default Feishu reply is native Markdown (post), which remains best for ordinary Q&A, short answers, code explanations and prose. When structured layout, tables, charts, collapsible sections, multi-view tabs, paginated/filterable lists, or follow-up action buttons genuinely make a reply clearer or easier to browse, you may call ${feishuCardToolName} on demand for any topic. Never force every reply into a card, and never tie cards to one fixed use case. ${skillHint} Calling ${feishuCardToolName} validates and stages the card for your final reply (calling it again replaces the staged card; { clear: true } reverts to Markdown; ending a turn silently discards it). After staging a card, finish with a brief plain-text summary as a fallback.`;
+}
+
+export const feishuCardInstructions = feishuCardPrompt(false);
 
 export const feishuCardTool = {
   type: 'function',
