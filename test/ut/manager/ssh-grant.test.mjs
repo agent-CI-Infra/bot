@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
+import { spawn } from 'node:child_process';
 import { Docker } from '../../../manager/docker.mjs';
 import { Projects } from '../../../manager/projects.mjs';
 import { createManagerServer } from '../../../manager/server.mjs';
@@ -122,7 +123,25 @@ test('the manager forwards a run\'s SSH grant only to the daemon, writes the com
   assert.equal(daemon.ssh.agents.size, 1);
   const [agentPid] = daemon.ssh.agents.keys();
   assert.equal(daemon.ssh.groups.get(agentPid)?.kind, 'agent');
+  assert.equal(daemon.ssh.groups.get(agentPid)?.workspace, workspace);
   await execute({ operation_id: opId(), generation: 1, request: { type: 'reap', workspace_id: workspace } });
+
+  // A session's pid comes from its task's agent/state.json, which every task can write. Task B's file names task A's
+  // running agent: B's continue must not move A's agent to B's grant; A's own continue does.
+  const [taskA, taskB] = [opId(), opId()];
+  for (const task of [taskA, taskB]) {
+    assert.equal((await execute({ operation_id: opId(), generation: 1, request: { type: 'workspace_init', workspace_id: task } })).ok, true);
+    mkdirSync(join(work, 'tasks', task, 'agent'), { recursive: true });
+  }
+  const agentA = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' });
+  undo.push(() => { try { process.kill(agentA.pid, 'SIGKILL'); } catch {} });
+  assert.ok(daemon.ssh.register(agentA.pid, ssh, 'agent', taskA));
+  for (const task of [taskA, taskB]) writeFileSync(join(work, 'tasks', task, 'agent', 'state.json'), JSON.stringify({ state: 'running', pid: agentA.pid }));
+  const grantB = { ...ssh, grant: 'rsg_' + randomBytes(32).toString('base64url') }, grantA2 = { ...ssh, grant: 'rsg_' + randomBytes(32).toString('base64url') };
+  assert.equal((await execute({ operation_id: opId(), generation: 1, request: { type: 'workspace_agent_continue', workspace_id: taskB }, ssh: grantB })).ok, true);
+  assert.equal(daemon.ssh.agents.get(agentA.pid).grant.secret, ssh.grant);
+  assert.equal((await execute({ operation_id: opId(), generation: 1, request: { type: 'workspace_agent_continue', workspace_id: taskA }, ssh: grantA2 })).ok, true);
+  assert.equal(daemon.ssh.agents.get(agentA.pid).grant.secret, grantA2.grant);
 
   // A compute node (#1380) routes an execute to the same Projects; its driver accepts the grant beside the cluster fields.
   const driver = new DockerComputeDriver({ dataDir: join(dir, 'node'), docker });
