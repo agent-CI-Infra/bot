@@ -1,4 +1,7 @@
 import test from 'node:test';
+import {createHash, generateKeyPairSync} from 'node:crypto';
+import {once} from 'node:events';
+import ssh2 from 'ssh2';
 import assert from 'node:assert/strict';
 import { harness, setup, account, repository } from '../../../fixtures/helpers.mjs';
 import { configuredRedactor } from '../../../../dist/core/redaction.js';
@@ -52,4 +55,52 @@ test('SSH inventory seals credentials, scopes global bindings, pins updates, and
   assert.deepEqual((await admin(project)).value.targets,[]);
   assert.equal((await admin(pool+'/'+id,'DELETE',{})).status,200);
   assert.ok(!JSON.stringify(h.store.all("SELECT * FROM audit WHERE action LIKE 'ssh_target.%'")).includes(spec.password));
+});
+
+test('console authentication checks verify the registered host and credential, then close without a session', async t => {
+  const h = await harness(t), {admin} = await setup(h), acc = await account(admin);
+  await repository(admin,acc.id,'101');
+  const makeKey = () => generateKeyPairSync('rsa',{modulusLength:2048}).privateKey.export({format:'pem',type:'pkcs1'});
+  const hostKey = makeKey(), userKey = makeKey(), verifier = ssh2.utils.parseKey(userKey);
+  let sessions = 0;
+  const auth = [];
+  const server = new ssh2.Server({hostKeys:[hostKey]},client => {
+    client.on('error',()=>{});
+    client.on('authentication',ctx=>{
+      auth.push(ctx.method);
+      if (ctx.username === 'tester') {
+        if (ctx.method === 'password' && ctx.password === 'p!4') return ctx.accept();
+        if (ctx.method === 'publickey' && ctx.key.data.equals(verifier.getPublicSSH()) &&
+            (!ctx.signature || verifier.verify(ctx.blob,ctx.signature,ctx.hashAlgo) === true)) return ctx.accept();
+      }
+      ctx.reject();
+    });
+    client.on('session',(_accept,reject)=>{sessions++;reject();});
+  });
+  server.listen(0,'127.0.0.1'); await once(server,'listening');
+  t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const pool='/api/ssh-targets', projects='/api/repositories/101/ssh-targets';
+  const config={alias:'probe',username:'tester',auth:'password',password:'p!4',host:'127.0.0.1',port:server.address().port,
+    host_key_sha256:'SHA256:'+createHash('sha256').update(ssh2.utils.parseKey(hostKey).getPublicSSH()).digest('base64').replace(/=+$/,'')};
+  const {id}=(await admin(pool,'POST',config)).value;
+  const probe = async (path,body={})=>(await admin(path+'/'+id+'/test','POST',body)).value;
+  assert.equal((await probe(projects)).error,'ssh_target_not_found');
+  await admin(projects+'/'+id+'/binding','PUT',{});
+  assert.equal((await probe(projects,{host:'unregistered.invalid'})).error,'unknown_field');
+  assert.deepEqual(await probe(projects),{ok:true});
+  assert.deepEqual(auth,['password']);
+  const change=async body=>assert.equal((await admin(pool+'/'+id,'PUT',body)).status,200);
+  await change({password:'invalid'});
+  assert.deepEqual(await probe(pool),{ok:false,error:'ssh_auth_failed'});
+  const count=auth.length;
+  await change({host_key_sha256:'SHA256:'+'A'.repeat(43), password:'p!4'});
+  assert.deepEqual(await probe(pool),{ok:false,error:'ssh_host_key_mismatch'});
+  assert.equal(auth.length,count);
+  await change({host_key_sha256:config.host_key_sha256,auth:'key',private_key:userKey});
+  assert.deepEqual(await probe(pool),{ok:true});
+  assert.equal(auth.at(-1),'publickey');
+  assert.equal(sessions,0);
+  const audit=h.store.all("SELECT action,resource_id FROM audit WHERE action LIKE 'ssh_target.test.%'");
+  assert.ok(audit.every(row=>row.resource_id===id));
+  assert.ok(audit.some(row=>row.action==='ssh_target.test.ssh_host_key_mismatch'));
 });
