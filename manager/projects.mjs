@@ -1093,7 +1093,7 @@ export class Projects {
       : !!host?.Mounts?.some(m => m.Target === '/run/model-gateway');
     const existingRunnerMounts = host?.Mounts?.filter(m => m.Target === '/run/bot-runner') ?? [];
     const runnerSocketMountStale = runnerSocketInfo
-      ? existingRunnerMounts.length !== 1 || !existingRunnerMounts.some(m => m.Type === 'volume' && m.Source === runnerSocketInfo.mount.Source && m.ReadOnly === false && m.VolumeOptions?.Subpath === runnerSocketInfo.key)
+      ? existingRunnerMounts.length !== 1 || !existingRunnerMounts.some(m => m.Type === 'volume' && m.Source === runnerSocketInfo.mount.Source && !m.ReadOnly && m.VolumeOptions?.Subpath === runnerSocketInfo.key)
       : existingRunnerMounts.length > 0;
     const existingProjectToolsMounts = host?.Mounts?.filter(m => m.Target === '/opt/project-tools') ?? [];
     const projectToolsMountStale = existingProjectToolsMounts.length !== projectToolsMounts.length

@@ -144,7 +144,11 @@ export function createManagerServer({ projects, token, assistants = null }) {
       if (!(error instanceof ManagerError) || error.status >= 500 && error.message !== 'manager_not_ready') logFailure(`${req.method} ${new URL(req.url, 'http://manager').pathname}`, error);
       // A full data disk is a stable code (#671), so a task waits for space instead of failing on a random write error.
       const known = error instanceof ManagerError ? error : diskFull(error) ? new ManagerError('disk_full', 507) : null;
-      res.statusCode = known ? known.status : 503; res.end(JSON.stringify({ error: known ? known.message : 'manager_unavailable' }));
+      const body = { error: known ? known.message : 'manager_unavailable' };
+      if (known && Number.isSafeInteger(known.limit)) body.limit = known.limit;
+      if (known && Number.isSafeInteger(known.length)) body.length = known.length;
+      if (known && known.message === 'runner_request_too_large' && typeof known.detail === 'string') body.detail = known.detail;
+      res.statusCode = known ? known.status : 503; res.end(JSON.stringify(body));
     }
   });
   server.requestTimeout = 30000; server.headersTimeout = 5000;

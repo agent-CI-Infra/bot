@@ -27,31 +27,24 @@ export const workspaceTag = id => /^[a-f0-9]{48}$/.test(id || '') ? { BOT_WORKSP
 export const operationTag = id => /^[a-f0-9]{48}$/.test(id || '') ? { BOT_OPERATION_ID: id } : {};
 
 // Commands within INLINE_ARGV_COMMAND_LIMIT (64 KiB) run directly via `/bin/sh -c`; larger scripts (up to 1 MiB)
-// are materialized to a private 0600 script file in TMPDIR so Linux MAX_ARG_STRLEN (128 KiB) never raises E2BIG
-// while preserving `stdin = /dev/null` identically to `sh -c`.
-export function prepareShellScript(value, fallbackDir) {
-  if (Buffer.byteLength(value, 'utf8') <= INLINE_ARGV_COMMAND_LIMIT) {
-    return { args: ['-c', value], cleanup: () => {} };
-  }
+// are written to a private 0600 file in TMPDIR, reopened read-only, immediately unlinked, and passed to `/bin/sh`
+// via constant `/dev/fd/3` (avoiding Linux 128 KiB MAX_ARG_STRLEN E2BIG, keeping stdin as /dev/null, leaving zero
+// temp files behind on SIGKILL, and never passing environment-derived paths into shell argv).
+export function openShellScriptFd(value, fallbackDir) {
   const scriptDir = environment.TMPDIR || fallbackDir || '/tmp';
   mkdirSync(scriptDir, { recursive: true });
   const scriptPath = join(scriptDir, `.bot-cmd-${randomBytes(12).toString('hex')}.sh`);
-  const fd = openSync(scriptPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  const wfd = openSync(scriptPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
   try {
-    writeFileSync(fd, value, 'utf8');
+    writeFileSync(wfd, value, 'utf8');
   } finally {
-    closeSync(fd);
+    closeSync(wfd);
   }
-  let removed = false;
-  return {
-    args: [scriptPath],
-    scriptPath,
-    cleanup() {
-      if (removed) return;
-      removed = true;
-      try { unlinkSync(scriptPath); } catch {}
-    },
-  };
+  try {
+    return openSync(scriptPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } finally {
+    try { unlinkSync(scriptPath); } catch {}
+  }
 }
 
 // Output is mirrored to outputFile while the command runs so the control plane can show it live.
@@ -81,23 +74,27 @@ export function command(value, cwd, timeoutMs = 10000, { outputFile, keepBackgro
       const output = new CommandOutput();
       let fd, logPath = outputFile;
       if (logPath) fd = openSync(logPath, 'w', 0o600);
-      let invocation;
-      try {
-        invocation = prepareShellScript(value, cwd);
-      } catch (error) {
-        if (fd !== undefined) { closeSync(fd); fd = undefined; }
-        reject(error);
-        return;
+      let child;
+      if (Buffer.byteLength(value, 'utf8') <= INLINE_ARGV_COMMAND_LIMIT) {
+        child = spawn('/bin/sh', ['-c', value], { cwd, detached: true, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+      } else {
+        let scriptFd;
+        try {
+          scriptFd = openShellScriptFd(value, cwd);
+          child = spawn('/bin/sh', ['/dev/fd/3'], { cwd, detached: true, env: childEnv, stdio: ['ignore', 'pipe', 'pipe', scriptFd] });
+        } catch (error) {
+          if (fd !== undefined) { closeSync(fd); fd = undefined; }
+          reject(error);
+          return;
+        } finally {
+          if (scriptFd !== undefined) closeSync(scriptFd);
+        }
       }
-      const child = spawn('/bin/sh', invocation.args, { cwd, detached: true, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
       if (child.pid) try { onSpawn?.(child.pid); } catch {}
       let timedOut = false, done = false;
       const kill = () => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} };
       const timer = timeoutMs === null ? null : setTimeout(() => { timedOut = true; kill(); }, Math.max(100, Number(timeoutMs) || 10000));
-      const close = () => {
-        if (fd !== undefined) { closeSync(fd); fd = undefined; }
-        invocation.cleanup();
-      };
+      const close = () => { if (fd !== undefined) { closeSync(fd); fd = undefined; } };
       const failed = error => { if (done) return; done = true; clearTimeout(timer); kill(); child.stdout.destroy(); child.stderr.destroy(); close(); reject(error); };
       const collect = text => {
         if (done) return;

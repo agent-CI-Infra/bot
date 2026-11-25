@@ -106,43 +106,6 @@ export function watchMailbox(dir, onChange) {
   };
 }
 
-/**
- * Event-driven wait for mailbox activity inside `<taskRoot>/agent`. Wakes immediately on inotify
- * change instead of spinning in a tight timer loop, with a bounded fallback tick (for process exit
- * detection when a PID dies without modifying files).
- */
-export function waitForMailboxChange(dir, maxWaitMs, { fallbackMs = 200, signal } = {}) {
-  const wait = Math.max(1, Math.min(Number(maxWaitMs) || 1, Number(fallbackMs) || 200));
-  if (signal?.aborted) return Promise.resolve('aborted');
-  return new Promise(resolve => {
-    let settled = false;
-    let timer = null;
-    let unsub = null;
-    const finish = reason => {
-      if (settled) return;
-      settled = true;
-      if (timer) clearTimeout(timer);
-      if (unsub) unsub();
-      if (signal) signal.removeEventListener('abort', onAbort);
-      resolve(reason);
-    };
-    const onAbort = () => finish('aborted');
-    const onClose = () => finish('closed');
-    const handle = acquire(dir);
-    handle.entry.emitter.on('change', onChange);
-    handle.entry.emitter.on('close', onClose);
-    unsub = () => {
-      handle.entry.emitter.off('change', onChange);
-      handle.entry.emitter.off('close', onClose);
-      handle.release();
-    };
-    function onChange() { finish('event'); }
-    if (signal) signal.addEventListener('abort', onAbort, { once: true });
-    // Keep the timer ref'd: short-lived `runner.mjs` poll invocations await this promise directly.
-    timer = setTimeout(() => finish('tick'), wait);
-  });
-}
-
 export function closeAllMailboxWatchers() {
   for (const entry of activeHubs.values()) entry.close();
   activeHubs.clear();

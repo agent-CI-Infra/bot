@@ -2,14 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { RunnerClient } from '../../../manager/runner-client.mjs';
 import { commandLimit, runnerRequestLimit } from '../../../runner/command-policy.mjs';
+import { MAX_CLI_CONFIG_BYTES } from '../../../runner/cli-config.mjs';
 import { WsConnection, WS_OPCODES, encodeWsFrame } from '../../../runner/wire-protocol.mjs';
-import { waitForMailboxChange } from '../../../runner/mailbox-watch.mjs';
+import { watchMailbox } from '../../../runner/mailbox-watch.mjs';
 
 // Configure local workspace BEFORE importing any runner module that reads runner/paths.mjs at load time.
 const sharedRoot = mkdtempSync(join(tmpdir(), 'bot-rd-root-'));
@@ -235,16 +236,24 @@ test('runner daemon over private UDS enforces token auth, unlinks .token, runs >
   assert.equal(uploaded.staged, true);
   assert.equal(uploaded.size, rawBlob.length);
 
-  // 8. cli_config_write delivers content via x-bot-cli-config-b64 header, not JSON body.
-  const secretJson = JSON.stringify({ claudeAiOauth: { accessToken: 'sk-ant-test-secret-1378' } });
+  // 8. cli_config_write delivers content via x-bot-cli-config-b64 header up to the full MAX_CLI_CONFIG_BYTES (32 KiB)
+  // limit without triggering Node's 16 KiB default HTTP 431 header cap.
+  const cfgPrefix = '{"claudeAiOauth":{"accessToken":"sk-ant-test-secret-1378","pad":"';
+  const cfgSuffix = '"}}';
+  const maxSecretJson = cfgPrefix + 'a'.repeat(MAX_CLI_CONFIG_BYTES - cfgPrefix.length - cfgSuffix.length) + cfgSuffix;
+  assert.equal(Buffer.byteLength(maxSecretJson, 'utf8'), MAX_CLI_CONFIG_BYTES);
   const writeCfg = await client.execute(
     { operation_id: opId(), type: 'cli_config_write', cli: 'claude_code', file: '.credentials.json' },
-    { extraEnv: ['BOT_CLI_CONFIG_B64=' + Buffer.from(secretJson, 'utf8').toString('base64')] },
+    { extraEnv: ['BOT_CLI_CONFIG_B64=' + Buffer.from(maxSecretJson, 'utf8').toString('base64')] },
   );
   assert.equal(writeCfg.ok, true, JSON.stringify(writeCfg));
   const statusCfg = await client.execute({ operation_id: opId(), type: 'cli_config_status' });
   assert.equal(statusCfg.ok, true);
   assert.equal(statusCfg.result.claude_code.files['.credentials.json'].exists, true);
+  assert.equal(statusCfg.result.claude_code.files['.credentials.json'].bytes, MAX_CLI_CONFIG_BYTES);
+  const credPath = join(sharedWork, 'home', '.claude', '.credentials.json');
+  assert.equal(readFileSync(credPath, 'utf8'), maxSecretJson);
+  assert.equal(statSync(credPath).mode & 0o777, 0o600);
   const delCfg = await client.execute({ operation_id: opId(), type: 'cli_config_delete', cli: 'claude_code', file: '.credentials.json' });
   assert.equal(delCfg.ok, true);
 
@@ -264,12 +273,18 @@ test('runner daemon over private UDS enforces token auth, unlinks .token, runs >
   assert.ok(events.length >= 1, 'expected immediate WS mailbox.event push via inotify');
   assert.equal(events[0].workspace_id, wsId);
 
-  // Also test waitForMailboxChange fast wakeup (<300ms despite 3000ms fallback).
+  // Also test direct watchMailbox fast inotify wakeup.
   const waitStart = Date.now();
-  const waitPromise = waitForMailboxChange(mailboxDir, 3_000, { fallbackMs: 3_000 });
-  setTimeout(() => writeFileSync(join(mailboxDir, 'events.ndjson'), '{"type":"ping"}\n'), 30);
-  await waitPromise;
-  assert.ok(Date.now() - waitStart < 1_000, 'inotify should wake waitForMailboxChange immediately');
+  await new Promise((resolveWake, rejectWake) => {
+    const timer = setTimeout(() => { stopWatch(); rejectWake(new Error('watchMailbox_timeout')); }, 2_000);
+    const stopWatch = watchMailbox(mailboxDir, () => {
+      clearTimeout(timer);
+      stopWatch();
+      resolveWake();
+    });
+    setTimeout(() => writeFileSync(join(mailboxDir, 'events.ndjson'), '{"type":"ping"}\n'), 30);
+  });
+  assert.ok(Date.now() - waitStart < 1_000, 'inotify should wake watchMailbox immediately');
 });
 
 test('runner daemon over controlled loopback TCP enforces mandatory auth and supports identical WS/HTTP protocol', async t => {
@@ -294,4 +309,15 @@ test('runner daemon over controlled loopback TCP enforces mandatory auth and sup
   const cmd = await tcpClient.execute({ operation_id: opId(), type: 'command', command: 'printf tcp-ok', timeout_ms: 10_000 });
   assert.equal(cmd.ok, true);
   assert.equal(cmd.result.output, 'tcp-ok');
+
+  // Verify 32 KiB cli_config_write also works over TCP listener without HTTP 431.
+  const tcpPrefix = '{"pad":"';
+  const tcpSuffix = '"}';
+  const tcpConfig = tcpPrefix + 'b'.repeat(MAX_CLI_CONFIG_BYTES - tcpPrefix.length - tcpSuffix.length) + tcpSuffix;
+  const tcpCfg = await tcpClient.execute(
+    { operation_id: opId(), type: 'cli_config_write', cli: 'codex', file: 'auth.json' },
+    { extraEnv: ['BOT_CLI_CONFIG_B64=' + Buffer.from(tcpConfig, 'utf8').toString('base64')] },
+  );
+  assert.equal(tcpCfg.ok, true, JSON.stringify(tcpCfg));
+  await tcpClient.execute({ operation_id: opId(), type: 'cli_config_delete', cli: 'codex', file: 'auth.json' });
 });

@@ -112,7 +112,10 @@ export class Workspace {
       try{response=await this.manager.call('POST',`/v1/projects/${this.task.repository_id}/execute`,input,wait);}
       catch(error){
         const code=error instanceof HttpError?error.code:null,what=`${request.type}${request.path?' '+request.path:''}`;
-        if(code==='runner_request_too_large')response={ok:false,...(requestTooLarge(input)??{error:code})};
+        if(code==='runner_request_too_large'){
+          const extra=error instanceof HttpError&&error.detail&&typeof error.detail==='object'&&!Array.isArray(error.detail)?error.detail as Record<string,any>:null;
+          response={ok:false,...(requestTooLarge(input)??{error:code,...(extra||{})})};
+        }
         else{
           // The manager's data disk is full: wait for space (#671). A repeated call whose stored result the manager removed
           // after its retention window cannot be answered: a new attempt runs with new operation ids.

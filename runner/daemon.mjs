@@ -19,6 +19,7 @@ import { assistant, tasksDirectory } from './paths.mjs';
 import { storeRoot, git as storeGit } from './store.mjs';
 import { MAX_ARTIFACT_COMPRESSED_BYTES } from './artifact-zip.mjs';
 import { MAX_ASSISTANT_ARCHIVE_COMPRESSED_BYTES } from './assistant-files.mjs';
+import { MAX_CLI_CONFIG_BYTES } from './cli-config.mjs';
 import { refuseFull, volume as readVolume } from './disk.mjs';
 import { closeAllMailboxWatchers, watchMailbox } from './mailbox-watch.mjs';
 import {
@@ -37,6 +38,26 @@ const STAGE_ID_RE = /^[a-f0-9]{16,48}$/;
 const MAX_GIT_PACK_BYTES = 512 * 1024 * 1024;
 const MAX_INMEM_COMMAND_CHUNKS_BYTES = 512 * 1024;
 const COMMAND_RETENTION_MS = 5 * 60_000;
+// Must cover a full MAX_CLI_CONFIG_BYTES (32 KiB) payload base64-encoded (~44 KiB) in x-bot-cli-config-b64 plus normal HTTP headers.
+const DAEMON_MAX_HEADER_SIZE = Math.max(64 * 1024, Math.ceil(MAX_CLI_CONFIG_BYTES * 4 / 3) + 16 * 1024);
+const ALLOWED_LONG_POLL_BUCKETS_MS = Object.freeze([100, 150, 200, 250, 500, 1000, 2000, 5000, 10000, 15000, 20000, DEFAULT_LONG_POLL_WAIT_MS]);
+const EXPOSED_ERRORS = Object.freeze({
+  invalid_json: { status: 400, code: 'invalid_json' },
+  invalid_input: { status: 400, code: 'invalid_input' },
+  invalid_operation_id: { status: 400, code: 'invalid_operation_id' },
+  invalid_command: { status: 400, code: 'invalid_command' },
+  blob_too_large: { status: 413, code: 'blob_too_large' },
+  upload_aborted: { status: 499, code: 'upload_aborted' },
+});
+
+function selectLongPollWaitMs(raw) {
+  const parsed = Number.parseInt(String(raw ?? ''), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_LONG_POLL_WAIT_MS;
+  for (let i = ALLOWED_LONG_POLL_BUCKETS_MS.length - 1; i >= 0; i--) {
+    if (parsed >= ALLOWED_LONG_POLL_BUCKETS_MS[i]) return ALLOWED_LONG_POLL_BUCKETS_MS[i];
+  }
+  return ALLOWED_LONG_POLL_BUCKETS_MS[0];
+}
 
 function sendJson(res, statusCode, payload) {
   if (res.writableEnded || res.destroyed) return;
@@ -298,12 +319,12 @@ export async function startRunnerDaemon(options = {}) {
         if (commands.get(opId) === entry) commands.delete(opId);
       }, COMMAND_RETENTION_MS);
       entry.cleanupTimer.unref?.();
-    }, error => {
+    }, () => {
       clearInterval(entry.heartbeatTimer);
       entry.heartbeatTimer = null;
       entry.state = 'completed';
       entry.finished_at = Date.now();
-      entry.response = { ok: false, error: 'runner_operation_failed', detail: String(error?.message || error).slice(0, 2000) };
+      entry.response = { ok: false, error: 'runner_operation_failed' };
       untrackOp(opId);
       broadcastCommand(entry, {
         type: 'command.done',
@@ -390,7 +411,7 @@ export async function startRunnerDaemon(options = {}) {
         }
         if (req.method === 'GET' && sub === 'wait') {
           const reqOffset = Math.max(0, Number(url.searchParams.get('offset') || 0) || 0);
-          const waitMs = Math.max(100, Math.min(DEFAULT_LONG_POLL_WAIT_MS, Number(url.searchParams.get('timeout_ms') || DEFAULT_LONG_POLL_WAIT_MS) || DEFAULT_LONG_POLL_WAIT_MS));
+          const waitMs = selectLongPollWaitMs(url.searchParams.get('timeout_ms'));
           const live = commands.get(opId);
           if (!live) {
             const rec = await readJournalRecord(opId);
@@ -535,20 +556,27 @@ export async function startRunnerDaemon(options = {}) {
       sendJson(res, 404, { ok: false, error: 'not_found' });
     } catch (error) {
       if (error?.code === 'runner_request_too_large') {
+        const limit = Number.isSafeInteger(error.limit) ? error.limit : runnerRequestLimit;
+        const length = Number.isSafeInteger(error.length) ? error.length : 0;
         sendJson(res, 413, {
           ok: false,
           error: 'runner_request_too_large',
-          limit: error.limit,
-          length: error.length,
-          detail: `The runner request is ${error.length} bytes once JSON-encoded; the transport limit is ${error.limit} bytes.`,
+          limit,
+          length,
+          detail: `The runner request is ${length} bytes once JSON-encoded; the transport limit is ${limit} bytes.`,
         });
         return;
       }
-      if (error?.status && error?.code) {
-        sendJson(res, error.status, { ok: false, error: error.code, ...(error.limit !== undefined ? { limit: error.limit, length: error.length } : {}) });
+      const known = typeof error?.code === 'string' && Object.hasOwn(EXPOSED_ERRORS, error.code)
+        ? EXPOSED_ERRORS[error.code]
+        : null;
+      if (known) {
+        const limit = Number.isSafeInteger(error.limit) ? error.limit : undefined;
+        const length = Number.isSafeInteger(error.length) ? error.length : undefined;
+        sendJson(res, known.status, { ok: false, error: known.code, ...(limit !== undefined ? { limit, length } : {}) });
         return;
       }
-      sendJson(res, 500, { ok: false, error: 'runner_daemon_error', detail: String(error?.message || error).slice(0, 1000) });
+      sendJson(res, 500, { ok: false, error: 'runner_daemon_error' });
     }
   };
 
@@ -690,7 +718,7 @@ export async function startRunnerDaemon(options = {}) {
           onSpawn: opId ? pid => trackPid(opId, pid) : undefined,
         }).then(
           response => { if (ws.open) ws.sendJson({ type: 'rpc.response', id: rpcId, response }); },
-          error => { if (ws.open) ws.sendJson({ type: 'rpc.response', id: rpcId, response: { ok: false, error: String(error?.message || 'runner_operation_failed') } }); },
+          () => { if (ws.open) ws.sendJson({ type: 'rpc.response', id: rpcId, response: { ok: false, error: 'runner_operation_failed' } }); },
         ).finally(() => { if (opId) untrackOp(opId); });
       }
     });
@@ -698,7 +726,7 @@ export async function startRunnerDaemon(options = {}) {
 
   const servers = [];
   const createListener = () => {
-    const srv = createServer((req, res) => { void handleHttp(req, res); });
+    const srv = createServer({ maxHeaderSize: DAEMON_MAX_HEADER_SIZE }, (req, res) => { void handleHttp(req, res); });
     srv.on('upgrade', handleUpgrade);
     srv.requestTimeout = 300_000;
     srv.headersTimeout = 10_000;
