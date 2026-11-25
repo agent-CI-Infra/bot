@@ -1015,6 +1015,11 @@ export class ChannelService {
     for(const part of store.all('SELECT * FROM channel_outbox_parts WHERE outbox_id=? ORDER BY part',row.id)){
       if(part.state==='sent'){last=part.remote_id;continue;}
       guard();
+      // Feishu's UUID only deduplicates for one hour. After that, an unknown send needs human reconciliation, never a fresh UUID.
+      const checkUnknownWindow = () => {
+        if (part.first_attempt && Date.now() - part.first_attempt > 55 * 60_000) fail(409, 'channel_delivery_unknown');
+      };
+      checkUnknownWindow();
       const payload=store.secrets.open(part.payload,'channel-outbox-part:'+row.id+':'+part.part) as any, next=payload.delivery as ChannelDelivery;
       const persistPart = () => {
         store.run('UPDATE channel_outbox_parts SET payload=? WHERE outbox_id=? AND part=?',
@@ -1024,11 +1029,12 @@ export class ChannelService {
         delete next.reply_to;
         delete next.reply_in_thread;
         delete next.reply_thread_id;
-        payload.target_fallback = 'main-stream';
         persistPart();
         console.warn('feishu_reply_target_fallback', { outbox_id: row.id, part: part.part, chat_id: targetChatId || null, reason, mode: 'main_stream' });
       };
       // Re-check any selected reply target against the current local visible ledger right before sending this part (#1385).
+      // Keep the part's original UUID intact across target fallbacks so an ambiguous prior attempt is deduplicated by Feishu
+      // instead of sending a second copy; a definitive rejection never consumes the UUID.
       if (next.reply_to) {
         if (droppedReplyTo && next.reply_to === droppedReplyTo) {
           stripReplyTarget('feishu_rejected');
@@ -1046,7 +1052,6 @@ export class ChannelService {
             next.reply_in_thread = revalidated.reply_in_thread;
             if (revalidated.thread_id) next.reply_thread_id = revalidated.thread_id;
             else delete next.reply_thread_id;
-            if (part.first_attempt) payload.target_fallback = 'reanchored:' + revalidated.reply_to;
             persistPart();
             console.warn('feishu_reply_target_fallback', { outbox_id: row.id, part: part.part, chat_id: targetChatId, reason: 'ledger_revalidated', mode: 'reanchored' });
           }
@@ -1082,16 +1087,13 @@ export class ChannelService {
           persistPart();
         }
       }
-      // Feishu's UUID only deduplicates for one hour. After that, an unknown send needs human reconciliation, never a fresh UUID.
-      if(part.first_attempt&&Date.now()-part.first_attempt>55*60_000)fail(409,'channel_delivery_unknown');
+      checkUnknownWindow();
       store.run("UPDATE channel_outbox_parts SET state='sending',first_attempt=coalesce(first_attempt,?) WHERE outbox_id=? AND part=?",Date.now(),row.id,part.part);
       const check=()=>{guard();if(payload.resource_id)checkResource();};
-      const partUuid = () => payload.legacy
-        ? digest(row.id)
-        : digest(row.id + ':' + part.part + (payload.target_fallback ? ':' + String(payload.target_fallback) : ''));
-      const deliverPart = async (targetDelivery: ChannelDelivery, key: string): Promise<string> => {
+      const partUuid = digest(payload.legacy ? row.id : row.id + ':' + part.part);
+      const deliverPart = async (targetDelivery: ChannelDelivery): Promise<string> => {
         try {
-          const remote = await this.adapter(this.source(event), check).send(targetDelivery, key);
+          const remote = await this.adapter(this.source(event), check).send(targetDelivery, partUuid);
           if (this.stopped) fail(409, 'channel_stopped');
           store.transaction(() => {
             store.run("UPDATE channel_outbox_parts SET state='sent',remote_id=? WHERE outbox_id=? AND part=?", remote, row.id, part.part);
@@ -1107,7 +1109,7 @@ export class ChannelService {
           const sentFallbacks: { id: string; part: ChannelDelivery }[] = [];
           for (let fi = 0; fi < fallbackPosts.length; fi++) {
             const fallbackPart: ChannelDelivery = { ...targetDelivery, rich_card: undefined, card_id: undefined, card_fallback: undefined, content: fallbackPosts[fi]!, message_type: 'post' };
-            const fallbackKey = digest(row.id + ':' + part.part + (payload.target_fallback ? ':' + String(payload.target_fallback) : '') + ':fallback:' + fi);
+            const fallbackKey = digest(row.id + ':' + part.part + ':fallback:' + fi);
             const sentId = await this.adapter(this.source(event), check).send(fallbackPart, fallbackKey);
             sentFallbacks.push({ id: sentId, part: fallbackPart });
           }
@@ -1121,13 +1123,13 @@ export class ChannelService {
         }
       };
       try {
-        last = await deliverPart(next, partUuid());
+        last = await deliverPart(next);
       } catch (error) {
         // If Feishu definitively rejected the reply target (e.g. withdrawn remotely before recall arrived locally), retry once directly to the main stream.
         if (!(error instanceof HttpError && error.code === 'channel_reply_target_rejected' && next.reply_to)) throw error;
         droppedReplyTo = next.reply_to;
         stripReplyTarget('feishu_rejected');
-        last = await deliverPart(next, partUuid());
+        last = await deliverPart(next);
       }
     }
     return last;

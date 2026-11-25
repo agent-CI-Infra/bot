@@ -521,3 +521,108 @@ test('outbox delivery revalidates reply target before sending and falls back to 
   assert.equal(pf.wire.sent.at(-1).reply_in_thread, undefined);
   assert.match(JSON.stringify(pf.wire.sent.at(-1).content), /私聊锚点撤回后回退直发/);
 });
+
+test('ambiguous prior delivery followed by anchor recall reuses original UUID without duplicating replies and preserves unknown-delivery guard (#1385)', async t => {
+  // 1) Private chat: first target reply accepted on wire with lost response, then anchor recalled -> retry reuses original UUID and deduplicates (no second send)
+  const pf = await channelFixture(t);
+  await privateChat(pf);
+  const dmAnchor = envelope('私聊先送达再撤回的锚点');
+  pf.modelState.respond = async (_body, res) => say(res, '收到锚点');
+  assert.equal((await finished(pf.h, (await post(pf.h, pf.id, dmAnchor)).value.operation_id)).state, 'completed');
+  await until(() => pf.wire.sent.length >= 1);
+
+  clearInterval(pf.service.timer);
+  const dmReq = envelope('请引用上面那条消息');
+  pf.modelState.respond = async (body, res) => {
+    const obs = observations(body);
+    if (obs.length === 0) return call(res, 'set_reply_target', { reply_to_message_id: dmAnchor.event.message.message_id });
+    return say(res, '已送达但响应丢失的私聊答复');
+  };
+  const dmReceipt = await post(pf.h, pf.id, dmReq);
+  await pf.service.tick();
+  const dmInbox = await until(() => pf.h.store.get('SELECT * FROM channel_inbox WHERE id=?', dmReceipt.value.operation_id), r => r?.message_id);
+  await until(() => pf.h.store.get('SELECT state FROM management_messages WHERE id=?', dmInbox.message_id)?.state === 'completed');
+
+  pf.wire.state.lostSendResponses = 1;
+  await pf.service.tick();
+  const dmOutbox = pf.h.store.get('SELECT * FROM channel_outbox WHERE idempotency_key=?', dmReceipt.value.operation_id + ':result');
+  assert.equal(dmOutbox.state, 'retry');
+  assert.equal(pf.wire.sent.length, 2, 'first attempt was already accepted on the wire');
+  assert.ok(pf.wire.sent[1].url.endsWith('/' + dmAnchor.event.message.message_id + '/reply'));
+
+  await post(pf.h, pf.id, {
+    header: { ...dmAnchor.header, event_id: 'recall-dm-ambiguous-' + dmAnchor.header.event_id, event_type: 'im.message.recalled_v1' },
+    event: { chat_id: 'oc_private', message_id: dmAnchor.event.message.message_id, recall_time: String(Date.now()) },
+  });
+  pf.h.store.run('UPDATE channel_outbox SET next_attempt=0 WHERE id=?', dmOutbox.id);
+  await pf.service.tick();
+  assert.equal(pf.h.store.get('SELECT state FROM channel_outbox WHERE id=?', dmOutbox.id).state, 'sent');
+  assert.equal(pf.wire.sent.length, 2, 'retry after ambiguous send + anchor recall must deduplicate via original UUID without sending a main-stream duplicate');
+
+  // 2) Group thread: first thread reply accepted with lost response, then root recalled while child remains -> retry reuses original UUID and deduplicates (no duplicate in thread)
+  const gf = await group(t);
+  const rootMsg = inGroup('话题根消息（先送达后撤回）', 'ou_bob');
+  rootMsg.event.message.mentions = [];
+  rootMsg.event.message.thread_id = 'omt_ambiguous_thread';
+  await post(gf.h, gf.id, rootMsg);
+  const childMsg = inGroup('话题活跃子消息', 'ou_bob');
+  childMsg.event.message.mentions = [];
+  Object.assign(childMsg.event.message, { parent_id: rootMsg.event.message.message_id, root_id: rootMsg.event.message.message_id, thread_id: 'omt_ambiguous_thread' });
+  await post(gf.h, gf.id, childMsg);
+
+  clearInterval(gf.service.timer);
+  const gReq = inGroup('回复话题 omt_ambiguous_thread', 'ou_alice');
+  gf.modelState.respond = async (body, res) => {
+    const obs = observations(body);
+    if (obs.length === 0) return call(res, 'set_reply_target', { thread_id: 'omt_ambiguous_thread' });
+    return say(res, '已送达但响应丢失的话题答复');
+  };
+  const gReceipt = await post(gf.h, gf.id, gReq);
+  await gf.service.tick();
+  assert.equal((await done(gf, gReceipt)).state, 'completed');
+  const gOutbox = gf.h.store.get('SELECT * FROM channel_outbox WHERE idempotency_key=?', gReceipt.value.operation_id + ':business-result');
+  gf.wire.state.lostSendResponses = 1;
+  await gf.service.tick();
+  assert.equal(gf.h.store.get('SELECT state FROM channel_outbox WHERE id=?', gOutbox.id).state, 'retry');
+  assert.equal(gf.wire.sent.length, 1);
+  assert.ok(gf.wire.sent[0].url.endsWith('/' + rootMsg.event.message.message_id + '/reply'));
+
+  await post(gf.h, gf.id, {
+    header: { ...rootMsg.header, event_id: 'recall-thread-ambiguous-' + rootMsg.header.event_id, event_type: 'im.message.recalled_v1' },
+    event: { chat_id: 'oc_group', message_id: rootMsg.event.message.message_id, recall_time: String(Date.now()) },
+  });
+  gf.h.store.run('UPDATE channel_outbox SET next_attempt=0 WHERE id=?', gOutbox.id);
+  await gf.service.tick();
+  assert.equal(gf.h.store.get('SELECT state FROM channel_outbox WHERE id=?', gOutbox.id).state, 'sent');
+  assert.equal(gf.wire.sent.length, 1, 're-anchoring after ambiguous send must reuse original UUID and never post a duplicate in the thread');
+
+  // 3) Expired 55-minute unknown-delivery window + anchor recall -> fails closed with channel_delivery_unknown without sending
+  const expAnchor = inGroup('超时后撤回的锚点消息', 'ou_bob');
+  expAnchor.event.message.mentions = [];
+  await post(gf.h, gf.id, expAnchor);
+  const expReq = inGroup('请回复超时锚点', 'ou_alice');
+  gf.modelState.respond = async (body, res) => {
+    const obs = observations(body);
+    if (obs.length === 0) return call(res, 'set_reply_target', { reply_to_message_id: expAnchor.event.message.message_id });
+    return say(res, '超过去重窗口不得重发');
+  };
+  const expReceipt = await post(gf.h, gf.id, expReq);
+  await gf.service.tick();
+  assert.equal((await done(gf, expReceipt)).state, 'completed');
+  const expOutbox = gf.h.store.get('SELECT * FROM channel_outbox WHERE idempotency_key=?', expReceipt.value.operation_id + ':business-result');
+  gf.wire.state.lostSendResponses = 1;
+  await gf.service.tick();
+  assert.equal(gf.h.store.get('SELECT state FROM channel_outbox WHERE id=?', expOutbox.id).state, 'retry');
+  assert.equal(gf.wire.sent.length, 2);
+
+  await post(gf.h, gf.id, {
+    header: { ...expAnchor.header, event_id: 'recall-expired-' + expAnchor.header.event_id, event_type: 'im.message.recalled_v1' },
+    event: { chat_id: 'oc_group', message_id: expAnchor.event.message.message_id, recall_time: String(Date.now()) },
+  });
+  gf.h.store.run('UPDATE channel_outbox_parts SET first_attempt=? WHERE outbox_id=? AND part=0', Date.now() - 56 * 60_000, expOutbox.id);
+  gf.h.store.run('UPDATE channel_outbox SET next_attempt=0 WHERE id=?', expOutbox.id);
+  await gf.service.tick();
+  const expRow = gf.h.store.get('SELECT state, last_error FROM channel_outbox WHERE id=?', expOutbox.id);
+  assert.deepEqual({ state: expRow.state, last_error: expRow.last_error }, { state: 'failed', last_error: 'channel_delivery_unknown' });
+  assert.equal(gf.wire.sent.length, 2, 'expired unknown delivery must fail closed even when anchor was recalled');
+});
