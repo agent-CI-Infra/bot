@@ -39,7 +39,7 @@ test('角色概览是列表，点名称打开单页表单，没有两排标签�
     const advanced = page.getByTestId('role-form-advanced');
     await expect(advanced).toBeVisible();
     expect(await advanced.evaluate(el => el.open)).toBe(false);
-    await expect(page.getByLabel('dev 技能包', { exact: true })).toBeHidden();
+    await expect(page.getByRole('group', { name: 'dev 技能包', exact: true })).toBeHidden();
     await expect(page.getByRole('navigation', { name: '角色设置分区' })).toHaveCount(0);
     const crumb = page.getByTestId('role-list-link');
     await expect(crumb).toHaveText('← 角色列表');
@@ -62,7 +62,7 @@ test('角色概览是列表，点名称打开单页表单，没有两排标签�
     await expect(page.getByTestId('role-form')).toBeVisible();
     await expect(page.getByLabel('角色提示词', { exact: true })).toHaveValue('先读复现，再改代码。');
     await openRoleFormAdvanced(page);
-    await expect(page.getByLabel('dev 技能包', { exact: true })).toBeVisible();
+    await expect(page.getByRole('group', { name: 'dev 技能包', exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     expect(errors).toEqual([]);
   } finally { await h.stop(); }

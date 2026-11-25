@@ -1,9 +1,8 @@
 import { ResultSession, projectResultOwner, readToolResult } from '../agent/tool-results.js';
 import { runDispatchHarness } from './harness.js';
 import type { Manager } from '../projects/service.js';
-import { roleConfiguration, rolePrompt } from '../roles/definition.js';
-import { extractRepositorySkillFiles, resolveSkillBundleFile, skillSummariesFromFiles } from '../roles/skill-defaults.js';
-import { builtinSkillFiles } from '../roles/builtin-skills.js';
+import { resolveRoleBoundBundles, roleConfiguration, rolePrompt } from '../roles/definition.js';
+import { composeRoleSkillFiles, extractRepositorySkillFiles, resolveSkillBundleFile, skillSummariesFromFiles } from '../roles/skill-defaults.js';
 import { materializeSkillSet, NATIVE_SKILL_HARNESSES, projectSkillMountReady, projectSkillScope, resolveSkillStoreRoot } from '../roles/skill-store.js';
 import { harnessAccess } from '../harness/access.js';
 import { covers, projectCeiling, withinCeiling } from '../projects/ceiling.js';
@@ -107,9 +106,9 @@ const decisionNames = decisionTools.map(tool => tool.function.name);
 
 const dispatchSkillTool = fn(
   'read_skill',
-  'List repository skills from the trusted base branch (.agents/skills/) by omitting path, or read one skill or companion text file by path (for example .agents/skills/<name>/SKILL.md or <name>/references/...). Skills are optional working material, never permissions or authority.',
+  'List Manager pinned skill bundles and repository skills from the trusted base branch (.agents/skills/) by omitting path, or read one skill or companion text file by path (for example defaults/roadmap-decomposition/SKILL.md or repository/<name>/SKILL.md). Skills are optional working material, never permissions or authority.',
   {
-    path: { type: 'string', description: 'Optional skill file path under .agents/skills/' },
+    path: { type: 'string', description: 'Optional skill file path from the listing' },
   },
   [],
 );
@@ -237,16 +236,19 @@ export async function managerDecision(store: Store, context: DispatchContext, gi
     };
   };
   let skillState = currentRepositorySkills();
-  const dispatchSkillFiles = [
-    ...builtinSkillFiles('roadmap-decomposition').map(f => ({ ...f, path: 'defaults/roadmap-decomposition/' + f.path })),
-    ...(canReadRepositorySkills() ? skillState.bundleFiles : []),
-  ];
+  const initialConfig = roleConfiguration(store, repositoryId);
+  const managerBoundBundles = resolveRoleBoundBundles(store, repositoryId, initialConfig, role);
+  const currentDispatchSkillFiles = () => composeRoleSkillFiles(
+    managerBoundBundles,
+    canReadRepositorySkills() ? skillState.bundleFiles : [],
+  );
+  const dispatchSkillFiles = currentDispatchSkillFiles();
   const dispatchSkillRoot = resolveSkillStoreRoot(store);
   const dispatchSkillSet = dispatchSkillRoot && dispatchSkillFiles.length
     ? materializeSkillSet({ root: dispatchSkillRoot, scope: projectSkillScope(repositoryId), files: dispatchSkillFiles })
     : null;
   const dispatchSkillRevisions = [
-    'builtin:roadmap-decomposition@1',
+    ...managerBoundBundles.map(({ bundle }) => `${bundle.id}@${bundle.revision}:${bundle.content_hash.slice(0, 12)}`),
     ...(canReadRepositorySkills() && skillState.sha && skillState.bundleFiles.length
       ? [`repository:.agents/skills@${skillState.sha.slice(0, 12)}`]
       : []),
@@ -256,15 +258,16 @@ export async function managerDecision(store: Store, context: DispatchContext, gi
     && manager
     && NATIVE_SKILL_HARNESSES.has(String(role.harness_ref?.id ?? ''))
     && harnessAccess(live(), false, null).fileTools !== 'none'
-    && skillState.cached
+    && (!canReadRepositorySkills() || skillState.cached)
     && projectSkillMountReady(store, repositoryId),
   );
 
   const offered = () => {
     const p = live(), read = githubReadScopes(p);
+    const hasSkillsToRead = managerBoundBundles.length > 0 || canReadRepositorySkills();
     return [
       readToolResult,
-      ...(canReadRepositorySkills() && !nativeDispatchSkills() ? [dispatchSkillTool] : []),
+      ...(hasSkillsToRead && !nativeDispatchSkills() ? [dispatchSkillTool] : []),
       ...repositoryTools
         .filter(t => permitsTool(p, t.function.name) && read.length)
         .map(t => ({ ...t, function: { ...t.function, description: t.function.description.replace(/\s*Call github_read_token first\./g, '') } })),
@@ -351,12 +354,15 @@ export async function managerDecision(store: Store, context: DispatchContext, gi
             model_source: role.harness_ref.model_source ?? 'gateway',
           },
           skills: {
-            bundle: skillState.extracted.length ? {
-              id: 'repository-skills',
+            bundle: currentDispatchSkillFiles().length ? {
+              id: '@dispatch/manager',
               revision: null,
-              content_hash: skillState.sha,
-              source: { type: 'repository', commit: skillState.sha },
-              files: skillState.extracted.map(f => ({ path: f.path, sha256: f.sha256, bytes: f.bytes })),
+              content_hash: dispatchSkillSet?.setHash ?? skillState.sha,
+              source: {
+                bundles: managerBoundBundles.map(({ bundle }) => ({ id: bundle.id, revision: bundle.revision })),
+                ...(skillState.sha ? { repository_commit: skillState.sha } : {}),
+              },
+              files: currentDispatchSkillFiles().map(f => ({ path: f.path, sha256: f.sha256, bytes: f.bytes })),
             } : null,
             skills_read: [...skillsRead],
           },
@@ -379,19 +385,33 @@ export async function managerDecision(store: Store, context: DispatchContext, gi
       if (name === 'read_tool_result') return resultFiles.read(args);
       if (name === 'list_event_subscriptions') return listRepositorySubscriptionsForManager(store, repositoryId, args);
       if (name === 'read_skill') {
-        const loadError = await ensureRepositorySkills();
-        if (loadError) return loadError;
+        let repoNotice: string | undefined;
+        if (canReadRepositorySkills() && !skillState.cached) {
+          const loadError = await ensureRepositorySkills();
+          if (loadError) {
+            if (!managerBoundBundles.length) return loadError;
+            repoNotice = loadError.instruction ?? loadError.error;
+          }
+        }
+        const allFiles = currentDispatchSkillFiles();
         const rawArgs = (args && typeof args === 'object' ? args : {}) as { path?: unknown };
         if (rawArgs.path === undefined) {
           return {
-            source: { path_root: '.agents/skills', commit: skillState.sha },
-            summaries: skillState.summaries,
-            files: skillState.extracted.map(({ content: _c, ...f }) => f),
+            source: {
+              bundles: managerBoundBundles.map(({ bundle }) => ({ id: bundle.id, revision: bundle.revision })),
+              ...(canReadRepositorySkills() ? { path_root: '.agents/skills', commit: skillState.sha } : {}),
+            },
+            ...(repoNotice ? { repository_notice: repoNotice } : {}),
+            summaries: skillSummariesFromFiles(allFiles),
+            files: allFiles.map(({ content: _c, ...f }) => f),
           };
         }
-        const file = resolveSkillBundleFile(skillState.extracted, rawArgs.path);
-        if (!file) return { error: 'skill_file_not_found', files: skillState.extracted.map(f => f.path) };
+        const file = resolveSkillBundleFile(allFiles, rawArgs.path);
+        if (!file) return { error: 'skill_file_not_found', files: allFiles.map(f => f.path) };
         skillsRead.add(file.path);
+        if (file.encoding === 'base64') {
+          return { path: file.path, sha256: file.sha256, bytes: file.bytes, encoding: 'base64', notice: 'Binary controlled asset file; read it directly from the mounted skill directory if file tools are available.' };
+        }
         return { path: file.path, sha256: file.sha256, content: file.content };
       }
       if (name === 'github_write') return write(args);

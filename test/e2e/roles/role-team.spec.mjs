@@ -35,7 +35,7 @@ test('AI 团队列表如实区分推荐配置、各类未保存草稿与已生�
     await goRolePage(page, { role: 'dev' });
     await page.getByLabel('dev 模型', { exact: true }).selectOption(model.id); await dirty(); await discard();
     await openRoleFormAdvanced(page);
-    await page.getByLabel('dev 技能包', { exact: true }).selectOption('review-kit'); await dirty(); await discard();
+    await page.getByTestId('role-skill-bundles').locator('input[data-bundle-id="review-kit"]').check(); await dirty(); await discard();
     await openRoleFormAdvanced(page);
     await page.getByLabel('dev 项目任务与协作权限', { exact: true }).selectOption(dev.permissions.project_tasks === 'write' ? 'read' : 'write'); await dirty(); await discard();
     await goRolePage(page);
@@ -76,7 +76,7 @@ async function prepared(page) {
   // A configuration that renders all three controls: a model profile (structured output), an environment list, and a
   // metered resource budget; legacy monetary values are accepted but omitted on save.
   const saved = await admin('/api/repositories/101/roles', 'PUT', { expected_revision: config.revision, enabled: true,
-    skills: [{ id: 'skills_1', source: { type: 'inline', files: [{ path: 'guide.md', content: 'fixture' }] } }],
+    skills: [...config.skill_inputs, { id: 'skills_1', source: { type: 'inline', files: [{ path: 'guide.md', content: 'fixture' }] } }],
     // Pi natively supports all three model APIs, giving the API selector multiple options to switch between.
     roles: [{ ...editable, harness_ref: { id: 'pi' }, model_profile_ref: { model_id: model.id, api: 'openai-chat-completions', tool_calls: true, structured_output: 'tool_call' },
       budget_policy_ref: { id: 'metered', max_tool_calls: 5, max_cost: { amount: 1, currency: 'USD' } } }] });

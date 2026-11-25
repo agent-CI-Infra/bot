@@ -1,9 +1,13 @@
 function roleListComparable(role) {
+  const refs = Array.isArray(role.skill_bundle_refs) && role.skill_bundle_refs.length
+    ? role.skill_bundle_refs.map(ref => ({ id: ref.id }))
+    : (role.skill_bundle_ref ? [{ id: role.skill_bundle_ref.id }] : []);
   return JSON.stringify({
     role_id: role.role_id, enabled: role.enabled, name: role.name,
     responsibility: role.responsibility, persona_prompt: role.persona_prompt,
     model_profile_ref: role.model_profile_ref ? { model_id: role.model_profile_ref.model_id, api: role.model_profile_ref.api, tool_calls: role.model_profile_ref.tool_calls, structured_output: role.model_profile_ref.structured_output } : null,
-    skill_bundle_ref: role.skill_bundle_ref ? { id: role.skill_bundle_ref.id } : null,
+    skill_bundle_ref: refs[0] || null,
+    skill_bundle_refs: refs,
     harness_ref: role.harness_ref ? { id: role.harness_ref.id, ...(role.harness_ref.model_source && role.harness_ref.model_source !== 'gateway' ? { model_source: role.harness_ref.model_source } : {}) } : null,
     permissions: role.permissions || null,
     environment_profile_ref: role.environment_profile_ref ? { id: role.environment_profile_ref.id } : null,
@@ -81,6 +85,19 @@ function roleOverviewCards(state, redraw) {
   // The version line is the one place that says whether what is on screen is in force or still a draft.
   roleDraftStatus = note(roleVersionText(state)); roleDraftStatus.dataset.roleVersion = ''; overview.append(roleDraftStatus);
   if (data.configured !== false) overview.append(roleDefaultsControl(state));
+  if (Array.isArray(data.bundle_upgrades) && data.bundle_upgrades.length) {
+    const noticeBox = element('div', '', 'skill-upgrade-banner');
+    noticeBox.dataset.testid = 'overview-bundle-upgrades';
+    const names = data.bundle_upgrades.map(u => u.bundle_id).join('、');
+    noticeBox.append(
+      badge('内置技能有更新', 'warning'),
+      ' ',
+      element('span', `以下内置技能包有可用的新版内置 Skill：${names}。`),
+      ' ',
+      consoleLink(`#/projects/${current.id}/roles?view=skills`, '前往技能包目录查看与升级', '打开技能包目录查看新版差异并一键升级'),
+    );
+    overview.append(noticeBox);
+  }
   overview.append(note(rolePageText('overviewNote')));
   const starting = new Map((data.configuration.roles || []).map(role => [role.role_id, role]));
   for (const role of draft.roles) {
@@ -105,8 +122,8 @@ function roleOverviewCards(state, redraw) {
   const error = element('p', '', 'view-error'); custom.append(field('新角色标识', name), button('添加角色', () => {
     if (!/^[a-z][a-z0-9_-]{0,31}$/.test(name.value) || draft.roles.some(role => role.role_id === name.value)) { error.textContent = '使用小写字母开头的唯一名称，可包含数字、下划线或连字符。'; return; }
     const defaults = structuredClone(Object.hasOwn(data.role_defaults, name.value) ? data.role_defaults[name.value] : data.role_defaults.observer);
-    draft.roles.push({ role_id: name.value, enabled: true, name: name.value, responsibility: '', persona_prompt: Object.hasOwn(data.role_templates || {}, name.value) ? data.role_templates[name.value] : data.role_templates.observer, model_profile_ref: null, skill_bundle_ref: null, harness_ref: { id: data.recommended_backend || 'pi' }, budget_policy_ref: { id: 'entry-default' }, ...defaults }); draft.deleted_roles = (draft.deleted_roles || []).filter(id => id !== name.value); markRoleDirty(state); redraw();
+    draft.roles.push({ role_id: name.value, enabled: true, name: name.value, responsibility: '', persona_prompt: Object.hasOwn(data.role_templates || {}, name.value) ? data.role_templates[name.value] : data.role_templates.observer, model_profile_ref: null, skill_bundle_ref: null, skill_bundle_refs: [], harness_ref: { id: data.recommended_backend || 'pi' }, budget_policy_ref: { id: 'entry-default' }, ...defaults }); draft.deleted_roles = (draft.deleted_roles || []).filter(id => id !== name.value); markRoleDirty(state); redraw();
   }), note(rolePageText('requiredNote')(requiredNames)), error);
   const availability = roleBackendAvailabilityCard(state);
-  return [overview, ...(availability ? [availability] : []), roleSkillsCard(state, redraw), custom];
+  return [overview, ...(availability ? [availability] : []), custom];
 }

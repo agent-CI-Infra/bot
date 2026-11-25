@@ -1101,3 +1101,52 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 @media (max-width: 600px){
   .agent-tools-actions input{flex:1 1 100%;width:100%}
 }
+/* #1359: Skill Library, Built-in Bundle badges, upgrade banners & multi-bundle pickers. */
+.skill-library-head{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-start;gap:var(--space-3);margin-bottom:var(--space-4)}
+.skill-library-head>p{margin:0;flex:1 1 280px;min-width:0}
+.skill-library-head .console-link,.role-skill-picker-wrap .console-link{display:inline-flex;flex-direction:column;gap:2px;padding:var(--space-2) var(--space-3);border:1px solid var(--color-border);border-radius:var(--radius-2);background:var(--color-surface);text-decoration:none}
+.skill-library-head .console-link:hover,.role-skill-picker-wrap .console-link:hover{border-color:var(--color-brand);background:var(--color-brand-weak)}
+.skill-library-actions{display:flex;flex-wrap:wrap;gap:var(--space-2)}
+.skill-library-filters{margin-bottom:var(--space-4)}
+.skill-origin-tabs{display:flex;flex-wrap:wrap;gap:var(--space-2)}
+.skill-origin-tabs button[aria-pressed=true]{border-color:var(--color-brand);background:var(--color-brand-weak);color:var(--color-brand);font-weight:650}
+.skill-catalog-nav{display:flex;flex-direction:column;gap:var(--space-2);align-items:stretch;border-bottom:0;margin:0;padding:2px}
+.skill-catalog-nav button.skill-library-item,.skill-catalog-nav button.skill-bundle-nav-item{display:flex;flex-direction:column;align-items:flex-start;gap:var(--space-1);padding:var(--space-3);text-align:left;min-height:var(--control-min);height:auto;flex:none;width:100%;border:1px solid var(--color-border);border-radius:var(--radius-2);background:var(--color-surface);color:var(--color-text)}
+.skill-catalog-nav button.skill-library-item[aria-pressed=true],.skill-catalog-nav button.skill-bundle-nav-item[aria-pressed=true]{border-color:var(--color-brand);background:var(--color-brand-weak)}
+.skill-library-item-top{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-1) var(--space-2);min-width:0;width:100%;line-height:var(--line-height-tight)}
+.skill-library-item-top strong{overflow-wrap:anywhere}
+.skill-library-item-meta{font-size:var(--font-size-1);line-height:var(--line-height-body);overflow-wrap:anywhere;width:100%}
+.skill-detail-head{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2);margin-bottom:var(--space-2)}
+.skill-detail-head h4{margin:0;font-size:var(--font-size-3)}
+.skill-version-bar{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:var(--space-3);margin:var(--space-4) 0}
+.skill-version-bar>label{flex:1 1 220px;min-width:0;margin:0}
+.skill-file-tabs{display:flex;flex-wrap:wrap;gap:var(--space-2);margin:var(--space-2) 0 var(--space-3)}
+.skill-file-tabs button[aria-pressed=true]{border-color:var(--color-brand);background:var(--color-brand-weak);color:var(--color-brand);font-weight:600}
+.skill-file-preview{margin:0;padding:var(--space-4);border:1px solid var(--color-border);border-radius:var(--radius-3);background:var(--color-surface-alt);max-height:420px;overflow:auto;font-size:var(--font-size-label);line-height:var(--line-height-body);white-space:pre-wrap;overflow-wrap:anywhere}
+.skill-files-editor{display:grid;gap:var(--space-3);margin:var(--space-3) 0}
+.skill-file-row{min-width:0;margin:0}
+.skill-bundle-nav-title{font-weight:550;overflow-wrap:anywhere;line-height:var(--line-height-tight)}
+.skill-bundle-nav-badges{display:flex;flex-wrap:wrap;gap:var(--space-1)}
+.skill-bundle-origin-line{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2);margin:var(--space-2) 0}
+.skill-upgrade-banner{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2);padding:var(--space-4);margin:var(--space-3) 0;background:var(--color-warning-bg);border:1px solid var(--color-warning-border);border-radius:var(--radius-3);color:var(--color-text);font-size:var(--font-size-label)}
+.skill-library-items{list-style:none;margin:var(--space-2) 0 var(--space-3);padding:0;display:grid;gap:var(--space-2)}
+.skill-library-bundle-item{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:var(--space-2);padding:var(--space-3);border:1px solid var(--color-border);border-radius:var(--radius-2);background:var(--color-surface-alt);min-width:0}
+.skill-library-bundle-item-info{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2);min-width:0;overflow-wrap:anywhere}
+.skill-library-bundle-item-controls{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2)}
+.skill-add-item-row{display:flex;flex-wrap:wrap;gap:var(--space-2);align-items:center}
+.skill-add-item-row select{flex:1 1 220px;min-width:0}
+.role-skill-picker-wrap{display:grid;gap:var(--space-3);min-width:0}
+.role-effective-skills{padding:var(--space-4);border:1px solid var(--color-border);border-radius:var(--radius-3);background:var(--color-surface-alt);display:grid;gap:var(--space-2);min-width:0}
+.role-effective-skills h5{margin:0;font-size:var(--font-size-2);font-weight:650}
+.role-effective-skill-list{list-style:none;margin:0;padding:0;display:grid;gap:var(--space-2)}
+.role-effective-skill-list li{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2);font-size:var(--font-size-label);overflow-wrap:anywhere}
+.service-skill-bundles,.group-skill-bundles{display:grid;gap:var(--space-2)}
+.service-skill-bundles>p,.group-skill-bundles>p{margin:0 0 var(--space-1) var(--space-6);font-size:var(--font-size-1)}
+.service-skill-bundles>button,.group-skill-bundles>button{justify-self:start;align-self:flex-start;width:fit-content;max-width:100%}
+@media (max-width: 767px){
+  .skill-library-bundle-item{align-items:stretch}
+  .skill-library-bundle-item-controls{width:100%}
+  .skill-library-bundle-item-controls select,.skill-library-bundle-item-controls button{flex:1 1 auto}
+  .skill-version-bar{align-items:stretch}
+  .skill-add-item-row button{width:100%}
+}

@@ -12,6 +12,7 @@ import {capabilityNames} from './protocol.js';
 import {catalog} from './catalog.js';
 import {defaultPermissions} from './permissions.js';
 import {roleConfiguration,saveConfiguration,configurationRevision,resolveRole,modelProfileHash,defaultRoles} from './definition.js';
+import { classifyProjectBundle, detectBuiltinBundleUpgrades, projectBuiltinBundles } from './builtin-bundles.js';
 import { cachedRuleFiles } from '../rules/service.js';
 import type { CliConfigSnapshot } from '../harness/subscription.js';
 import { modelProtocol } from '../models/catalog.js';
@@ -39,20 +40,24 @@ export function roleApi(s:Store,user:Actor,method:string,url:URL,input:Json,cliC
    const source=cachedRuleFiles(s,repo);
    const preview=current.roles.filter(r=>r.enabled).map(r=>{try{const {id,snapshot}=resolveRole(s,repo,r.role_id,workflow,{persist:false});return {role:r.role_id,snapshot_id:id,model:snapshot.model,harness:snapshot.harness,skills:snapshot.skills&&{id:snapshot.skills.id,revision:snapshot.skills.revision,content_hash:snapshot.skills.content_hash}};}catch(error){if(error instanceof TaskError)return {role:r.role_id,error:error.code,detail:error.detail??null};throw error;}});
    // The editable sources of the current bundles, so a console edit can resave them unchanged.
-   const skill_inputs=current.skills.map(b=>{const row=s.get('SELECT source,files FROM skill_bundle_revisions WHERE repository_id=? AND id=? AND revision=?',repo,b.id,b.revision),source=JSON.parse(row?.source??'{}');
-    if(source.type==='library')return {id:b.id,source:{type:'library',items:Array.isArray(source.items)?source.items.map((item:any)=>({skill_id:item.skill_id,version:item.version})):[]}};
-    if(!['inline','builtin'].includes(source.type))return {id:b.id,source:{type:'repository',commit:source.commit,paths:source.paths}};
+   const skill_inputs=current.skills.map(b=>{const row=s.get('SELECT source,files FROM skill_bundle_revisions WHERE repository_id=? AND id=? AND revision=?',repo,b.id,b.revision),source=row?JSON.parse(row.source??'{}'):(b.source??{});
+    const meta={...(b.name?{name:b.name}:{}),...(b.origin?{origin:b.origin}:{})};
+    if(source.type==='library')return {id:b.id,...meta,source:{type:'library',...(source.origin==='builtin'?{origin:'builtin'}:{}),...(typeof source.builtin_id==='string'?{builtin_id:source.builtin_id}:{}),...(source.migrated_needs_review===true?{migrated_needs_review:true}:{}),items:Array.isArray(source.items)?source.items.map((item:any)=>({skill_id:item.skill_id,version:item.version})):[]}};
+    if(!['inline','builtin'].includes(source.type))return {id:b.id,...meta,source:{type:'repository',commit:source.commit,paths:source.paths}};
     const files=JSON.parse(row?.files??'[]');
-    return {id:b.id,source:{type:'inline',files:files.map((f:any)=>({path:f.path,content:f.content}))}};});
+    return {id:b.id,...meta,source:{type:'inline',files:files.map((f:any)=>({path:f.path,content:f.content}))}};});
     const can_edit=(()=>{try{if(user.context)authorize(user.context,'roles.edit',{project_id:repo});return true;}catch{return false;}})();
-    const builtIn=defaultRoles();
+    const builtIn=defaultRoles(s);
+    const builtin_bundles=projectBuiltinBundles().map(b=>({id:b.id,name:b.name,description:b.description,skills:b.skills,default_roles:b.default_roles}));
+    const bundle_upgrades=current.follows_default?[]:detectBuiltinBundleUpgrades(s,current.skills);
+    const bundle_origins=Object.fromEntries(current.skills.map(b=>[b.id,classifyProjectBundle(b)]));
     // configured: the project has a configuration of its own; otherwise it follows the built-in defaults (#1068).
     return {configuration:current,configured:!current.follows_default,can_edit,revision:current.revision,workflow,preview,system_prompt:systemInstructions,role_templates:{observer:roleTemplate('observer'),...Object.fromEntries(rolePool.map(role=>[role.id,roleTemplate(role.id)]))},required_roles:requiredRoles,
     // The editor shows only the permissions that differ from a role's defaults (#850): built-in roles read theirs from
     // role_defaults; this adds the defaults of the project's own roles, by kind. The management assistant reads this view
     // whole, so it stays as small as that.
     permission_defaults:Object.fromEntries(current.roles.filter(r=>!builtIn.some(b=>b.role_id===r.role_id)).map(r=>[r.role_id,defaultPermissions(r.role_id,r.kind)])),
-    role_defaults:{observer:{kind:'observer',permissions:defaultPermissions('observer','observer'),environment_profile_ref:{id:'candidate-checkout'},output_schema_ref:{id:'role-findings'}},...Object.fromEntries(builtIn.map(({role_id,kind,permissions,environment_profile_ref,output_schema_ref})=>[role_id,{kind,permissions,environment_profile_ref,output_schema_ref}]))},stage_capabilities:capabilityNames.filter(id=>id!=='run_isolation').map(id=>({id,name:({fixed_candidate_read:'读取固定候选',raw_evidence:'提供原始证据',run_isolation:'运行隔离',cancel:'可中断',version_binding:'绑定执行版本',output_validation:'校验输出',fresh_context:'全新上下文'})[id]})),harnesses:listedHarnesses(),backends:agentBackends(s,repo,undefined,cliConfig),recommended_backend:recommendedBackend,...catalog(),models,skill_inputs,
+    role_defaults:{observer:{kind:'observer',permissions:defaultPermissions('observer','observer'),environment_profile_ref:{id:'candidate-checkout'},output_schema_ref:{id:'role-findings'}},...Object.fromEntries(builtIn.map(({role_id,kind,permissions,environment_profile_ref,output_schema_ref})=>[role_id,{kind,permissions,environment_profile_ref,output_schema_ref}]))},stage_capabilities:capabilityNames.filter(id=>id!=='run_isolation').map(id=>({id,name:({fixed_candidate_read:'读取固定候选',raw_evidence:'提供原始证据',run_isolation:'运行隔离',cancel:'可中断',version_binding:'绑定执行版本',output_validation:'校验输出',fresh_context:'全新上下文'})[id]})),harnesses:listedHarnesses(),backends:agentBackends(s,repo,undefined,cliConfig),recommended_backend:recommendedBackend,...catalog(),models,skill_inputs,builtin_bundles,bundle_upgrades,bundle_origins,
     skill_sources:{repository:source?{commit:source.sha,paths:Object.keys(source.files).filter(p=>p.startsWith('.agents/skills/'))}:null},
     revisions:s.all('SELECT revision,hash,actor,created_at FROM role_config_revisions WHERE repository_id=? ORDER BY revision DESC LIMIT 20',repo)};
   }

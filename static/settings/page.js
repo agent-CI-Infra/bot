@@ -350,8 +350,8 @@ const settingsCards = {
   },
   // Platform singleton management assistant (#1249): group chat assistants are configured directly on each group binding.
   async 'management-assistant'(request) {
-    const [{ service_roles: roles, permission_items: items }, { models }] = await Promise.all([api('/api/service-roles'), api('/api/models')]);
-    const view = { request, roles, items, models: models.filter(model => model.repository_id === null) };
+    const [{ service_roles: roles, permission_items: items, skill_bundles: skillBundles = [] }, { models }] = await Promise.all([api('/api/service-roles'), api('/api/models')]);
+    const view = { request, roles, items, skillBundles, models: models.filter(model => model.repository_id === null) };
     const intro = settingsCard('管理助手设置');
     intro.append(note('管理助手是平台级的全局助手，服务于控制台管理对话和飞书私聊。它使用部署共享模型，用量单独记录，不计入任何项目。飞书群聊助手的模型、提示词和权限已统一在「个人设置 → 飞书绑定」的每个群绑定中单独配置；项目里的 Manager、Dev、QA 等工作角色在各项目的「角色」页配置。'));
     return [intro, ...view.roles.map(role => serviceRoleCard(view, role, 'h2'))];

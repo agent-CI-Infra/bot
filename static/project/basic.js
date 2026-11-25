@@ -28,13 +28,21 @@ function roleModelText(preview) {
   return preview.model.source === 'external_harness' ? '后端自带模型' : `${preview.model.name}（${own(modelSources, preview.model.source) || preview.model.source}）`;
 }
 // Only editable fields cross the API; saved versions are pinned again by the server.
-const editableRole = r => ({ role_id: r.role_id, enabled: r.enabled, name: r.name, responsibility: r.responsibility, persona_prompt: r.persona_prompt,
-  model_profile_ref: r.model_profile_ref ? { model_id: r.model_profile_ref.model_id, api: r.model_profile_ref.api, tool_calls: r.model_profile_ref.tool_calls, structured_output: r.model_profile_ref.structured_output } : null,
-  skill_bundle_ref: r.skill_bundle_ref ? { id: r.skill_bundle_ref.id } : null,
-  harness_ref: { id: r.harness_ref.id, ...(['claude_code', 'codex'].includes(r.harness_ref.id) ? { model_source: r.harness_ref.model_source === 'subscription' || r.harness_ref.model_source === 'local_config' ? 'local_config' : 'gateway' } : r.harness_ref.model_source && r.harness_ref.model_source !== 'gateway' ? { model_source: r.harness_ref.model_source } : {}) },
-  permissions: structuredClone(r.permissions),
-  environment_profile_ref: { id: r.environment_profile_ref.id }, budget_policy_ref: Object.fromEntries(Object.entries(r.budget_policy_ref).filter(([key]) => key !== 'version')),
-  output_schema_ref: { id: r.output_schema_ref.id } });
+const editableRole = r => {
+  const refs = Array.isArray(r.skill_bundle_refs) && r.skill_bundle_refs.length
+    ? r.skill_bundle_refs.map(ref => ({ id: ref.id }))
+    : (r.skill_bundle_ref ? [{ id: r.skill_bundle_ref.id }] : []);
+  return {
+    role_id: r.role_id, enabled: r.enabled, name: r.name, responsibility: r.responsibility, persona_prompt: r.persona_prompt,
+    model_profile_ref: r.model_profile_ref ? { model_id: r.model_profile_ref.model_id, api: r.model_profile_ref.api, tool_calls: r.model_profile_ref.tool_calls, structured_output: r.model_profile_ref.structured_output } : null,
+    skill_bundle_ref: refs[0] || null,
+    skill_bundle_refs: refs,
+    harness_ref: { id: r.harness_ref.id, ...(['claude_code', 'codex'].includes(r.harness_ref.id) ? { model_source: r.harness_ref.model_source === 'subscription' || r.harness_ref.model_source === 'local_config' ? 'local_config' : 'gateway' } : r.harness_ref.model_source && r.harness_ref.model_source !== 'gateway' ? { model_source: r.harness_ref.model_source } : {}) },
+    permissions: structuredClone(r.permissions),
+    environment_profile_ref: { id: r.environment_profile_ref.id }, budget_policy_ref: Object.fromEntries(Object.entries(r.budget_policy_ref).filter(([key]) => key !== 'version')),
+    output_schema_ref: { id: r.output_schema_ref.id },
+  };
+};
 
 function rolesSection() { return rolesConsole(); }
 function basicSection() {

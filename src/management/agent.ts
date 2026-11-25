@@ -33,7 +33,7 @@ import { RepositoryOnboarding, onboardingInstructions, onboardingRepositoryOf, s
 import { startRequestsName, startRequestsTool } from './onboarding-requests.js';
 import { managerFlowInstructions } from '../dispatch/settings.js';
 import { lateSchedules } from '../actions/late-schedules.js';
-import { assistantSkills, feishuAssistantSkills, makeReadSkillTool, readSkill, readSkillName, readSkillTool, serviceSkillFiles, serviceSkillRevisions } from '../service-roles/skills.js';
+import { makeReadSkillTool, parseStoredServiceSkillBundles, readSkill, readSkillName, resolveServiceRoleSkills } from '../service-roles/skills.js';
 import { materializeSkillSet, NATIVE_SKILL_HARNESSES, resolveSkillStoreRoot, serviceSkillScope } from '../roles/skill-store.js';
 import { feishuCardPrompt, feishuCardToolName, FeishuCardTurn, makeFeishuCardTool } from '../channels/cards.js';
 import { formatReplyTargetObservation, replyTargetInstructions, replyTargetTool, replyTargetToolName, type ReplyTargetTurn, type ResolvedReplyTarget } from '../channels/reply-target.js';
@@ -47,7 +47,6 @@ import {
 } from '../projects/tools-assistant.js';
 import { executeSubmitFeedback, feedbackGuidance, isFeedbackEnabled, SUBMIT_FEEDBACK_TOOL_NAME, submitFeedbackTool } from '../feedback/tool.js';
 import { RecentToolTracker } from '../feedback/snapshot.js';
-import { builtinSkillFiles } from '../roles/builtin-skills.js';
 
 const now=()=>new Date().toISOString();
 // Recent rounds continue the conversation; each earlier answer and the history as a whole stay bounded (#333).
@@ -317,14 +316,20 @@ export class ManagementAgent {
     const redactor=new Redactor();
     const replyTarget=timer?undefined:this.replyTarget?.(actor,conversation,input);
     const cardTurn=this.feishuCard?.(actor,conversation,input,value=>publicText(redactor.text(value),configuredRedactor(this.store)),replyTarget);
-    const activeSkills=cardTurn?feishuAssistantSkills:undefined;
-    const activeSkillIds=cardTurn?feishuAssistantSkills:assistantSkills;
-    const activeReadSkillTool=cardTurn?makeReadSkillTool(feishuAssistantSkills):readSkillTool;
+    const roleRowForSkills=serviceRole(this.store,managementAssistant);
+    const resolvedSkills=resolveServiceRoleSkills(
+      this.store,
+      parseStoredServiceSkillBundles(roleRowForSkills?.skill_bundle_ids),
+      managementAssistant,
+      cardTurn?'feishu':'web',
+    );
+    const hasSkills=resolvedSkills.skills.length>0;
+    const activeReadSkillTool=hasSkills?makeReadSkillTool(resolvedSkills):null;
     const computerOffered=!!this.service.assistants?.available()&&canUseComputer();
     const skillStoreRoot=resolveSkillStoreRoot(this.store);
-    const serviceSkillSet=skillStoreRoot?materializeSkillSet({root:skillStoreRoot,scope:serviceSkillScope(),files:serviceSkillFiles(activeSkillIds)}):null;
-    const serviceSkillRevs=serviceSkillRevisions(activeSkillIds);
-    const managementHarness=String(serviceRole(this.store,managementAssistant)?.harness??'pi');
+    const serviceSkillSet=skillStoreRoot&&resolvedSkills.files.length>0?materializeSkillSet({root:skillStoreRoot,scope:serviceSkillScope(),files:resolvedSkills.files}):null;
+    const serviceSkillRevs=resolvedSkills.revisions;
+    const managementHarness=String(roleRowForSkills?.harness??'pi');
     const nativeServiceSkills=Boolean(serviceSkillSet&&computerOffered&&NATIVE_SKILL_HARNESSES.has(managementHarness)&&permitsTool(permissions(),'read_file'));
     const canCheckout=()=>!!this.service.assistants?.available()&&canUseComputer()&&githubReadScopes(permissions()).includes('contents');
     const canListProjectTools=()=>!!this.service.projectTools&&permitsManagement(permissions(),'get_environment',false);
@@ -333,7 +338,7 @@ export class ManagementAgent {
       ? projectToolsAssistantTools.filter(t=>t.function.name===projectToolsListName?canListProjectTools():canWriteProjectTools())
       : [];
     const feedbackEnabled=isFeedbackEnabled(this.store);
-    const tools=[readToolResult,...managementTools,...offeredProjectToolTools,...(permitsManagement(permissions(),'project.update',true)?[startRepositoryTool]:[]),...(deciding?[startRequestsTool]:[]),...(schedules?[conversationScheduleTool]:[]),...(groupTimers?[groupScheduleTool]:[]),...ownTaskTools,...serviceRepositoryTools,...(canCheckout()?[checkoutRepositoryTool]:[]),...(nativeServiceSkills?[]:[activeReadSkillTool]),...(cardTurn?[makeFeishuCardTool(!!replyTarget)]:[]),...(replyTarget?[replyTargetTool]:[]),...(permitsTool(permissions(),'github_write')?[scopedGithubWriteTool]:[]),...(computerOffered?assistantComputerTools:[]),...(media?mediaTools.filter(t=>computerOffered||!computerMediaTools.has(t.function.name)):[]),...(feedbackEnabled?[submitFeedbackTool]:[]),...(timer?[]:[replyTarget?feishuSendMessageTool:sendMessageTool])];
+    const tools=[readToolResult,...managementTools,...offeredProjectToolTools,...(permitsManagement(permissions(),'project.update',true)?[startRepositoryTool]:[]),...(deciding?[startRequestsTool]:[]),...(schedules?[conversationScheduleTool]:[]),...(groupTimers?[groupScheduleTool]:[]),...ownTaskTools,...serviceRepositoryTools,...(canCheckout()?[checkoutRepositoryTool]:[]),...(nativeServiceSkills||!activeReadSkillTool?[]:[activeReadSkillTool]),...(cardTurn?[makeFeishuCardTool(!!replyTarget)]:[]),...(replyTarget?[replyTargetTool]:[]),...(permitsTool(permissions(),'github_write')?[scopedGithubWriteTool]:[]),...(computerOffered?assistantComputerTools:[]),...(media?mediaTools.filter(t=>computerOffered||!computerMediaTools.has(t.function.name)):[]),...(feedbackEnabled?[submitFeedbackTool]:[]),...(timer?[]:[replyTarget?feishuSendMessageTool:sendMessageTool])];
     // Only a timer's turn may end silently, and only through stay_silent (#489); own tasks never get the tool.
     const turnTools=timer?[...tools,staySilentTool]:tools;let silence:string|undefined;
     // Set once a merged message is certainly for the assistant: then the turn must answer and cannot end silently.
@@ -371,8 +376,7 @@ export class ManagementAgent {
       try{
         if(name===SUBMIT_FEEDBACK_TOOL_NAME){
           const scopedRepoId=typeof row?.scope==='string'&&row.scope.startsWith('project:')?row.scope.slice(8):null;
-          const skillIds=activeSkills??['layered-ci-gates'];
-          const skillBundleFiles=skillIds.flatMap(sid=>{try{return builtinSkillFiles(sid).map(f=>({path:`${sid}/${f.path}`,bytes:f.bytes}));}catch{return [];}});
+          const skillBundleFiles=resolvedSkills.files.map(f=>({path:f.path,bytes:f.bytes??Buffer.byteLength(f.content)}));
           result=executeSubmitFeedback({
             store:this.store,
             idempotencyScope:'management_assistant:'+id,
@@ -409,7 +413,7 @@ export class ManagementAgent {
                 environment:computerOffered?'assistant_computer':'control_plane',
               },
               skills:{
-                bundle:skillBundleFiles.length?{id:'management-assistant-skills',files:skillBundleFiles}:null,
+                bundle:skillBundleFiles.length?{id:resolvedSkills.bundleIds.join(',')||'management-assistant-skills',files:skillBundleFiles}:null,
                 skills_read:[...skillsRead],
               },
               execution:{
@@ -427,7 +431,7 @@ export class ManagementAgent {
         else if(serviceRepositoryTools.some(t=>t.function.name===name))result=await repositories.execute(name,args);
         else if(name===checkoutRepositoryName){if(!canCheckout())fail(403,'tool_not_allowed');result=await executeCheckoutRepository({store:this.store,redactor,guard,resolveRepository:resolveAuthorizedRepository,scopes:()=>githubReadScopes(permissions()),computer,gitCache:this.service.gitCache,apiUrl:this.service.githubUrl},args);if(args&&typeof args==='object'&&(args.pull_request||args.pr||args.ref||args.branch))untrustedCheckout=true;}
         else if(name==='github_write'){if(!permitsTool(permissions(),'github_write'))fail(403,'tool_not_allowed');result=await write(args);}
-        else if(name===readSkillName){result=readSkill(args,activeSkills);if(typeof result?.path==='string')skillsRead.add(result.path);}
+        else if(name===readSkillName){if(!hasSkills)fail(403,'tool_not_allowed');result=readSkill(args,resolvedSkills);if(typeof result?.path==='string')skillsRead.add(result.path);}
         else if(name===feishuCardToolName){if(!cardTurn||ownTaskId)return fail(403,'tool_not_allowed');result=cardTurn.execute(args);}
         else if(name===replyTargetToolName){if(!replyTarget||ownTaskId)return fail(403,'tool_not_allowed');result=replyTarget.execute(args);}
         else if(name===startRepositoryName){if(!permitsManagement(permissions(),'project.update',true))fail(403,'tool_not_allowed');validate(startRepositoryTool.function.parameters,args);result=await this.onboarding.tool(actor,args);}
@@ -517,7 +521,7 @@ export class ManagementAgent {
           +'\n\n'+projectToolsPriorityGuidance+(offeredProjectToolTools.length?' Use project_tools_list, project_tools_publish, and project_tools_rollback for authorized projects\' read-only tool volumes; never attempt to write to live project computers or store secrets/credentials in project tools.':'')
           +(timer?' This message was sent by one of the user\'s timers, not by the user: the request is the timer\'s task. There is no progress-message channel in a timer turn: finish all tool queries, data collection and verification first, then deliver one complete, self-contained final result in your final reply (plain Markdown or a single staged set_feishu_card). Never output opening announcements, status preambles or split updates such as announcing that you are about to start or fetch data. Stay silent only if the task allows it when there is nothing to report, and there is nothing.'+staySilentInstructions:'')
           +(media?'\nThis Feishu message may contain real attachments: call list_message_resources, then read_message_resource or view_message_image to inspect them. If an image is unsupported in format or rejected for size/resolution/context limits, use import_message_resource and your assistant computer (Python Pillow or ImageMagick) to resize, compress, crop or convert it, then call view_workspace_image to inspect the processed image. Other binary inputs also need import_message_resource and computer tools. Use attach_message_resource, attach_workspace_file or create_reply_file to send actual attachments with your final answer. Never invent paths or resource IDs or claim unsupported or omitted inputs were inspected; selecting an attachment is not delivery.':'')
-          +(cardTurn?'\n'+feishuCardPrompt(nativeServiceSkills,!!replyTarget):'')
+          +(cardTurn?'\n'+feishuCardPrompt(nativeServiceSkills,!!replyTarget,resolvedSkills.skills.some(s=>s.slug==='feishu-cards')):'')
           +(replyTarget?'\n'+replyTargetInstructions:'')
           +(feedbackEnabled?'\n\n'+feedbackGuidance:'')
           +administrator;

@@ -6,6 +6,8 @@ import { stop } from '../agent/common.js';
 import { openModel } from '../agent/model.js';
 import { permissionItems, fullPermissions, normalizePermissions, type RolePermissions } from '../roles/permissions.js';
 import { releaseConsolidationModels } from '../memory/consolidation-storage.js';
+import { defaultServiceRoleBundleIds } from '../roles/builtin-bundles.js';
+import { parseStoredServiceSkillBundles, serviceSkillBundleCatalog, validateServiceSkillBundleIds } from './skills.js';
 
 // Platform assistant outside project work: the console/personal management assistant (#1249).
 // Group chat assistants now store their model, prompt and harness directly on each group binding (channel_service_bindings);
@@ -44,6 +46,8 @@ export function serviceRoleStorage(store: Store): void {
   if(!store.all('PRAGMA table_info(service_roles)').some(c=>c.name==='harness'))store.db.exec("ALTER TABLE service_roles ADD COLUMN harness TEXT NOT NULL DEFAULT 'pi'");
   // The project column is kept for existing pre-#1249 rows.
   if (!store.all('PRAGMA table_info(service_roles)').some(c => c.name === 'project_id')) store.db.exec('ALTER TABLE service_roles ADD COLUMN project_id TEXT');
+  // Explicit skill bundle bindings (#1359); NULL follows skills/bundles.json defaults.
+  if (!store.all('PRAGMA table_info(service_roles)').some(c => c.name === 'skill_bundle_ids')) store.db.exec('ALTER TABLE service_roles ADD COLUMN skill_bundle_ids TEXT');
   const model = defaultSharedModel(store), time = now();
   // Built-in management assistant is written once and then belongs to the administrator; a restart never overwrites edits.
   store.run(`INSERT OR IGNORE INTO service_roles(id,builtin,enabled,name,responsibility,prompt,model_id,permissions,budget,harness,revision,created_at,updated_at)
@@ -121,8 +125,13 @@ export function serviceRoleUsage(store: Store, id: string): Json {
 }
 export function serviceRoleView(store: Store, row: Row): Json {
   const model = row.model_id ? store.get('SELECT id,provider_name,model_name,api_url,api_key,repository_id FROM models WHERE id=?', row.model_id) : undefined;
+  const skillBundleIds = parseStoredServiceSkillBundles(row.skill_bundle_ids);
+  const defaultBundles = defaultServiceRoleBundleIds(String(row.id));
   return { id: row.id, builtin: !!row.builtin, enabled: !!row.enabled, name: row.name, responsibility: row.responsibility, prompt: row.prompt,
     harness: row.harness??'pi',
+    skill_bundle_ids: skillBundleIds,
+    effective_skill_bundle_ids: skillBundleIds ?? defaultBundles,
+    default_skill_bundle_ids: defaultBundles,
     project: row.project_id ? { id: row.project_id, full_name: store.get('SELECT full_name FROM repositories WHERE id=?', row.project_id)?.full_name ?? row.project_id } : null,
     model_id: row.model_id, model: model ? { id: model.id, provider_name: model.provider_name ?? null, model_name: model.model_name, api_url: model.api_url, key_configured: !!model.api_key, project_id: model.repository_id ?? null } : null,
     ...(row.id === managementAssistant ? { permissions: fullPermissions() } : {}), permissions_fixed: row.id===managementAssistant,
@@ -143,7 +152,7 @@ function roleModel(store: Store, value: unknown, project: string | null): string
   return id;
 }
 // Accept legacy budget payloads for older clients; definition ignores them and clears the stored value.
-const editable = ['name', 'responsibility', 'prompt', 'model_id', 'permissions', 'budget', 'enabled', 'harness'];
+const editable = ['name', 'responsibility', 'prompt', 'model_id', 'permissions', 'budget', 'enabled', 'harness', 'skill_bundle_ids'];
 /** Field values for an insert or update; `current` is the stored row when editing. */
 function definition(store: Store, input: Json, current?: Row, project?: string | null) {
   if(input.harness!==undefined&&!serviceHarnesses.includes(String(input.harness)))fail(400,'unknown_role_harness','harness');
@@ -156,6 +165,9 @@ function definition(store: Store, input: Json, current?: Row, project?: string |
   if (input.permissions !== undefined && !fixed) fail(400, 'service_role_permissions_moved', 'permissions');
   if (input.enabled !== undefined && typeof input.enabled !== 'boolean') fail(400, 'invalid_field', 'enabled');
   if (builtin && input.enabled === false) fail(409, 'builtin_service_role_required', 'enabled');
+  const skillBundleIds = input.skill_bundle_ids !== undefined
+    ? validateServiceSkillBundleIds(input.skill_bundle_ids, 'skill_bundle_ids')
+    : parseStoredServiceSkillBundles(current?.skill_bundle_ids);
   return {
     name: input.name !== undefined ? text(input.name, 80) : current?.name ?? fail(400, 'invalid_field', 'name'),
     responsibility: input.responsibility !== undefined ? optionalText(input.responsibility, 2000) : current?.responsibility ?? '',
@@ -164,6 +176,7 @@ function definition(store: Store, input: Json, current?: Row, project?: string |
     // Kept as they were: only bindings migrated before #849 read them, once. New roles carry none.
     permissions: fixed ? JSON.stringify(fullPermissions()) : current ? store.get('SELECT permissions FROM service_roles WHERE id=?', current.id)?.permissions ?? null : null,
     harness: input.harness??current?.harness??'pi',
+    skill_bundle_ids: skillBundleIds === null ? null : JSON.stringify(skillBundleIds),
     budget: null,
     enabled: input.enabled !== undefined ? (input.enabled ? 1 : 0) : current?.enabled ?? 1,
   };
@@ -182,7 +195,7 @@ export function createServiceRole(store: Store, userId: string, input: Json, pro
     store.run(`INSERT INTO service_roles(id,builtin,enabled,name,responsibility,prompt,model_id,permissions,budget,revision,created_at,updated_at,project_id)
       VALUES(?,0,?,?,?,?,?,?,?,1,?,?,?)`, id, value.enabled, value.name, value.responsibility, value.prompt, value.model_id, value.permissions, value.budget, time, time, project);
     store.audit(userId, 'service_role.created', id, project);
-    store.run('UPDATE service_roles SET harness=? WHERE id=?',value.harness,id);
+    store.run('UPDATE service_roles SET harness=?,skill_bundle_ids=? WHERE id=?',value.harness,value.skill_bundle_ids,id);
   });
   return serviceRoleView(store, serviceRole(store, id)!);
 }
@@ -199,7 +212,7 @@ export function updateServiceRole(store: Store, userId: string, id: string, inpu
     store.run(`UPDATE service_roles SET name=?,responsibility=?,prompt=?,model_id=?,permissions=?,budget=?,enabled=?,revision=revision+1,updated_at=?
       WHERE id=? AND revision=?`, value.name, value.responsibility, value.prompt, value.model_id, value.permissions, value.budget, value.enabled, now(), id, expected);
     store.audit(userId, 'service_role.updated', id, current.project_id ?? null);
-    store.run('UPDATE service_roles SET harness=? WHERE id=?',value.harness,id);
+    store.run('UPDATE service_roles SET harness=?,skill_bundle_ids=? WHERE id=?',value.harness,value.skill_bundle_ids,id);
     return serviceRoleView(store, serviceRole(store, id)!);
   });
 }
@@ -222,5 +235,5 @@ export function deleteServiceRole(store: Store, userId: string, id: string, inpu
 /** Only the singleton platform management assistant is exposed here (#1249); group assistants live on channel_service_bindings. */
 export function listServiceRoles(store: Store): Json {
   const rows = store.all('SELECT * FROM service_roles WHERE id=?', managementAssistant);
-  return { service_roles: rows.map(row => serviceRoleView(store, row)), permission_items: serviceItems };
+  return { service_roles: rows.map(row => serviceRoleView(store, row)), permission_items: serviceItems, skill_bundles: serviceSkillBundleCatalog() as unknown as Json };
 }

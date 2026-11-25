@@ -53,19 +53,26 @@ launchpad 把单个仓库的行为集中收敛在控制台的项目配置里（�
   - **平台权限**：`delegation`（委派角色）、`project_tasks`（同项目其他任务只读查询 `list_project_tasks`/`read_project_task`，读写还可修改任务、声明依赖等待 `wait_for_tasks`、调整优先级与关联任务）、`project_memory`（项目共享知识读/写）。
   - **GitHub 资源权限**：`github_issues`、`github_pull_requests`、`github_actions`、`github_contents`（无/只读/读写），以及 `github_checks`、`github_statuses`（无/只读）。默认仅 Manager 具备 GitHub 写权限，其余内置角色只读。
   - **内置基础能力**：使用虚拟电脑（文件与命令）是所有工作角色的内置能力，不单独设权限开关。全平台角色与助手（含全部 5 种后端 `pi`/`claude_code`/`codex`/`icode`/`workswarm`、项目工作角色、对象 Manager 分派、角色对话、个人管理助手、飞书群聊助手与夜间自动记忆整理）同时默认获得只写工具 `submit_feedback`（append-only），用于反馈真实、可复现的平台问题（Skill、工具、提示词、流程或环境）；该工具不扩大任何业务或 GitHub 权限，也不向任何角色暴露读取、检索、修改或删除意见箱的能力，并受全局意见箱开关与单次运行提交上限约束（在「全局设置 → 意见箱」配置）。
-- **内置可选开发 Skill**：平台随包提供 `roadmap-decomposition`（Manager 默认自动加载）、`layered-ci-gates`（涉及 `.github/workflows/` 或 CI 门禁的开发及 bot PR 修订任务自动加载）、`test-driven-development` 与 `systematic-debugging`（可在角色配置中按需绑定给 Dev）。
+- **内置技能包与默认绑定（`skills/bundles.json`）**：平台内置四个技能包并在项目角色和服务角色中显式可见、可自由解绑或组合：
+  - `planning`（`roadmap-decomposition`）：默认绑定给 `Manager`；
+  - `ci-gates`（`layered-ci-gates`）：默认绑定给 `Manager`、`Developer`、`Reviewer` 与全局管理助手；
+  - `dev-practices`（`test-driven-development`、`systematic-debugging`）：默认绑定给 `Developer`、`Tester`；
+  - `feishu-cards`（`feishu-cards`，仅飞书渠道生效）：默认绑定给全局管理助手（Web 控制台自动过滤）与飞书群聊助手。
+  - **版本演进策略**：使用默认配置（`follows_default`）的项目自动跟随最新内置 Skill 版本；已保存自定义配置的项目锁定原版本，当镜像带来新版内置 Skill 时，概览与技能包目录给出「有新版本」提示并支持一键升级，绝不静默覆盖。
 
-## 5. 仓库 Skill（`.agents/skills/`）与独立版本化技能库
+## 5. 仓库 Skill（`.agents/skills/`）、独立技能库与技能包目录
 
-代码仓库可在基准分支的 `.agents/skills/<名称>/` 目录下放置 `SKILL.md` 及同目录配套文件（`references/`、`scripts/`、`assets/` 等），平台同时提供按项目隔离的**独立 Skill 版本库**（覆盖平台内置 `builtin`、仓库整目录导入 `repository` 与控制台自定义 `console` 三类来源）：
+代码仓库可在基准分支的 `.agents/skills/<名称>/` 目录下放置 `SKILL.md` 及同目录配套文件（`references/`、`scripts/`、`assets/` 等），平台同时提供按项目隔离的**独立 Skill 版本库**（覆盖平台内置 `builtin`、仓库整目录导入 `repository` 与控制台自定义 `console` 三类来源）与**多包组合绑定**：
 
-- **可信来源与自动挂载**：任务始终从项目的**基准分支**（未配置时为默认分支）读取 `.agents/skills/` 并按需提供给 Agent，非 QA 角色即便显式绑定了技能包也会自动叠加可信基准分支的仓库 Skill；控制面统一物化后通过只读卷 `/opt/bot-skills` 供 Pi、Claude Code、Codex 与 iCode 原生按需读取（WorkSwarm 及无文件读取权限场景保留受控 `read_skill`），绝不从外部 PR 或未合入分支自动加载检出内 Skill（防止提示词/规则投毒）。
-- **独立版本库与整目录导入**：
+- **可信来源与自动挂载**：任务与 Manager 事件分派始终从项目的**基准分支**（未配置时为默认分支）读取 `.agents/skills/` 并按需提供给 Agent，非 QA 角色即便显式绑定了技能包也会自动叠加可信基准分支的仓库 Skill（同名以显式绑定优先）；控制面统一物化后通过只读卷 `/opt/bot-skills` 供 Pi、Claude Code、Codex 与 iCode 原生按需读取（WorkSwarm 及无文件读取权限场景保留受控 `read_skill`），绝不从外部 PR 或未合入分支自动加载检出内 Skill（防止提示词/规则投毒）。
+- **独立版本库与整目录导入（`#/projects/<id>/roles?view=library`）**：
   - 平台内置 Skill 在控制面启动时自动按内容哈希登记为不可变版本（内容未变不重复出版本，内置升级自动递增版本且历史版本保持可读）。
-  - 具备 `roles.edit` 权限的项目管理员可通过接口或管理助手从受信任基准分支整目录导入 `.agents/skills/<名称>/**`（实时导入完整保留 `references/`、`scripts/` Git 可执行位与受控静态资源如常见图片/PDF/字体，缓存模式导入已校验的 UTF-8 文本快照，均记录可信提交 SHA），或在控制台按标准 `SKILL.md`（必填合法 YAML frontmatter `name` 与 `description`）创建与版本化编辑项目自有 Skill（自动脱敏已登记凭据，带 `expected_version` 并发校验）。
-  - 角色技能包支持直接按 `{ skill_id, version }` 引用版本库中的内置或本项目 Skill（同 slug 不同版本或来源冲突时以 `skill_version_conflict` 拒绝，单包聚合上限 64 项 / 512 文件 / 16 MiB），单项目技能包上限统一为 32 个；已保存的历史技能包与任务快照继续只读兼容。
+  - 具备 `roles.edit` 权限的项目管理员可在「角色 → 技能库」或通过接口、管理助手浏览内置/仓库/控制台三类 Skill 及其历史版本与正文，从受信任基准分支整目录导入 `.agents/skills/<名称>/**`（实时导入完整保留 `references/`、`scripts/` Git 可执行位与受控静态资源如常见图片/PDF/字体，缓存模式导入已校验的 UTF-8 文本快照，均记录可信提交 SHA），或按标准 `SKILL.md`（必填合法 YAML frontmatter `name` 与 `description`）新建与迭代项目自有控制台 Skill（自动脱敏已登记凭据，带 `expected_version` 并发校验；被活跃技能包引用时拒绝删除 `409 skill_in_use`）。
+- **多技能包目录与角色生效预览（`#/projects/<id>/roles?view=skills`）**：
+  - 技能包目录展示每个技能包的来源徽章（`内置` / `内置·已修改` / `项目`）与内置版本升级提示，支持按 `{ skill_id, version }` 直接从技能库挑选和锁定 Skill 版本，也保留对历史 `inline`/`repository` 技能包的只读与编辑兼容（单包聚合上限 64 项 / 512 文件 / 16 MiB，单项目技能包上限统一为 32 个）。
+  - 单个角色支持同时多选绑定多个技能包（`skill_bundle_refs`），角色表单内实时展示合并后的**生效技能预览**（含可信 `.agents/skills/` 自动叠加说明）与同名冲突提示；同一技能包内或同一角色跨技能包引用同名 slug 的不同版本/来源时，保存返回 `400 skill_version_conflict`。
 - **限制与边界**：独立技能库支持普通 UTF-8 文本与白名单受控静态资源（拒绝符号链接、子模块、路径逃逸、文件/目录前缀冲突及未知二进制），单文件上限 512 KiB、单 Skill 上限 8 MiB 且最多 256 个文件；仓库自动挂载规则缓存（`.agents/skills/`）维持最多 256 个文本文件、单文件 512 KiB、总计 1 MiB 边界，仓库其他业务目录里的 `SKILL.md` 不当作协作 Skill 加载。Skill 只指导工作方法，不能扩大权限或绕过控制面规则。
-- **刷新与查看**：在「角色 → Manager」的「仓库 skill」区查看当前已加载列表并手动刷新，也可通过 `/api/repositories/:id/skills*` 或管理助手 `list_skills`/`get_skill`/`list_skill_versions` 与 `skill.save`/`skill.import`/`skill.delete` 管理版本库。
+- **刷新与查看**：在「角色 → Manager」的「仓库 skill」区查看当前已加载列表并手动刷新，在「角色」顶栏进入「技能库」与「技能包目录」，或通过 `/api/repositories/:id/skills*` 及管理助手 `list_skills`/`get_skill`/`list_skill_versions` 与 `skill.save`/`skill.import`/`skill.delete` 管理版本库。
 
 ## 6. 标签与虚拟电脑规格
 

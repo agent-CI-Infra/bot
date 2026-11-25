@@ -71,18 +71,19 @@ test('角色概览和详情通过表单保存模型、提示词、预算、技�
     }
     await page.getByLabel('预算方式',{exact:true}).selectOption('bounded');
     await page.setViewportSize({ width: 1440, height: 1000 });
-    await goRolePage(page);
+    await goRolePage(page, { view: 'skills' });
     await page.getByRole('button', { name: '添加技能包', exact: true }).click();
+    await page.getByRole('combobox', { name: '技能来源', exact: true }).selectOption('inline');
     await page.locator('.role-skill').getByLabel('文件内容', { exact: true }).fill('记录测试证据。');
     await goRolePage(page, { role: 'dev' });
     await openRoleFormAdvanced(page);
-    await page.getByLabel('dev 技能包', { exact: true }).selectOption('skills_1');
+    await page.getByTestId('role-skill-bundles').locator('input[data-bundle-id="skills_1"]').check();
     await goRolePage(page);
     await expect(page.getByRole('button', { name: '添加阶段', exact: true })).toHaveCount(0);
     await consoleSave(page).click();
     await expect.poll(async () => (await admin('/api/repositories/101/roles')).value.configuration.revision).toBe(2);
     saved = (await admin('/api/repositories/101/roles')).value.configuration;
-    expect(saved.roles.find(role => role.role_id === 'dev').skill_bundle_ref.id).toBe('skills_1');
+    expect(saved.roles.find(role => role.role_id === 'dev').skill_bundle_refs.map(ref => ref.id)).toContain('skills_1');
     await page.reload(); await expect(page.locator('.role-stage')).toHaveCount(0);
     await goRolePage(page, { role: 'dev' });
     await page.getByLabel('职责', { exact: true }).fill('保留这份未保存的职责。');

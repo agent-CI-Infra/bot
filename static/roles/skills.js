@@ -1,5 +1,138 @@
-function roleSkillPicker(role, state) {
-  return roleSelect(role.role_id + ' 技能包', role.skill_bundle_ref?.id || '', [['', '不绑定技能包'], ...state.draft.skills.map(bundle => [bundle.id, bundle.id])], id => { role.skill_bundle_ref = id ? { id } : null; markRoleDirty(state); });
+function roleBundleIds(role) {
+  if (Array.isArray(role.skill_bundle_refs) && role.skill_bundle_refs.length) {
+    return role.skill_bundle_refs.map(ref => ref.id).filter(Boolean);
+  }
+  return role.skill_bundle_ref?.id ? [role.skill_bundle_ref.id] : [];
+}
+function setRoleBundleIds(role, ids) {
+  const unique = [...new Set(ids.filter(Boolean))];
+  role.skill_bundle_refs = unique.map(id => ({ id }));
+  role.skill_bundle_ref = unique.length ? { id: unique[0] } : null;
+}
+function skillLibraryMap(state) {
+  return new Map((state.skillLibrary?.skills || []).map(skill => [skill.id, skill]));
+}
+function skillIdToSlug(skillId, byId) {
+  const found = byId.get(skillId);
+  if (found?.slug) return found.slug;
+  const parts = String(skillId || '').split(':');
+  return parts[parts.length - 1] || String(skillId || '');
+}
+function bundleDisplayName(bundle, state) {
+  if (bundle.name) return `${bundle.name}（${bundle.id}）`;
+  const bi = (state.data.builtin_bundles || []).find(entry => entry.id === bundle.id);
+  return bi ? `${bi.name}（${bundle.id}）` : bundle.id;
+}
+const bundleOriginBadges = {
+  builtin: ['内置', 'info'],
+  builtin_modified: ['内置·已修改', 'warning'],
+  project: ['项目', ''],
+};
+function roleEffectiveSkillsPreview(role, state) {
+  const box = element('section', '', 'role-effective-skills');
+  box.dataset.testid = 'role-effective-skills';
+  box.setAttribute('aria-label', '角色生效技能预览');
+  box.append(element('h5', '当前草稿生效技能预览'));
+  const byId = skillLibraryMap(state);
+  const boundIds = roleBundleIds(role);
+  const bySlug = new Map();
+  const entries = [];
+  const conflicts = [];
+
+  for (const bid of boundIds) {
+    const bundle = state.draft.skills.find(entry => entry.id === bid);
+    if (!bundle) continue;
+    if (bundle.source?.type === 'library') {
+      for (const item of bundle.source.items || []) {
+        const meta = byId.get(item.skill_id);
+        const slug = skillIdToSlug(item.skill_id, byId);
+        const prior = bySlug.get(slug);
+        if (prior && (prior.skill_id !== item.skill_id || prior.version !== item.version)) {
+          conflicts.push({ slug, a: prior, b: { bundleId: bid, skill_id: item.skill_id, version: item.version } });
+        } else if (!prior) {
+          bySlug.set(slug, { bundleId: bid, skill_id: item.skill_id, version: item.version });
+        }
+        entries.push({
+          title: meta?.name || slug,
+          slug,
+          origin: meta?.origin || (String(item.skill_id).startsWith('builtin:') ? 'builtin' : 'console'),
+          detail: `v${item.version} · 来自技能包 ${bid}`,
+        });
+      }
+    } else if (bundle.source?.type === 'repository') {
+      const count = (bundle.source.paths || []).length;
+      entries.push({ title: bid, slug: bid, origin: 'repository', detail: `固定仓库提交 ${String(bundle.source.commit || '').slice(0, 8)}（${count} 文件）` });
+    } else {
+      const count = (bundle.source?.files || []).length;
+      entries.push({ title: bid, slug: bid, origin: 'console', detail: `控制台自定义文件（${count} 文件）` });
+    }
+  }
+
+  if (conflicts.length) {
+    for (const c of conflicts) {
+      const alert = element('p', `检测到同名 Skill 版本冲突：${c.slug} 同时被技能包「${c.a.bundleId}」（${c.a.skill_id}@v${c.a.version}）和「${c.b.bundleId}」（${c.b.skill_id}@v${c.b.version}）引用。保存时服务端将拒绝，请统一版本或取消其中一个技能包。`, 'view-error');
+      alert.setAttribute('role', 'alert');
+      box.append(alert);
+    }
+  }
+
+  if (entries.length) {
+    const ul = element('ul', '', 'role-effective-skill-list');
+    for (const item of entries) {
+      const li = element('li', '');
+      const label = skillOriginLabels[item.origin] || item.origin;
+      const tone = skillOriginTones[item.origin] || '';
+      li.append(element('strong', item.title), ' ', badge(label, tone), ' ', element('span', item.detail, 'muted'));
+      ul.append(li);
+    }
+    box.append(ul);
+  } else {
+    box.append(note('当前未绑定任何显式技能包。'));
+  }
+
+  if (role.role_id === 'qa') {
+    box.append(note('独立 QA 保持干净上下文，不自动叠加仓库 .agents/skills/，仅加载上方显式绑定的技能包。'));
+  } else {
+    const repoPaths = (state.data.skill_sources?.repository?.paths || []).filter(p => p.endsWith('/SKILL.md'));
+    if (repoPaths.length) {
+      const dirs = repoPaths.map(p => p.replace(/\/SKILL\.md$/, '')).join('、');
+      box.append(note(`运行时还将自动叠加可信基准分支的仓库 Skill（${dirs}）；同名 Skill 以显式绑定的项目技能包优先。`));
+    } else {
+      box.append(note('运行时会自动叠加可信基准分支的 .agents/skills/（如有）；未合入外部 PR 检出不会自动加载仓库 Skill。'));
+    }
+  }
+  return box;
+}
+function roleSkillBundlePicker(role, state, redraw) {
+  const wrap = element('div', '', 'role-skill-picker-wrap');
+  const group = element('fieldset', '', 'role-choices role-skill-bundles');
+  group.dataset.testid = 'role-skill-bundles';
+  group.append(element('legend', role.role_id + ' 技能包'));
+  const selected = new Set(roleBundleIds(role));
+  if (!state.draft.skills.length) {
+    group.append(note('当前项目还没有技能包，请前往「技能包目录」创建或恢复内置默认。'));
+  }
+  for (const bundle of state.draft.skills) {
+    const labelText = bundleDisplayName(bundle, state);
+    const check = checkbox('role_skill_bundle:' + role.role_id + ':' + bundle.id, selected.has(bundle.id), labelText);
+    const ctrl = check.querySelector('input');
+    ctrl.dataset.bundleId = bundle.id;
+    roleBound(ctrl, checked => {
+      const next = new Set(roleBundleIds(role));
+      if (checked) next.add(bundle.id);
+      else next.delete(bundle.id);
+      setRoleBundleIds(role, [...next]);
+      redraw();
+    }, state);
+    group.append(check);
+  }
+  const links = element('div', '', 'actions');
+  links.append(
+    consoleLink(`#/projects/${current.id}/roles?view=skills`, '管理技能包目录', '查看或编辑技能包及内置版本升级'),
+    consoleLink(`#/projects/${current.id}/roles?view=library`, '打开技能库', '浏览内置 Skill、导入仓库 Skill 或新建控制台 Skill'),
+  );
+  wrap.append(group, roleEffectiveSkillsPreview(role, state), links);
+  return wrap;
 }
 function roleModelResolution(role, state, access) {
   const region = element('section', '', 'role-model-resolution'); region.setAttribute('aria-label', '检查已保存模型');
@@ -15,16 +148,16 @@ function roleModelResolution(role, state, access) {
       const value = await api(`/api/repositories/${repositoryId}/roles/resolve`, 'POST', { role: role.role_id, expected_revision: version });
       if (!live() || sequence !== request) return;
       const snapshot = value.snapshot, model = snapshot.model, external = model.source === 'external_harness', localConfig = model.source === 'local_config';
-      const facts = element('dl');
+      const factsList = element('dl');
       for (const [caption, text] of [['配置版本', snapshot.config_revision], ['角色版本', snapshot.role_revision],
         ['Agent 后端', `${harnessName(snapshot.harness.id)} · ${snapshot.harness.version}`],
         ['模型来源', external ? '执行器自带模型' : localConfig ? '项目电脑内自行配置（不注入模型配置）' : own(modelSources, model.source) || model.source],
         ['模型名称', external ? '由执行器管理，不使用项目模型' : localConfig ? '由项目电脑内的配置决定' : model.name],
         ['模型标识', external || localConfig ? '不适用' : model.id],
         ['模型记录版本', external || localConfig ? '不适用' : model.version]]) {
-        facts.append(element('dt', caption), element('dd', String(text)));
+        factsList.append(element('dt', caption), element('dd', String(text)));
       }
-      result.append(facts, note('解析标识：' + value.snapshot_id)); status.textContent = '已读取已保存配置；没有保存草稿或启动任务。';
+      result.append(factsList, note('解析标识：' + value.snapshot_id)); status.textContent = '已读取已保存配置；没有保存草稿或启动任务。';
     } catch (err) {
       if (!live() || sequence !== request) return;
       if ([401, 403].includes(err.status)) { access.failed(err); return; }
@@ -122,7 +255,7 @@ function roleSettingsCard(role, state, redraw, access) {
     if (!await askConfirm({ title: '恢复角色模板？', body: ['当前角色提示词将替换为默认模板，保存后生效。'], action: '恢复模板' })) return;
     role.persona_prompt = (Object.hasOwn(state.data.role_templates, role.role_id) ? state.data.role_templates[role.role_id] : state.data.role_templates.observer); markRoleDirty(state); redraw();
   }));
-  group('skills', '技能包', advanced).append(field('技能包', roleSkillPicker(role, state)));
+  group('skills', '技能包', advanced).append(roleSkillBundlePicker(role, state, redraw));
   group('permissions', '权限', advanced).append(rolePermissionEditor(role, state));
   const runtime = group('runtime', '环境与输出', advanced);
   const environment = state.data.environment_profiles.filter(entry => entry.kinds.includes(role.kind));
@@ -138,7 +271,6 @@ function roleSettingsCard(role, state, redraw, access) {
       const control = input(key, role.budget_policy_ref[key] ?? '', { type: 'number', min, max, step: 1 });
       budget.append(field(title, roleBound(control, value => { if (value === '') delete role.budget_policy_ref[key]; else role.budget_policy_ref[key] = Number(value); }, state)));
     }
-
   }
   if (!(state.data.required_roles || ['manager', 'qa']).includes(role.role_id)) group('danger', '删除角色', advanced).append(button('删除这个角色', async () => {
     if (!await askConfirm({ title: '删除角色 ' + roleConfigName(role) + '？', body: ['保存后该角色不再参与新任务，正在运行的角色也会停止使用工具。'], action: '删除角色' })) return;
@@ -150,9 +282,17 @@ function roleSettingsCard(role, state, redraw, access) {
 const skillSourceNames = { repository: '固定仓库提交', inline: '控制台文件', library: '技能库' };
 function roleSkillFacts(bundle, state) {
   const saved = state.data.configuration.skills.find(entry => entry.id === bundle.id), box = element('section', '', 'skill-saved-facts'); box.setAttribute('aria-label', '已保存技能版本');
-  const savedBindings = state.data.configuration.roles.filter(role => role.skill_bundle_ref?.id === bundle.id).map(roleConfigName);
-  box.append(facts([['已保存版本', saved ? String(saved.revision) : '此标识尚未保存'], ['已保存来源', saved ? skillSourceNames[saved.source.type] || saved.source.type : '尚未保存'], ['已保存绑定角色', savedBindings.join('、') || '无'], ['内容哈希', saved?.content_hash || '保存后由服务端计算']]));
-  if (saved?.source.origin) box.append(note('已迁移为控制台文件；保留原绑定内容和文件哈希。原指南：' + saved.source.origin.playbooks.join('、') + '；原版本：' + saved.source.origin.revision + '；原内容哈希：' + saved.source.origin.content_hash));
+  const savedBindings = state.data.configuration.roles.filter(role => roleBundleIds(role).includes(bundle.id)).map(roleConfigName);
+  const originKind = state.data.bundle_origins?.[bundle.id] || (bundle.origin === 'builtin' ? 'builtin' : 'project');
+  const [originLabel] = bundleOriginBadges[originKind] || ['项目', ''];
+  box.append(facts([
+    ['来源类型', originLabel],
+    ['已保存版本', saved ? String(saved.revision) : '此标识尚未保存'],
+    ['已保存来源', saved ? skillSourceNames[saved.source.type] || saved.source.type : '尚未保存'],
+    ['已保存绑定角色', savedBindings.join('、') || '无'],
+    ['内容哈希', saved?.content_hash || '保存后由服务端计算'],
+  ]));
+  if (saved?.source.origin && typeof saved.source.origin === 'object') box.append(note('已迁移为控制台文件；保留原绑定内容和文件哈希。原指南：' + saved.source.origin.playbooks.join('、') + '；原版本：' + saved.source.origin.revision + '；原内容哈希：' + saved.source.origin.content_hash));
   if (saved?.source.type === 'repository') box.append(note('已固定提交：' + saved.source.commit));
   if (saved?.source.type === 'library' && Array.isArray(saved.source.items)) {
     box.append(note('已固定技能库条目：' + (saved.source.items.map(item => `${item.skill_id}@v${item.version}`).join('、') || '无')));
@@ -167,16 +307,46 @@ function roleSkillFacts(bundle, state) {
   }
   return box;
 }
+function bundlePendingUpgrades(bundle, state) {
+  const entry = (state.data.bundle_upgrades || []).find(u => u.bundle_id === bundle.id);
+  if (!entry || bundle.source?.type !== 'library' || !Array.isArray(bundle.source.items)) return [];
+  return (entry.upgrades || []).filter(up => {
+    const cur = bundle.source.items.find(item => item.skill_id === up.skill_id);
+    return cur && cur.version < up.latest_version;
+  });
+}
 function roleSkillsWorkspace(state, redraw) {
   const section = card('技能包目录'); section.classList.add('skill-workspace'); section.setAttribute('aria-label', '技能包目录');
-  section.append(note('技能是角色的工作材料，不会增加工具、权限或必需阶段。已保存的来源、版本和文件清单与下面的待保存草稿分开显示。'));
+  const introRow = element('div', '', 'skill-library-head');
+  introRow.append(
+    note('技能包用于将技能库中的一个或多个固定版本 Skill 组合并绑定给角色（一个角色可同时绑定多个技能包）。技能只是工作材料，不会扩大工具、权限或能力上限。'),
+    consoleLink(`#/projects/${current.id}/roles?view=library`, '前往技能库管理 Skill', '浏览、创建或导入 Skill 版本'),
+  );
+  section.append(introRow);
   const layout = element('div', '', 'skill-catalog-layout'), sidebar = element('div', '', 'skill-catalog-sidebar'), search = input('skill_search', state.skillSearch || '', { placeholder: '按标识或来源搜索' });
   const list = element('nav', '', 'skill-catalog-nav'); list.setAttribute('aria-label', '技能包列表'); search.setAttribute('aria-label', '搜索技能包'); sidebar.append(field('搜索技能包', search), list);
   const active = state.draft.skills.includes(state.activeSkill) ? state.activeSkill : state.draft.skills.find(bundle => bundle.id === state.activeSkill?.id) || state.draft.skills[0]; state.activeSkill = active;
   const drawList = () => {
-    const query = search.value.trim().toLowerCase(), matching = state.draft.skills.filter(bundle => (bundle.id + ' ' + bundle.source.type + ' ' + (skillSourceNames[bundle.source.type] || bundle.source.type)).toLowerCase().includes(query)); list.replaceChildren();
-    for (const bundle of matching) { const item = button(bundle.id + ' · ' + (skillSourceNames[bundle.source.type] || bundle.source.type), () => { state.activeSkill = bundle; redraw(); }, 'quiet');
-      item.setAttribute('aria-pressed', String(bundle === active)); list.append(item); }
+    const query = search.value.trim().toLowerCase();
+    const matching = state.draft.skills.filter(bundle => (bundle.id + ' ' + (bundle.name || '') + ' ' + bundle.source.type + ' ' + (skillSourceNames[bundle.source.type] || bundle.source.type)).toLowerCase().includes(query));
+    list.replaceChildren();
+    for (const bundle of matching) {
+      const originKind = state.data.bundle_origins?.[bundle.id] || (bundle.origin === 'builtin' ? 'builtin' : 'project');
+      const [originText, originTone] = bundleOriginBadges[originKind] || ['项目', ''];
+      const upgrades = bundlePendingUpgrades(bundle, state);
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'quiet skill-bundle-nav-item';
+      item.dataset.bundleId = bundle.id;
+      item.setAttribute('aria-pressed', String(bundle === active));
+      item.append(element('span', `${bundle.id} · ${skillSourceNames[bundle.source.type] || bundle.source.type}`, 'skill-bundle-nav-title'));
+      const meta = element('span', '', 'skill-bundle-nav-badges');
+      meta.append(badge(originText, originTone));
+      if (upgrades.length) meta.append(badge('有新版本', 'warning'));
+      item.append(meta);
+      item.addEventListener('click', () => { state.activeSkill = bundle; redraw(); });
+      list.append(item);
+    }
     if (!matching.length) list.append(note(state.draft.skills.length ? '没有匹配的技能包；当前编辑草稿仍保留。' : '尚无技能包，请在右侧或下方创建。'));
   };
   search.addEventListener('input', () => { state.skillSearch = search.value; drawList(); }); drawList();
@@ -185,46 +355,175 @@ function roleSkillsWorkspace(state, redraw) {
 }
 function roleSkillsCard(state, redraw, selected = null) {
   const section = card('技能包'), { draft, data } = state;
-  section.append(note('创建技能包后，可以在概览或角色设置中绑定。仓库文件和自定义文本都通过表单配置。'));
+  const byId = skillLibraryMap(state);
+  const allLibrarySkills = Array.isArray(state.skillLibrary?.skills) ? state.skillLibrary.skills : [];
+  section.append(note('创建或编辑技能包后，可在此页或单个角色的「高级设置 → 技能包」中多选绑定；点击顶部「保存」生效。'));
   for (const bundle of selected ? [selected] : draft.skills) {
-    const group = element('fieldset', '', 'role-skill'); const name = roleBound(input('bundle_id', bundle.id), value => { const old = bundle.id; bundle.id = value; for (const role of draft.roles) if (role.skill_bundle_ref?.id === old) role.skill_bundle_ref.id = value; }, state);
+    const group = element('fieldset', '', 'role-skill');
+    const name = roleBound(input('bundle_id', bundle.id), value => {
+      const old = bundle.id;
+      bundle.id = value;
+      for (const role of draft.roles) {
+        const ids = roleBundleIds(role);
+        if (ids.includes(old)) setRoleBundleIds(role, ids.map(id => (id === old ? value : id)));
+      }
+    }, state);
     name.addEventListener('change', redraw);
-    group.append(element('legend', bundle.id), field('技能包名称', name));
+    const originKind = data.bundle_origins?.[bundle.id] || (bundle.origin === 'builtin' ? 'builtin' : 'project');
+    const [originText, originTone] = bundleOriginBadges[originKind] || ['项目', ''];
+    const legend = element('legend', bundle.name ? `${bundle.name}（${bundle.id}）` : bundle.id);
+    group.append(legend);
+    const badgeLine = element('p', '', 'skill-bundle-origin-line');
+    badgeLine.append(badge(originText, originTone));
+    if (bundle.origin === 'builtin' && data.configured === false) {
+      badgeLine.append(' ', element('span', '默认配置状态：自动跟随最新内置 Skill 版本。', 'muted'));
+    } else if (originKind === 'builtin') {
+      badgeLine.append(' ', element('span', '已锁定当前内置 Skill 版本；内置更新时不会静默覆盖，可按需一键升级。', 'muted'));
+    } else if (originKind === 'builtin_modified') {
+      badgeLine.append(' ', element('span', '基于内置技能包做了项目自定义修改。', 'muted'));
+    }
+    group.append(badgeLine);
+
+    // Upgrade banner for pinned built-in skills with newer available versions
+    const pendingUpgrades = bundlePendingUpgrades(bundle, state);
+    if (pendingUpgrades.length) {
+      const upBox = element('div', '', 'skill-upgrade-banner');
+      upBox.dataset.testid = 'bundle-upgrade-banner';
+      const summary = pendingUpgrades.map(u => `${u.slug}: v${u.pinned_version} → v${u.latest_version}`).join('、');
+      const upBtn = button('升级到最新内置版本', () => {
+        const latestMap = new Map(pendingUpgrades.map(u => [u.skill_id, u.latest_version]));
+        bundle.source.items = (bundle.source.items || []).map(item => (
+          latestMap.has(item.skill_id) ? { ...item, version: latestMap.get(item.skill_id) } : item
+        ));
+        markRoleDirty(state);
+        redraw();
+      });
+      upBtn.dataset.testid = 'upgrade-bundle-skills';
+      upBox.append(badge('有新版本可用', 'warning'), ' ', element('span', `可升级内置 Skill：${summary}。`), ' ', upBtn);
+      group.append(upBox);
+    }
+
+    if (bundle.source?.migrated_needs_review) {
+      const reviewNote = element('p', '此技能包由旧内联文本自动迁移并补充了默认 SKILL.md 元数据，建议前往「技能库」复核与润色内容。', 'endpoint-warning');
+      group.append(reviewNote);
+    }
+
+    group.append(field('技能包名称', name));
     if (selected) group.append(roleSkillFacts(bundle, state));
-    const sourceOptions = bundle.source.type === 'library'
-      ? [['library', '技能库（只读）'], ['repository', '仓库技能文件'], ['inline', '自定义文件']]
-      : [['repository', '仓库技能文件'], ['inline', '自定义文件']];
+    const sourceOptions = [['library', '技能库'], ['repository', '仓库技能文件'], ['inline', '自定义文件']];
     group.append(field('来源', roleSelect('技能来源', bundle.source.type, sourceOptions, type => {
-      if (type === 'library') return;
-      bundle.source = type === 'repository' ? { type, commit: data.skill_sources?.repository?.commit || '', paths: [] } : { type, files: [{ path: 'guide.md', content: '' }] }; markRoleDirty(state); redraw();
+      if (type === 'library') {
+        const first = allLibrarySkills[0];
+        bundle.source = { type: 'library', items: first ? [{ skill_id: first.id, version: first.latest_version }] : [] };
+      } else if (type === 'repository') {
+        bundle.source = { type, commit: data.skill_sources?.repository?.commit || '', paths: [] };
+      } else {
+        bundle.source = { type, files: [{ path: 'guide.md', content: '' }] };
+      }
+      markRoleDirty(state); redraw();
     })));
+
     if (bundle.source.type === 'repository') {
       group.append(roleText('固定仓库提交', bundle.source, 'commit', state, { maxLength: 40 }), roleChoices('仓库技能文件', bundle.source, 'paths', [...new Set([...(bundle.source.paths || []), ...(data.skill_sources?.repository?.paths || [])])].map(path => [path, path]), state));
     } else if (bundle.source.type === 'library') {
-      const items = Array.isArray(bundle.source.items) ? bundle.source.items : [];
+      const items = Array.isArray(bundle.source.items) ? bundle.source.items : (bundle.source.items = []);
       const list = element('ul', '', 'skill-library-items');
       list.setAttribute('aria-label', '技能库条目');
       for (const item of items) {
-        const entry = element('li', '');
-        entry.append(element('code', `${item.skill_id}@v${item.version}`));
+        const meta = byId.get(item.skill_id);
+        const entry = element('li', '', 'skill-library-bundle-item');
+        const info = element('span', '', 'skill-library-bundle-item-info');
+        const origin = meta?.origin || (String(item.skill_id).startsWith('builtin:') ? 'builtin' : 'console');
+        info.append(
+          element('strong', meta?.name || skillIdToSlug(item.skill_id, byId)),
+          ' ',
+          badge(skillOriginLabels[origin] || origin, skillOriginTones[origin] || ''),
+          ' ',
+          element('code', `${item.skill_id}@v${item.version}`),
+        );
+        const controls = element('span', '', 'skill-library-bundle-item-controls');
+        const maxVer = Math.max(Number(meta?.latest_version || item.version || 1), Number(item.version || 1));
+        const verChoices = [];
+        for (let v = maxVer; v >= 1; v--) verChoices.push([String(v), `v${v}${meta && v === meta.latest_version ? '（最新）' : ''}`]);
+        const verSelect = roleSelect(`选择 ${item.skill_id} 版本`, String(item.version), verChoices, val => {
+          item.version = Number(val);
+          markRoleDirty(state);
+          redraw();
+        });
+        verSelect.dataset.skillVersionSelect = item.skill_id;
+        const removeItemBtn = button('移除', () => {
+          bundle.source.items = items.filter(x => x !== item);
+          markRoleDirty(state);
+          redraw();
+        }, 'quiet');
+        controls.append(verSelect, removeItemBtn);
+        entry.append(info, controls);
         list.append(entry);
       }
-      group.append(
-        note('此技能包引用独立技能库中的固定版本，在此页面只读展示；直接保存配置将原样保留其条目。'),
-        items.length ? list : note('未指定技能库条目。'),
-      );
+      group.append(items.length ? list : note('尚未添加技能库条目（至少需要 1 个 Skill 才能保存）。'));
+
+      // Picker to add another skill from the project skill library
+      const existingIds = new Set(items.map(i => i.skill_id));
+      const existingSlugs = new Set(items.map(i => skillIdToSlug(i.skill_id, byId)));
+      const candidates = allLibrarySkills.filter(s => !existingIds.has(s.id));
+      if (candidates.length) {
+        const addRow = element('div', '', 'skill-add-item-row');
+        const picker = document.createElement('select');
+        picker.setAttribute('aria-label', '选择要加入技能包的 Skill');
+        picker.dataset.testid = 'bundle-add-skill-select';
+        for (const s of candidates) {
+          const conflictHint = existingSlugs.has(s.slug) ? '（与包内已有 slug 同名）' : '';
+          picker.add(new Option(`${s.name || s.slug} [${skillOriginLabels[s.origin] || s.origin}] · ${s.slug} (v${s.latest_version})${conflictHint}`, s.id));
+        }
+        const addBtn = button('加入技能包', () => {
+          const chosen = candidates.find(s => s.id === picker.value);
+          if (!chosen) return;
+          bundle.source.items.push({ skill_id: chosen.id, version: chosen.latest_version });
+          markRoleDirty(state);
+          redraw();
+        }, 'quiet');
+        addBtn.dataset.testid = 'bundle-add-skill-btn';
+        addRow.append(picker, addBtn);
+        group.append(field('添加技能库 Skill', addRow));
+      } else if (!allLibrarySkills.length) {
+        group.append(note('技能库尚未加载或暂无可选 Skill，请先前往「技能库」查看或创建。'));
+      }
     } else {
       for (const file of bundle.source.files || []) group.append(roleText('文件路径', file, 'path', state), roleText('文件内容', file, 'content', state, { multiline: true, rows: 5 }), button('移除文件', () => { bundle.source.files = bundle.source.files.filter(entry => entry !== file); markRoleDirty(state); redraw(); }));
       group.append(button('添加文件', () => { (bundle.source.files ??= []).push({ path: '', content: '' }); markRoleDirty(state); redraw(); }));
     }
     if (selected) {
       const bindings = element('fieldset', '', 'role-choices'); bindings.append(element('legend', '草稿绑定角色'));
-      for (const role of draft.roles) { const wrap = checkbox('bind:' + role.role_id, role.skill_bundle_ref?.id === bundle.id, roleConfigName(role));
-        roleBound(wrap.querySelector('input'), checked => { if (checked) role.skill_bundle_ref = { id: bundle.id }; else if (role.skill_bundle_ref?.id === bundle.id) role.skill_bundle_ref = null; }, state); bindings.append(wrap); }
-      group.append(bindings, note('移除技能包会同时解除草稿中的角色绑定；保存后影响新任务，运行中的快照保持。'));
+      for (const role of draft.roles) {
+        const bound = roleBundleIds(role).includes(bundle.id);
+        const wrap = checkbox('bind:' + role.role_id, bound, roleConfigName(role));
+        roleBound(wrap.querySelector('input'), checked => {
+          const next = new Set(roleBundleIds(role));
+          if (checked) next.add(bundle.id);
+          else next.delete(bundle.id);
+          setRoleBundleIds(role, [...next]);
+        }, state);
+        bindings.append(wrap);
+      }
+      group.append(bindings, note('支持同一角色同时绑定多个技能包。移除技能包会同时解除草稿中的角色绑定；保存后影响新任务，运行中的快照保持。'));
     }
-    group.append(button('移除技能包', () => { draft.skills = draft.skills.filter(entry => entry !== bundle); for (const role of draft.roles) if (role.skill_bundle_ref?.id === bundle.id) role.skill_bundle_ref = null; markRoleDirty(state); redraw(); }, 'quiet destructive')); section.append(group);
+    group.append(button('移除技能包', () => {
+      draft.skills = draft.skills.filter(entry => entry !== bundle);
+      for (const role of draft.roles) {
+        const ids = roleBundleIds(role).filter(id => id !== bundle.id);
+        setRoleBundleIds(role, ids);
+      }
+      markRoleDirty(state); redraw();
+    }, 'quiet destructive'));
+    section.append(group);
   }
-  section.append(button('添加技能包', () => { let n = 1; while (draft.skills.some(bundle => bundle.id === 'skills_' + n)) n++; const bundle = { id: 'skills_' + n, source: { type: 'inline', files: [{ path: 'guide.md', content: '' }] } }; draft.skills.push(bundle); state.activeSkill = bundle; state.skillSearch = ''; markRoleDirty(state); redraw(); })); return section;
+  section.append(button('添加技能包', () => {
+    let n = 1; while (draft.skills.some(bundle => bundle.id === 'skills_' + n)) n++;
+    const first = allLibrarySkills[0];
+    const bundle = first
+      ? { id: 'skills_' + n, source: { type: 'library', items: [{ skill_id: first.id, version: first.latest_version }] } }
+      : { id: 'skills_' + n, source: { type: 'inline', files: [{ path: 'guide.md', content: '' }] } };
+    draft.skills.push(bundle); state.activeSkill = bundle; state.skillSearch = ''; markRoleDirty(state); redraw();
+  }));
+  return section;
 }
-

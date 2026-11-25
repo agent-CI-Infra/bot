@@ -316,6 +316,7 @@ export function migrateRetireWorkTypes(store: Store): void {
                 }
               : null,
             skill_bundle_ref: role.skill_bundle_ref ? { id: role.skill_bundle_ref.id } : null,
+            ...(Array.isArray(role.skill_bundle_refs) ? { skill_bundle_refs: role.skill_bundle_refs.map(ref => ({ id: ref.id })) } : {}),
             harness_ref: role.harness_ref.model_source ? { id: role.harness_ref.id, model_source: role.harness_ref.model_source } : { id: role.harness_ref.id },
             permissions: role.permissions,
             environment_profile_ref: { id: role.environment_profile_ref.id },

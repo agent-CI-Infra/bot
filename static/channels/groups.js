@@ -355,7 +355,39 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
     button('填入默认问答提示', () => { promptInput.value = data.default_prompt || ''; }, 'quiet'),
     copyRow,
   );
+  const skillBundleCatalog = Array.isArray(data.skill_bundles) ? data.skill_bundles : [];
+  const defaultGroupSkillBundles = Array.isArray(data.default_skill_bundle_ids) ? data.default_skill_bundle_ids : [];
+  let skillBundlesFollowDefault = true;
+  const skillBundleChecks = new Map();
+  const skillBundlesFieldset = element('fieldset', '', 'role-choices group-skill-bundles');
+  skillBundlesFieldset.dataset.testid = 'group-skill-bundles';
+  skillBundlesFieldset.append(element('legend', '群聊助手技能包'));
+  const skillBundlesNote = note('');
+  for (const bundle of skillBundleCatalog) {
+    const labelText = `${bundle.name}（${bundle.id}）`;
+    const wrap = checkbox('binding_skill_bundle:' + bundle.id, false, labelText);
+    const ctrl = wrap.querySelector('input');
+    ctrl.dataset.bundleId = bundle.id;
+    ctrl.addEventListener('change', () => {
+      skillBundlesFollowDefault = false;
+      skillBundlesNote.textContent = '已自定义本群技能包，保存后生效。';
+    });
+    skillBundleChecks.set(bundle.id, ctrl);
+    skillBundlesFieldset.append(wrap);
+    if (bundle.description) skillBundlesFieldset.append(note(`${bundle.description}（包含：${(bundle.skills || []).join('、')}）`));
+  }
+  if (skillBundleCatalog.length) {
+    const resetGroupSkills = button('恢复默认技能包', () => {
+      skillBundlesFollowDefault = true;
+      for (const [bid, ctrl] of skillBundleChecks) ctrl.checked = defaultGroupSkillBundles.includes(bid);
+      skillBundlesNote.textContent = '已恢复默认群聊技能包配置，保存后跟随内置默认。';
+    }, 'quiet');
+    resetGroupSkills.dataset.testid = 'reset-group-skills';
+    skillBundlesFieldset.append(skillBundlesNote, resetGroupSkills);
+  }
+
   assistantFieldset.append(field('助手模型', modelSelect), modelWarning, modelHint, assistantPresetBar, field('提示词与职责说明', promptInput),
+    ...(skillBundleCatalog.length ? [skillBundlesFieldset] : []),
     // Every turn needs an assistant computer, so a group set up with the defaults still learns that its turns would fail.
     computerWarning);
   form.append(assistantFieldset);
@@ -421,6 +453,12 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
     participation.value = current?.participation || 'mentions';
     promptInput.value = current ? (current.prompt || '') : '';
     preferredModelId = current ? (current.model_id || '') : '';
+    skillBundlesFollowDefault = !current || current.skill_bundle_ids === null || current.skill_bundle_ids === undefined;
+    const activeGroupSkillBundles = current?.effective_skill_bundle_ids ?? defaultGroupSkillBundles;
+    for (const [bid, ctrl] of skillBundleChecks) ctrl.checked = activeGroupSkillBundles.includes(bid);
+    skillBundlesNote.textContent = skillBundlesFollowDefault
+      ? '当前跟随默认群聊技能包配置；调整勾选后保存为本群自定义。'
+      : '当前使用本群自定义技能包配置。';
     const org = current?.enabled && current.scope.organization;
     organizationKind.checked = !!org && !organizationKind.disabled; repositoriesKind.checked = !organizationKind.checked;
     if (org) organization.value = org.id;
@@ -440,12 +478,16 @@ function buildGroupBindingEditor(data, { targetChatId = null, onClose = () => { 
       const ghLevel = chosenGithubLevel(), taskMode = selectedTaskMode();
       const permissions = { ...(ghLevel === 'custom' ? githubEdited : githubPresetOf(ghLevel)), ...platformEdited };
       if (taskMode !== 'custom') permissions.project_tasks = taskMode;
+      const selectedSkillBundles = skillBundlesFollowDefault
+        ? null
+        : [...skillBundleChecks].filter(([, ctrl]) => ctrl.checked).map(([bid]) => bid);
       await api('/api/channels/chats/' + chat.value + '/service-binding', 'PUT', {
         scope: selected,
         participation: participation.value,
         permissions,
         model_id: modelSelect.value || null,
         prompt: promptInput.value,
+        ...(skillBundleCatalog.length ? { skill_bundle_ids: selectedSkillBundles } : {}),
         enabled: true,
         expected_revision: expected,
       });
