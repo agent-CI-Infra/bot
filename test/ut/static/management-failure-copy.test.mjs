@@ -46,7 +46,24 @@ test('a finished turn that failed on a known code does not send the reader to th
   assert.equal(notice, '这次处理未完成：权限已变化，请刷新页面后按当前权限重试。');
 });
 
-test('a turn that stopped before submitting a command does not borrow the receipt sentence about a submitted command', async () => {
+test('a turn-level known command code names the code and points at the failed step, not the model settings', async () => {
   const [notice] = await failureNotices([[['model_start', { turn: 0 }], ['error', { error: 'management_revision_conflict' }]]]);
-  assert.equal(notice, '这次处理未完成：management_revision_conflict。可以检查管理助手的模型与权限配置后继续。');
+  assert.equal(notice, '这次处理未完成：management_revision_conflict。请在执行进展里核对失败的那一步。');
+});
+
+test('a code the console does not know at turn level keeps the settings advice', async () => {
+  const [notice] = await failureNotices([[['model_start', { turn: 0 }], ['error', { error: 'future_server_code' }]]]);
+  assert.equal(notice, '这次处理未完成：future_server_code。可以检查管理助手的模型与权限配置后继续。');
+});
+
+test('a post-execution guard error does not claim the command did not run', async () => {
+  const [notice] = await failureNotices([[['model_start', { turn: 0 }], call('management_command'),
+    ['tool_error', { call_id: 'b1', name: 'management_command', error: 'authorization_changed' }], ['done']]]);
+  assert.equal(notice, '操作未完成：权限在执行过程中变了，这一步可能已经生效，请在回执与执行进展里核对后再重试。（authorization_changed）');
+});
+
+test('a receipt sentence is not used for a tool that is not a management command', async () => {
+  const [notice] = await failureNotices([[['model_start', { turn: 0 }], call('github_write'),
+    ['tool_error', { call_id: 'b1', name: 'github_write', error: 'management_tool_failed' }], ['done']]]);
+  assert.equal(notice, '操作未完成：management_tool_failed');
 });
