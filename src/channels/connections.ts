@@ -1,9 +1,25 @@
 import { EventDispatcher, WSClient } from '@larksuiteoapi/node-sdk';
 import type { ChannelService } from './service.js';
 import type { Json } from '../core/security.js';
+import { configuredRedactor, publicText } from '../core/redaction.js';
+import type { Store } from '../storage/database.js';
 type Connection = Pick<WSClient, 'start' | 'close' | 'getConnectionStatus'>;
 /** A terminal long connection retries at 1s, 2s, 4s … capped at five minutes: every attempt logs in to Feishu. */
 const maxRebuildDelayMs = 5 * 60 * 1000;
+/**
+ * The SDK's logger. Its debug level prints whole events (message bodies) and the socket URL, and objects it passes may be request
+ * configurations, so only warnings and errors are logged, as text: an error by its message, any other object not at all, and
+ * whatever credential the deployment knows removed (#1399).
+ */
+export function sdkLogger(store: Store, connector: string) {
+  const write = (level: 'warn' | 'error') => (...args: unknown[]) => {
+    const text = args.map(arg => typeof arg === 'string' ? arg : arg instanceof Error ? arg.message : ['number', 'boolean'].includes(typeof arg) ? String(arg) : '[object]').join(' ');
+    let line: string;
+    try { line = publicText(text, configuredRedactor(store)); } catch { line = '[unavailable]'; }
+    console[level](`[channels] feishu sdk ${level} on connector ${connector}: ${line.slice(0, 500)}`);
+  };
+  return { trace() {}, debug() {}, info() {}, warn: write('warn'), error: write('error') };
+}
 
 /** The SDK authenticates the socket with this connector's app credentials. HTTP cannot call this ingress. */
 export class ChannelConnections {
@@ -53,8 +69,8 @@ export class ChannelConnections {
       const ref = store.get('SELECT sealed FROM channel_credentials WHERE id=?', c.credential_ref);
       if (!ref) continue;
       const secret = store.secrets.open(ref.sealed, 'channel-credential:' + c.credential_ref);
-      // SDK diagnostics may include request configuration. Persist only our stable health codes.
-      const logger = { trace() {}, debug() {}, info() {}, warn() {}, error() {} };
+      // SDK diagnostics may include request configuration: the console keeps only our stable health codes, the log redacted text.
+      const logger = sdkLogger(store, c.id);
       const client = this.create({ appId: c.app_id, appSecret: String(secret.app_secret), logger });
       const handlers = Object.fromEntries(['im.message.receive_v1', 'im.message.recalled_v1', 'im.chat.member.bot.added_v1', 'im.chat.member.bot.deleted_v1',
         'im.chat.disbanded_v1', 'card.action.trigger', 'app.uninstalled', 'app_uninstalled', 'app_status_change', 'im.chat.member.user.added_v1', 'im.chat.member.user.deleted_v1'].map(type => [type, async (data: any) => {
