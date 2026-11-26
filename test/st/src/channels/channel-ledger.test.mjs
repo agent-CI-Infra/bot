@@ -275,7 +275,9 @@ test('HTTP and SDK commit inbox, non-text/quiet/bot messages and sync discovery 
   const sockets = new ChannelConnections(service, () => ({ start: async options => { dispatcher = options.eventDispatcher; }, close() {}, getConnectionStatus: () => ({ state: 'connected' }) }));
   t.after(() => sockets.close()); sockets.reconcile();
   await assert.rejects(dispatcher.invoke(envelope('not-acked'), { needCheck: false }), /fixture disk full/);
-  assert.equal(h.store.get('SELECT count(*) n FROM channel_inbox').n, before);
+  // Nothing of the event is committed; only its failure is recorded (#1399).
+  assert.equal(h.store.get("SELECT count(*) n FROM channel_inbox WHERE state<>'failed'").n, before);
+  assert.equal(h.store.get("SELECT error FROM channel_inbox WHERE state='failed'").error, 'channel_processing_failed');
   h.store.db.exec('DROP TRIGGER ledger_disk_full');
   const accepted = await dispatcher.invoke(envelope('', { message: { message_type: 'file', content: '{"file_key":"file_fixture"}' } }), { needCheck: false });
   assert.equal(accepted.state, 'queued');
@@ -403,10 +405,12 @@ test('official SDK frame ACK is 500 on transaction failure and 200 only after le
     payload: new TextEncoder().encode(JSON.stringify(e)) };
   h.store.db.exec("CREATE TRIGGER frame_disk_full BEFORE INSERT ON channel_messages BEGIN SELECT RAISE(ABORT,'fixture disk full'); END");
   await sdk.handleEventData(frame);
-  assert.equal(replies[0].code, 500); assert.equal(h.store.get('SELECT count(*) n FROM channel_inbox').n, 0);
+  // Only the failure is recorded (#1399), under its own key: the redelivered frame below is still accepted.
+  assert.equal(replies[0].code, 500); assert.equal(h.store.get("SELECT count(*) n FROM channel_inbox WHERE state<>'failed'").n, 0);
+  assert.equal(h.store.get("SELECT count(*) n FROM channel_inbox WHERE state='failed'").n, 1);
   h.store.db.exec('DROP TRIGGER frame_disk_full');
   await sdk.handleEventData(frame);
-  assert.equal(replies[1].code, 200); assert.equal(h.store.get('SELECT count(*) n FROM channel_inbox').n, 1);
+  assert.equal(replies[1].code, 200); assert.equal(h.store.get("SELECT count(*) n FROM channel_inbox WHERE state<>'failed'").n, 1);
   assert.equal(h.store.get('SELECT count(*) n FROM channel_messages').n, 1);
 });
 

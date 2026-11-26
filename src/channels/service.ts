@@ -12,7 +12,7 @@ import { commands } from '../management/catalog.js';
 import { managementAssistant } from '../service-roles/roles.js';
 import { ChannelBindings, externalSubject } from './binding.js';
 import { FeishuAdapter, type ChannelFetch } from './feishu.js';
-import type { ChannelDelivery, ChannelEvent } from './types.js';
+import type { ChannelDelivery, ChannelEvent, StoredMessage } from './types.js';
 import { ChannelLedger } from './ledger.js';
 import { ChannelHistorySync } from './history-sync.js';
 import { ChannelEmployees } from './employees.js';
@@ -49,6 +49,18 @@ export interface GitHubProofs { lapsed(principal: string): boolean; renewIfLapse
 export interface ChannelOptions { origin?: string; fetch?: ChannelFetch; longConnections?: boolean; manager?: Manager; githubUrl?: string; github?: () => GitHubProofs | undefined; }
 // A principal a Feishu turn just checked is not checked again for each of its next messages, whatever the check found.
 const renewalPause = 60_000;
+// How old a message may be and still start a reply, whether it arrived live or was recovered.
+const replyWindow = 300_000;
+// Catch-up for events the live connection lost (#1399): bound groups sync their recent history every minute, and at once after
+// the event loop was blocked long enough for a live event to be lost. Threads have no time bounds, so only those with a
+// message in the last quarter hour sync again.
+const catchUpEvery = 60_000, catchUpStall = 5_000, threadActivity = 15 * 60_000;
+// A message found by a sync is a missed one only between these ages: younger, its live event may still be on the way; older,
+// it is history that was never meant to be answered.
+const recoveryGrace = 30_000, recoveryHorizon = 3600_000;
+const recoveredNote = '这条消息当时没有及时收到，是稍后同步时补收的，所以回复晚了。';
+const field = (value: unknown, key: string): unknown => value && typeof value === 'object' ? (value as Record<string, unknown>)[key] : undefined;
+const label = (value: unknown): string => typeof value === 'string' ? value.slice(0, 200) : '';
 /** Transport replies and authorized destination registration. Durable scheduling lives in schedules/. */
 export class ChannelService {
   readonly bindings: ChannelBindings;
@@ -70,6 +82,8 @@ export class ChannelService {
   private lastCardPrune = 0;
   private timer?: ReturnType<typeof setInterval>;
   private syncTimer?: ReturnType<typeof setInterval>;
+  private lastSyncTick = 0;
+  private nextCatchUp = 0;
   private busy = false;
   private stopped = false;
   constructor(readonly store: Store, readonly management: ManagementAgent, readonly options: ChannelOptions = {}) {
@@ -113,7 +127,7 @@ export class ChannelService {
       const binding = this.serviceBindings.active(row.subject); if (!binding) return null;
       this.serviceBindings.assertUsable(binding); return this.serviceBindings.fence(row.subject);
     });
-    this.historySync = new ChannelHistorySync(store, this.ledger, (c, guard) => this.adapter(c, guard), chat => this.syncGuard(chat));
+    this.historySync = new ChannelHistorySync(store, this.ledger, (c, guard) => this.adapter(c, guard), chat => this.syncGuard(chat), (chat, message) => this.recover(chat, message));
     management.sourceGuard=(actor,conversation,input)=>{
       const source=input?.source_message?.toString().startsWith('feishu:')
         ? store.get('SELECT * FROM channel_inbox WHERE conversation_id=? AND id=?',conversation,String(input.source_message).slice(7))
@@ -244,12 +258,56 @@ export class ChannelService {
   start(): void {
     for (const chat of this.store.all("SELECT h.id FROM channel_chats h JOIN channel_connectors c ON c.id=h.connector_id WHERE h.state='active' AND c.enabled=1 AND c.app_id=h.app_id AND c.installation_tenant=h.installation_tenant")) this.ledger.resync(chat.id);
     this.timer = setInterval(() => { void this.tick(); }, 100); this.timer.unref();
-    this.syncTimer = setInterval(() => {
-      void this.historySync.tick().catch(() => {});
-      void this.employees.tick().catch(() => {});
-      void this.schedules.tick().catch(() => {});
-      if (Date.now() - this.lastCardPrune > 3600_000) { this.lastCardPrune = Date.now(); this.cards.prune(); }
-    }, 1000); this.syncTimer.unref();
+    // The resync above covers start-up, so the first periodic catch-up is a full period away.
+    this.lastSyncTick = Date.now(); this.nextCatchUp = this.lastSyncTick + catchUpEvery;
+    this.syncTimer = setInterval(() => this.syncTick(), 1000); this.syncTimer.unref();
+  }
+  /** The one-second background work. A tick that runs late shows the event loop was blocked, and live events may be lost. */
+  syncTick(now = Date.now()): void {
+    const stalled = now - this.lastSyncTick - 1000 >= catchUpStall; this.lastSyncTick = now;
+    if (stalled || now >= this.nextCatchUp) {
+      this.catchUp(now);
+      // Messages sent while the loop was blocked are still too new to count as missed: look again once they are old enough.
+      this.nextCatchUp = now + (stalled ? recoveryGrace : catchUpEvery);
+    }
+    void this.historySync.tick().catch(() => {});
+    void this.employees.tick().catch(() => {});
+    void this.schedules.tick().catch(() => {});
+    if (now - this.lastCardPrune > 3600_000) { this.lastCardPrune = now; this.cards.prune(); }
+  }
+  /** Schedules the recent-window sync of every bound group, or of one chat if it is one (#1399); the history sync does the rest. */
+  catchUp(now = Date.now(), chat?: string): void {
+    for (const row of this.store.all(`SELECT h.id FROM channel_chats h JOIN channel_connectors c ON c.id=h.connector_id JOIN channel_service_bindings b ON b.chat_id=h.id
+      WHERE h.state='active' AND h.chat_type='group' AND b.enabled=1 AND c.enabled=1 AND c.app_id=h.app_id AND c.installation_tenant=h.installation_tenant${chat ? ' AND h.id=?' : ''}`, ...(chat ? [chat] : [])))
+      this.ledger.catchUp(row.id, now - threadActivity);
+  }
+  /**
+   * A message a history sync found in a bound group (#1399). An @ of the bot from a person that has no inbox row was lost on its
+   * way in: while it is fresh enough for a live reply it is queued as if it had just arrived, with the processing indicator, and
+   * the reply says it is late; an older one is only recorded. The inbox key of the live path makes this happen once per message,
+   * however many syncs see it and whichever of the live event and the sync comes first.
+   */
+  private recover(chat: Row, message: StoredMessage): void {
+    const now = Date.now(), age = now - message.created_at;
+    if (chat.chat_type !== 'group' || message.deleted || message.sender_type !== 'user' || !message.mentions?.some(m => m.is_self)) return;
+    if (age < recoveryGrace || age > recoveryHorizon) return;
+    const c = this.store.get('SELECT * FROM channel_connectors WHERE id=? AND enabled=1', chat.connector_id);
+    if (!c || message.sender_id === c.bot_open_id || !this.serviceBindings.active(chat.id)) return;
+    const key = 'message:' + message.message_id;
+    if (this.store.get('SELECT 1 FROM channel_inbox WHERE dedup_key=? AND (connector_id=? OR chat_ref=?)', key, c.id, chat.id)) return;
+    const event: ChannelEvent = { provider: 'feishu', connector_id: c.id, connector_revision: c.revision, app_id: chat.app_id, installation_tenant: chat.installation_tenant,
+      actor_tenant: message.sender_tenant, actor_id: message.sender_id, chat_id: chat.chat_id, chat_type: 'group', message_id: message.message_id,
+      event_id: 'recovered:' + message.message_id, thread_id: message.thread_id, parent_id: message.parent_id, root_id: message.root_id,
+      created_at: message.created_at, updated_at: message.updated_at, received_at: now, kind: 'message', content: message.content, command_text: message.command_text,
+      mentions: message.mentions, raw_content: message.raw_content, message_type: message.message_type, sender_type: 'user', addressed: true, recovered: true };
+    const fresh = age <= replyWindow, id = randomId();
+    if (!this.store.run('INSERT OR IGNORE INTO channel_inbox(id,connector_id,event_id,dedup_key,payload,state,error,chat_ref,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
+      id, c.id, event.event_id, key, this.store.secrets.seal(event, 'channel-event:' + id), fresh ? 'queued' : 'completed', fresh ? null : 'channel_message_missed', chat.id, now).changes) return;
+    if (fresh) {
+      if (assistantMessage(event)) this.turnMessages.merge(chat.id, this.store.get('SELECT * FROM channel_inbox WHERE id=?', id)!, true);
+      this.store.run("INSERT INTO channel_reactions(source_event,state) VALUES(?,'pending')", id);
+    }
+    console.warn(`[channels] missed message ${message.message_id} in chat ${chat.id} recovered by history sync ${Math.round(age / 1000)} s after it was sent: ${fresh ? 'answering it late' : 'too old to answer'}`);
   }
   close(): void { this.stopped = true; this.schedules.close(); this.reactions.close(); this.serviceSessions.stop(); this.historySync.close(); this.employees.close(); clearInterval(this.timer); clearInterval(this.syncTimer); }
   async drain():Promise<void>{await Promise.allSettled([...this.business.values(),this.reactions.drain(),this.schedules.drain()]);}
@@ -356,9 +414,39 @@ export class ChannelService {
   }
   // Only the authenticated official SDK calls this method. There is no HTTP route for SDK input.
   receiveLongConnection(id: string, envelope: Json): Json {
-    const c = this.connector(id);
-    if (c.transport !== 'websocket' || c.application_type !== 'enterprise') fail(403, 'channel_transport_mismatch');
-    return this.accept(c, envelope);
+    try {
+      const c = this.connector(id);
+      if (c.transport !== 'websocket' || c.application_type !== 'enterprise') fail(403, 'channel_transport_mismatch');
+      return this.accept(c, envelope);
+    } catch (error) {
+      // The SDK only answers Feishu with a failure, so the event would leave no trace here (#1399).
+      this.longConnectionFailed(id, envelope, error);
+      throw error;
+    }
+  }
+  /**
+   * The durable trace of a long-connection event that failed before or while it was accepted (#1399): a failed inbox row with
+   * the event's identifiers and error code but none of its content, under a key of its own so a redelivery or a catch-up of the
+   * same message still goes through. The event's chat, if known, syncs its recent history to find what was lost.
+   */
+  private longConnectionFailed(id: string, envelope: Json, error: unknown): void {
+    const code = errorCode(error), header = field(envelope, 'header'), event = field(envelope, 'event'), message = field(event, 'message');
+    const type = label(field(header, 'event_type') ?? field(event, 'type')) || 'unknown', eventId = label(field(header, 'event_id') ?? field(envelope, 'uuid'));
+    const messageId = label(field(message, 'message_id')), chatId = label(field(message, 'chat_id') ?? field(event, 'chat_id') ?? field(field(event, 'context'), 'open_chat_id'));
+    console.warn(`[channels] long-connection event ${type} failed on connector ${id}: ${code}${eventId ? ' (event ' + eventId + ')' : ''}${messageId ? ' (message ' + messageId + ')' : ''}`);
+    try {
+      const connector = this.store.get('SELECT * FROM channel_connectors WHERE id=?', id);
+      const chat = connector && chatId ? this.store.get("SELECT id FROM channel_chats WHERE app_id=? AND installation_tenant=? AND chat_id=? AND state='active'",
+        connector.app_id, connector.installation_tenant, chatId) : undefined;
+      const row = randomId(), key = 'failed:' + (eventId || row);
+      this.store.transaction(() => {
+        if (!this.store.run("INSERT OR IGNORE INTO channel_inbox(id,connector_id,event_id,dedup_key,payload,state,error,chat_ref,created_at) VALUES(?,?,?,?,?,'failed',?,?,?)",
+          row, id, key, key, this.store.secrets.seal({ kind: 'failed', event_type: type, event_id: eventId, message_id: messageId, chat_id: chatId }, 'channel-event:' + row),
+          code, chat?.id ?? null, Date.now()).changes) this.store.run('UPDATE channel_inbox SET error=? WHERE connector_id=? AND dedup_key=?', code, id, key);
+        if (connector) this.store.run('UPDATE channel_connectors SET last_error=? WHERE id=?', code, id);
+      });
+      if (chat) this.catchUp(Date.now(), chat.id);
+    } catch (failure) { console.error(`[channels] could not record the failed long-connection event on connector ${id}: ${errorCode(failure)}`); }
   }
   private accept(c: Row, data: Json): Json {
     const event = this.adapter(c).normalize(data);
@@ -374,7 +462,7 @@ export class ChannelService {
     const participation=event.chat_type==='group'?this.store.get(`SELECT b.participation FROM channel_service_bindings b JOIN channel_chats h ON h.id=b.chat_id WHERE h.provider=? AND h.app_id=? AND h.installation_tenant=? AND h.chat_id=? AND b.enabled=1`,
       event.provider,event.app_id,event.installation_tenant,event.chat_id)?.participation as string|undefined:undefined;
     const ambient=participation==='all'||participation==='questions'&&asksForHelp(event.content);
-    const actionable = event.kind !== 'message' || (event.addressed||ambient) && event.sender_type === 'user' && Math.abs(Date.now() - event.created_at) <= 300_000;
+    const actionable = event.kind !== 'message' || (event.addressed||ambient) && event.sender_type === 'user' && Math.abs(Date.now() - event.created_at) <= replyWindow;
     // The processing indicator acknowledges a call: a private message, or a group message that @-mentions the bot, in every
     // working mode. A group message without an @ never gets one, even when the assistant follows every message or every
     // question or takes the message into a running turn, so the bot never marks people's conversation.
@@ -834,13 +922,15 @@ export class ChannelService {
       stage:m=>this.queue(e,card(m.text),row.id+':stage:'+m.sequence,row.id,{...protection(m.fence,m.turn_id),stage:m.sequence},false,false,undefined,[],
         m.reply_target?revalidateReplyTarget(this.store,chat.id,m.reply_target,{projects:[bindingScope(binding.id)],fence:m.fence}):undefined)});
     const replyTarget=result.reply_target?revalidateReplyTarget(this.store,chat.id,result.reply_target,{projects:[bindingScope(binding.id)],fence:result.fence}):undefined;
+    // A message recovered after its live event was lost (#1399) is answered late: the answer says so.
+    const late=e.recovered?recoveredNote:undefined;
     this.store.transaction(()=>{
       // An explicit stay_silent (#489) or an empty answer sends nothing.
       const outbox = !result.silent && result.card
         ? this.queueRichCard(e, chat, result.card, row.id + ':business-result', row.id, { ...protection(result.fence, result.id), resource_fence: result.fence },
-            { kind: 'group', id: binding.id, fence: result.fence }, { resources: result.attachments, replyTarget })
+            { kind: 'group', id: binding.id, fence: result.fence }, { resources: result.attachments, replyTarget, footerNote: late })
         : !result.silent && (result.message.trim() || result.attachments?.length)
-          ? this.queue(e, card(result.message), row.id + ':business-result', row.id, { ...protection(result.fence, result.id), resource_fence: result.fence },
+          ? this.queue(e, card(late ? late + '\n\n' + result.message : result.message), row.id + ':business-result', row.id, { ...protection(result.fence, result.id), resource_fence: result.fence },
               false, false, undefined, result.attachments, replyTarget)
           : undefined;
       this.turnMessages.complete(result.id,outbox);

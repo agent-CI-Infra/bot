@@ -51,6 +51,7 @@ flowchart LR
   - 每轮执行绑定授权围栏（绑定版本、角色启停、授权人有效权限、历史清理水位）；群成员变动或普通历史消息编辑不破坏围栏，但当前轮源消息撤回或授权真实失效会立即中止该轮并阻断未发出消息。
 - **本地消息账本与历史同步（`ChannelLedger`）**：
   - 以 `(provider, app_id, installation_tenant, chat_id)` 建唯一会话，原文与资源引用密封保存，实时版本优先于历史补读，撤回 tombstone 不可复活；历史同步按 50 条分页并独立分页拉取 thread，查询只读本地账本不回源飞书。
+  - **漏收补收**：长连接 `receiveLongConnection` 在入库前或入库中抛错时，写一条 `failed` 入站行（独立去重键 `failed:<event_id>`，载荷只有事件类型与各 ID，不阻挡同一事件重投或补收）、更新连接 `last_error`、记一行日志，并立即补同步该会话；SDK 日志只保留 warn/error 的文本（对象不输出，经 `configuredRedactor` 脱敏），debug 级（含事件正文与连接 URL）丢弃。`ChannelService.syncTick` 每秒运行，每 60 秒或计时器滞后 5 秒以上时对已启用群绑定的活跃群调用 `ChannelLedger.catchUp`：已完成的 chat 任务从已覆盖终点前 60 秒增量重读，最近 15 分钟有消息的 thread 任务整段重读，未完成、`blocked`、`paused` 的任务不动。`ChannelHistorySync` 在每页事务内对每条消息调用补收钩子：群内来自用户、`@` 本机器人、发出 30 秒～1 小时、且没有 `message:<id>` 入站行的消息视为漏收；5 分钟内的按实时路径入队（`event_id` 为 `recovered:<id>`，载荷 `recovered: true`，贴处理中表情，最终回复带补收说明），更早的只写 `completed`/`channel_message_missed`。实时路径与补收共用 `message:<id>` 唯一键，先到者生效。完成的同步区间与重叠区间合并为一行并清理该任务已用尽的游标，周期补收不累积行。
   - 会话列表（`GET /api/channels/conversations`）支持按 `connector_id` 过滤，统一在「飞书会话」（`#/conversations`）承接本地消息检索、会话定时任务（`timeline` 返回 `chat.can_view_schedules`，按 `ChannelSchedules.canView` 门控并支持 `?section=schedules` 自动展开）、显式历史重同步与超管按会话保留/清理策略；「个人设置 → 飞书绑定」（`#/identity/feishu`）仅承载个人绑定与群绑定两张列表卡片，并将群配置独立到 `#/identity/feishu/groups/new` 与 `#/identity/feishu/groups/<chat-id>`。
   - 附件按需流式下载（上限 100 MiB），以 AES-256-GCM 密封存于 `channel-resources/` 并校验 SHA-256，与撤回和保留清理级联删除；图片支持原生多模态直传与助手电脑离线处理回读。
 - **回合消息并入、显式回复目标与 Outbox 投递**：

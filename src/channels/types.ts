@@ -14,6 +14,8 @@ export interface ChannelEvent {
   mentions?: ChannelMention[];
   /** Binding commands omit the bot mention; displayed text and model requests retain it. */
   command_text?: string;
+  /** Found by a history sync after its live event was lost (#1399), not received live. */
+  recovered?: boolean;
 }
 export interface ChannelDelivery {
   receive_id: string; receive_id_type: 'chat_id' | 'open_id'; content: Json;

@@ -2,13 +2,15 @@ import type { Row, Store } from '../storage/database.js';
 import { digest, HttpError, randomId } from '../core/security.js';
 import { ChannelHistoryError, ChannelRateLimitError, type FeishuAdapter } from './feishu.js';
 import { ChannelLedger } from './ledger.js';
+import type { StoredMessage } from './types.js';
 
 /** Persistent ingestion jobs have their own leases; they never consume business task execution slots. */
 export class ChannelHistorySync {
   private busy = false;
   private stopped = false;
+  /** `found` sees every message of a page in the page's transaction, so a message the live path lost is picked up (#1399). */
   constructor(readonly store: Store, readonly ledger: ChannelLedger, readonly adapter: (connector: Row, guard: () => void) => FeishuAdapter,
-    readonly sourceGuard: (chat: Row) => void = () => {}) {}
+    readonly sourceGuard: (chat: Row) => void = () => {}, readonly found: (chat: Row, message: StoredMessage) => void = () => {}) {}
   close(): void { this.stopped = true; }
   private claim(id: string, now: number): Row | undefined {
     return this.store.transaction(() => {
@@ -57,9 +59,18 @@ export class ChannelHistorySync {
             // Explicit retention cleanup can commit while history() is awaiting HTTP.
             // Use the boundary in this transaction, never the pre-request snapshot.
             const currentChat = this.store.get('SELECT * FROM channel_chats WHERE id=?', chat.id)!;
-            for (const message of page.items) this.ledger.merge(currentChat, message, 'history');
+            for (const message of page.items) { this.ledger.merge(currentChat, message, 'history'); this.found(currentChat, message); }
             if (page.has_more) this.store.run('INSERT INTO channel_sync_cursors VALUES(?,?,?)', job.id, job.generation, digest(page.page_token));
-            else this.store.run('INSERT INTO channel_sync_ranges VALUES(?,?,?,?)', job.id, job.generation, job.start_time, job.end_time);
+            else {
+              // Ranges that overlap the finished one merge into a single row, and its cursors are spent: a catch-up every
+              // minute (#1399) adds no rows per run.
+              const span = this.store.get('SELECT min(start_time) start,max(end_time) end FROM channel_sync_ranges WHERE job_id=? AND start_time<=? AND end_time>=?',
+                job.id, job.end_time, job.start_time)!;
+              this.store.run('DELETE FROM channel_sync_ranges WHERE job_id=? AND start_time<=? AND end_time>=?', job.id, job.end_time, job.start_time);
+              this.store.run('INSERT INTO channel_sync_ranges VALUES(?,?,?,?)', job.id, job.generation,
+                Math.min(job.start_time, span.start ?? job.start_time), Math.max(job.end_time, span.end ?? job.end_time));
+              this.store.run('DELETE FROM channel_sync_cursors WHERE job_id=? AND generation<=?', job.id, job.generation);
+            }
             // Message writes and cursor advancement either both commit, or both roll back.
             this.store.run(`UPDATE channel_sync_jobs SET state=?,page_token=?,covered_until=?,pages=pages+1,messages=messages+?,
               attempts=0,last_error=NULL,next_attempt=0,lease_token=NULL,lease_until=0,updated_at=? WHERE id=? AND lease_token=?`,

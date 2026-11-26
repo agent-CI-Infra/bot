@@ -174,6 +174,23 @@ export class ChannelLedger {
       }
     });
   }
+  /**
+   * Catch-up for events the live connection lost (#1399): the chat's finished job syncs again from just before the end it
+   * covered, and so does each finished thread with a message since `since` (threads have no time bounds). Jobs still running,
+   * blocked or paused are left alone, so a permanent history error is not retried on every catch-up.
+   */
+  catchUp(id: string, since: number): void {
+    const chat = this.store.get("SELECT * FROM channel_chats WHERE id=? AND state='active'", id);
+    if (!chat) return;
+    this.store.transaction(() => {
+      this.schedule(chat, 'chat', chat.chat_id);
+      const jobs = this.store.all(`SELECT * FROM channel_sync_jobs WHERE chat_id=? AND state='complete' AND (container_type='chat' OR container_id IN
+        (SELECT thread_id FROM channel_messages WHERE chat_id=? AND thread_id<>'' AND created_at>=?))`, id, id, since);
+      for (const job of jobs) this.store.run(`UPDATE channel_sync_jobs SET state='pending',page_token='',start_time=?,end_time=?,generation=generation+1,
+        pages=0,messages=0,attempts=0,next_attempt=0,last_error=NULL,lease_token=NULL,lease_until=0,updated_at=? WHERE id=?`,
+        job.container_type === 'chat' ? Math.max(0, job.covered_until - 60) : 0, Math.ceil(Date.now() / 1000), Date.now(), job.id);
+    });
+  }
   diagnostics(id: string): Json {
     const chat = this.store.get('SELECT * FROM channel_chats WHERE id=?', id);
     if (!chat) return fail(404, 'channel_chat_not_found');
