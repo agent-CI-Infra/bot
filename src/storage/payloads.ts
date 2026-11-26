@@ -1,6 +1,6 @@
 import { configuredRedactor } from '../core/redaction.js';
 import type { Row, Store } from './database.js';
-import { parseRef, payloadHeader, TrajectoryError, type TrajectoryScope } from './trajectories.js';
+import { parseRef, payloadHeader, TrajectoryError, type RecordType, type TrajectoryScope } from './trajectories.js';
 import { currentRunTrace, traceSnapshot } from '../tasks/trace.js';
 import { randomId } from '../core/security.js';
 
@@ -114,14 +114,16 @@ export function runSnapshot(store: Store, stored: string): string {
  * The text a task_runs snapshot column is stored as. text is a snapshot as traceSnapshot wrote it (JSON that serializes
  * back to the same text). A large one is appended to scope's file as an event record, unless `same` — the column of an
  * earlier run of the task — refers to a record of an identical snapshot (same sha256 and size) that has not expired:
- * a run started on unchanged context then shares that record instead of writing it again.
+ * a run started on unchanged context then shares that record instead of writing it again. append writes the record;
+ * the background migration passes its own, which keeps the number of files it holds open bounded.
  */
-export function storedRunSnapshot(store: Store, scope: TrajectoryScope | null, id: string, text: string, same?: unknown): string {
+export function storedRunSnapshot(store: Store, scope: TrajectoryScope | null, id: string, text: string, same?: unknown,
+  append: (scope: TrajectoryScope, type: RecordType, id: string, data: unknown) => string = (...args) => store.trajectories.append(...args)): string {
   if (!scope || Buffer.byteLength(text) <= inlineSnapshotBytes) return text;
   const snapshot = JSON.parse(text), earlier = runSnapshotHeader(same);
   let reuse = !!earlier && typeof snapshot?.sha256 === 'string' && earlier.sha256 === snapshot.sha256 && earlier.original_bytes === snapshot.original_bytes;
   try { reuse &&= !!store.get('SELECT 1 FROM trajectory_files WHERE id=? AND expired_at IS NULL', parseRef(earlier!.$trajectory).file); } catch { reuse = false; }
-  const header: Record<string, unknown> = { $trajectory: reuse ? earlier!.$trajectory : store.trajectories.append(scope, 'event', id, snapshot) };
+  const header: Record<string, unknown> = { $trajectory: reuse ? earlier!.$trajectory : append(scope, 'event', id, snapshot) };
   if (snapshot && typeof snapshot === 'object') for (const key of snapshotHeaderKeys) if (key in snapshot) header[key] = snapshot[key];
   return JSON.stringify(header);
 }
