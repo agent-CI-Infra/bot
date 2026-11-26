@@ -252,22 +252,10 @@ function unfinishedWorkspacesState(store: Store, repo: string, unfinishedIds: st
     }
   }
   if (store.hasTable('task_history')) {
-    for (const id of unfinishedIds) {
-      if (decidedTasks.has(id)) continue;
+    // The newest checkout of each role, unless it belongs to an earlier review round.
+    for (const [id, roles] of roleCandidates(store, unfinishedIds.filter(id => !decidedTasks.has(id)))) {
       const cutoff = roundCutoff.get(id);
-      const rows = store.all(
-        `SELECT json_extract(data,'$.role') AS role,
-           json_extract(data,'$.workspace_id') AS ws,
-           json_extract(data,'$.worktree_id') AS wt,
-           created_at
-         FROM task_history WHERE task_id=? AND type='role_candidate' ORDER BY id DESC`,
-        id,
-      );
-      const seenRoles = new Set<string>();
-      for (const row of rows) {
-        const roleKey = String(row.role ?? '');
-        if (seenRoles.has(roleKey)) continue;
-        seenRoles.add(roleKey);
+      for (const row of roles.values()) {
         if (!cutoff || !row.created_at || String(row.created_at) > cutoff) {
           addId(keep, id, row.ws);
           addId(keep, id, row.wt);
@@ -276,6 +264,75 @@ function unfinishedWorkspacesState(store: Store, repo: string, unfinishedIds: st
     }
   }
   return { keep, bindingTracked, roundCutoff };
+}
+
+/*
+ * The newest role_candidate of each role of a task: the checkout its role runs were given (src/roles/workspace.ts).
+ * No index covers task_id with type, so `task_id=? AND type='role_candidate'` read every history row of the task: up to
+ * 8 s for one long task in production, and the storage refresh every five minutes held the thread for over a minute
+ * (#1398). A task's candidates are read once through the indexes there are: its runs from task_history_run (index
+ * only), each run's candidates from task_history_run_type, and its rows without a run. After that only the rows added
+ * since are read, a rowid range at the end of the table: ids only grow (AUTOINCREMENT), and a role_candidate row is
+ * never rewritten (the payload migration moves only operation and runtime_log bodies).
+ */
+interface RoleCandidate { id: number; ws: unknown; wt: unknown; created_at: unknown }
+interface CandidateCache { readTo: number; primed: boolean; tasks: Map<string, Map<string, RoleCandidate>> }
+const candidateCaches = new WeakMap<Store, CandidateCache>();
+const candidateColumns = `id,task_id,json_extract(data,'$.role') AS role,json_extract(data,'$.workspace_id') AS ws,json_extract(data,'$.worktree_id') AS wt,created_at`;
+const noteCandidate = (roles: Map<string, RoleCandidate>, row: Row) => {
+  const role = String(row.role ?? ''), id = Number(row.id);
+  if ((roles.get(role)?.id ?? -1) < id) roles.set(role, { id, ws: row.ws, wt: row.wt, created_at: row.created_at });
+};
+
+function roleCandidates(store: Store, ids: string[]): Map<string, Map<string, RoleCandidate>> {
+  const top = Number(store.get('SELECT max(id) AS id FROM task_history')?.id ?? 0);
+  let cache = candidateCaches.get(store);
+  if (!cache) candidateCaches.set(store, cache = { readTo: top, primed: false, tasks: new Map() });
+  if (top > cache.readTo) {
+    for (const row of store.all(`SELECT ${candidateColumns} FROM task_history WHERE id>? AND type='role_candidate'`, cache.readTo)) {
+      const roles = cache.tasks.get(String(row.task_id));
+      if (roles) noteCandidate(roles, row);
+    }
+    cache.readTo = top;
+  }
+  const missing = [...new Set(ids)].filter(id => !cache.tasks.has(id));
+  if (missing.length) {
+    const list = JSON.stringify(missing);
+    const runs = store.all('SELECT DISTINCT run_id FROM task_history WHERE task_id IN (SELECT value FROM json_each(?)) AND run_id IS NOT NULL', list).map(row => row.run_id);
+    const rows = [
+      ...runs.length ? store.all(`SELECT ${candidateColumns} FROM task_history INDEXED BY task_history_run_type
+        WHERE run_id IN (SELECT value FROM json_each(?)) AND type='role_candidate' AND task_id IN (SELECT value FROM json_each(?))`, JSON.stringify(runs), list) : [],
+      ...store.all(`SELECT ${candidateColumns} FROM task_history INDEXED BY task_history_run
+        WHERE task_id IN (SELECT value FROM json_each(?)) AND run_id IS NULL AND type='role_candidate'`, list),
+    ];
+    for (const id of missing) cache.tasks.set(id, new Map());
+    for (const row of rows) noteCandidate(cache.tasks.get(String(row.task_id))!, row);
+  }
+  const result = new Map<string, Map<string, RoleCandidate>>();
+  for (const id of ids) {
+    // Used last goes last; past the bound, the tasks no one asked about for longest are dropped (read again if asked).
+    const roles = cache.tasks.get(id)!;
+    cache.tasks.delete(id); cache.tasks.set(id, roles); result.set(id, roles);
+  }
+  while (cache.tasks.size > 10_000) cache.tasks.delete(cache.tasks.keys().next().value!);
+  return result;
+}
+
+/**
+ * Reads the role checkouts of the unfinished tasks holding directories one task at a time, yielding between them, so the
+ * first storage refresh or sweep after a start does not read them all in one block (#1398). Once per store.
+ */
+export async function primeRoleCandidates(store: Store): Promise<void> {
+  if (!store.hasTable('task_history') || candidateCaches.get(store)?.primed) return;
+  const ids = store.all(`SELECT DISTINCT tw.task_id FROM task_workspaces tw JOIN tasks t ON t.id=tw.task_id
+    WHERE tw.released_at IS NULL AND tw.task_id<>'' AND t.status NOT IN ${ended}`).map(row => String(row.task_id));
+  roleCandidates(store, []);
+  for (const id of ids) {
+    if (candidateCaches.get(store)!.tasks.has(id)) continue;
+    roleCandidates(store, [id]);
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  candidateCaches.get(store)!.primed = true;
 }
 
 /**
@@ -429,6 +486,7 @@ export class WorkspaceCleanup {
   private async sweep() {
     const total = { count: 0, bytes: 0, failed: 0 };
     await recoverRecords(this.store);
+    await primeRoleCandidates(this.store);
     for (const { id } of this.store.all('SELECT r.id FROM repositories r JOIN policies p ON p.repository_id=r.id ORDER BY r.id')) {
       if (this.closing) { total.failed++; break; }
       if (this.options.skip?.(id)) continue;

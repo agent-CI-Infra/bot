@@ -312,3 +312,38 @@ test('bot PR wake facts read the PR’s own events and tasks, never the reposito
   assert.match(legacyPlan, /SEARCH t USING INDEX board_task_(?:object|latest|cover) \(repository_id=\?\)/, legacyPlan);
   assert.match(legacyPlan, /SEARCH e USING INDEX dispatch_events_object \(repository_id=\?\)/, legacyPlan);
 });
+
+// Production (#1398): the storage refresh (every five minutes) and the hourly sweep read each unfinished task's role
+// checkouts with task_id=? AND type='role_candidate', which no index covers, so every history row of the task was read:
+// 0.1-8 s per task, 66 s for one refresh. A task's candidates are now read once through indexes, then only the rows
+// added since, by rowid.
+test('role checkouts of unfinished tasks are read through indexes, never by walking a task history', async t => {
+  const { unfinishedTaskWorkspaces } = await import('../../../../dist/projects/workspace-cleanup.js');
+  const store = new Store(':memory:', Buffer.alloc(32, 3)); t.after(() => store.close());
+  store.db.exec('PRAGMA foreign_keys=OFF');
+  const now = new Date().toISOString(), ws = 'a'.repeat(48);
+  store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,created_at,updated_at,workspace_id) VALUES('task','101','task.request','running','','{}',?,?,?)", now, now, ws);
+  store.run("INSERT INTO task_workspaces(repository_id,workspace_id,task_id,kind,created_at) VALUES('101',?,'task','task',?)", ws, now);
+  const candidate = runId => store.run("INSERT INTO task_history(task_id,type,data,created_at,run_id) VALUES('task','role_candidate',?,?,?)", JSON.stringify({ role: 'developer', workspace_id: ws }), now, runId);
+  candidate('run-1'); candidate(null);
+  const seen = [], all = store.all.bind(store), get = store.get.bind(store);
+  store.all = (sql, ...args) => { seen.push(sql); return all(sql, ...args); };
+  store.get = (sql, ...args) => { seen.push(sql); return get(sql, ...args); };
+  unfinishedTaskWorkspaces(store, '101');
+  candidate('run-2');
+  unfinishedTaskWorkspaces(store, '101');
+  store.all = all; store.get = get;
+  const plans = [...new Set(seen.filter(sql => /\bFROM task_history\b/.test(sql)))]
+    .map(sql => store.all('EXPLAIN QUERY PLAN ' + sql).map(row => row.detail).join(' | '));
+  for (const plan of plans) {
+    assert.doesNotMatch(plan, /\bSCAN task_history\b(?! USING)/, plan);
+    // Seeking by task_id alone reads each of the task's rows to compare its type.
+    assert.doesNotMatch(plan, /SEARCH task_history USING INDEX task_history_run \(task_id=\?\)/, plan);
+  }
+  for (const expected of [
+    /SEARCH task_history USING COVERING INDEX task_history_run \(task_id=\? AND run_id>\?\)/, // the task's runs
+    /SEARCH task_history USING INDEX task_history_run_type \(run_id=\? AND type=\?\)/, // their candidates
+    /SEARCH task_history USING INDEX task_history_run \(task_id=\? AND run_id=\?\)/, // its rows without a run
+    /SEARCH task_history USING INTEGER PRIMARY KEY \(rowid>\?\)/, // the rows added since
+  ]) assert.ok(plans.some(plan => expected.test(plan)), `${expected}\n${plans.join('\n')}`);
+});

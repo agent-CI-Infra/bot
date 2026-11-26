@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { Store } from '../../../../dist/storage/database.js';
-import { WorkspaceCleanup, useWorkspace, workspaceRemoving, unfinishedTaskWorkspaces } from '../../../../dist/projects/workspace-cleanup.js';
+import { WorkspaceCleanup, useWorkspace, workspaceRemoving, unfinishedTaskWorkspaces, removableWorkspaces, primeRoleCandidates } from '../../../../dist/projects/workspace-cleanup.js';
 import { reviewObjectState } from '../../../../dist/review/sessions.js';
 import { listTaskDirectories, removeTaskDirectories } from '../../../../runner/task-dirs.mjs';
 import { Workspace } from '../../../../dist/agent/workspace.js';
@@ -313,6 +313,58 @@ test('#1268 pending retry/recovery/integration and undecided role_candidate keep
   await f.sweep();
   assert.deepEqual(f.left(), sorted(ownWs, recoveryWs, integrationWs, devCandWs));
   assert.deepEqual(f.released(roleCandWs).map(row => row.release_reason), ['superseded_attempt']);
+});
+
+// #1398: a task's role checkouts are read once through indexes, then only from the rows added since. What stays is what
+// reading the whole history each time kept: the newest checkout of each role, whether its row has a run or not.
+test('#1398 role checkouts read once and then from new rows keep the newest checkout of each role', async t => {
+  const f = fixture(t), old = 3 * hour;
+  const kept = names => {
+    const planned = new Set(removableWorkspaces(f.store, '101', names.map(name => ({ name, active_at: Date.now() - old }))).map(entry => entry.name));
+    return names.filter(name => !planned.has(name)).sort();
+  };
+  const owned = (task, count) => Array.from({ length: count }, () => {
+    const name = f.directory(old);
+    useWorkspace(f.store, { id: task.id, repository_id: '101', kind: 'development.issue', object_number: 1, workspace_id: name }, 'task', Date.now() - old);
+    return name;
+  });
+  const history = (task, type, data, runId) => f.store.run('INSERT INTO task_history(task_id,type,data,created_at,run_id) VALUES(?,?,?,?,?)',
+    task.id, type, JSON.stringify(data), iso(Date.now() - old), runId);
+  const a = f.task('running', { age: old, kind: 'development.issue' }), b = f.task('waiting_pr_head', { age: old, kind: 'development.issue', number: 2 });
+  const [a1, a2, a3, a4, aWorktree] = owned(a, 5), [b1] = owned(b, 1);
+  history(a, 'role_candidate', { role: 'developer', workspace_id: a1 }, 'run-1');
+  for (let i = 0; i < 30; i++) history(a, 'tool_observation', { i }, i % 3 ? `run-${i % 4}` : null);
+  history(a, 'role_candidate', { role: 'developer', workspace_id: a2 }, 'run-2');
+  history(a, 'role_candidate', { role: 'qa', workspace_id: a3, worktree_id: aWorktree }, null);
+  history(b, 'role_candidate', { role: 'reviewer', workspace_id: b1 }, 'run-9');
+
+  // Only a's directories are listed: b is not read yet.
+  assert.deepEqual(kept([a.workspace, a1, a2, a3, a4, aWorktree]), sorted(a.workspace, a2, a3, aWorktree));
+  // A newer developer checkout replaces a2; b, whose candidate was written before a was read, is read in full when listed.
+  history(a, 'role_candidate', { role: 'developer', workspace_id: a4 }, 'run-3');
+  history(b, 'tool_observation', {}, 'run-9');
+  assert.deepEqual(kept([a.workspace, a1, a2, a3, a4, aWorktree]), sorted(a.workspace, a3, a4, aWorktree));
+  assert.deepEqual(kept([b.workspace, b1]), sorted(b.workspace, b1));
+  // The summary on the storage page agrees.
+  const summary = unfinishedTaskWorkspaces(f.store, '101');
+  assert.deepEqual(summary.map(({ task_id, active, releasable }) => [task_id, active, releasable]).sort(),
+    [[a.id, 4, 2], [b.id, 2, 0]].sort());
+});
+
+test('#1398 the first read of role checkouts after a start goes one task at a time, yielding between tasks', async t => {
+  const f = fixture(t), tasks = [f.task('running'), f.task('queued')], order = [], all = f.store.all.bind(f.store);
+  for (const task of tasks) f.store.run("INSERT INTO task_history(task_id,type,data,created_at) VALUES(?,'role_candidate',?,?)", task.id, JSON.stringify({ role: 'developer', workspace_id: task.workspace }), iso(Date.now()));
+  f.store.all = (sql, ...args) => {
+    if (/SELECT DISTINCT run_id FROM task_history/.test(sql)) { order.push(`read ${JSON.parse(args[0]).length}`); setImmediate(() => order.push('turn')); }
+    return all(sql, ...args);
+  };
+  await primeRoleCandidates(f.store);
+  assert.deepEqual(order, ['read 1', 'turn', 'read 1', 'turn']);
+  order.length = 0;
+  await primeRoleCandidates(f.store);
+  const summary = unfinishedTaskWorkspaces(f.store, '101');
+  assert.deepEqual(order, [], 'everything was read already');
+  assert.deepEqual(summary.map(row => row.active), [1, 1]);
 });
 
 test('#1268 multi-round review in round 2 releases round 1 workspace as superseded_round', async t => {

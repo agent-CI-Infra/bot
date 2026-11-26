@@ -39,7 +39,7 @@ flowchart LR
   - 只读任务优先复用同提交、无改动的就绪 worktree（保留 `.gitignore` 忽略的依赖和构建缓存）；
   - 写任务始终独占新建 worktree；观察者与独立 QA 各自绑定停在候选提交上的只读 worktree；
   - 写索引前自动检测并清理超过 10 秒且无活跃 git 进程持有的残留 `*.lock`。
-- **定期回收**：每小时按任务生命周期清理 `/workspace/tasks` 与 `/workspace/worktrees`：未结束任务仅保留当前 `workspace_id`、未释放的 `worktree_bindings`、当前代次可续接的角色实例/CLI 状态目录、待恢复/集成来源目录、未决候选快照目录、未结束后续任务的父目录及 30 分钟内活跃目录，旧尝试（`superseded_attempt`）与已发布旧检视轮次（`superseded_round`）的目录在下一次清理释放并按原因统计；开放 PR 关联工作区保留至合并/关闭后下一轮清理，已结束任务默认保留 1 天、失败保留 7 天。存储页同时列出每个未结束任务当前持有的目录数，便于及时发现异常增长。
+- **定期回收**：每小时按任务生命周期清理 `/workspace/tasks` 与 `/workspace/worktrees`：未结束任务仅保留当前 `workspace_id`、未释放的 `worktree_bindings`、当前代次可续接的角色实例/CLI 状态目录、待恢复/集成来源目录、未决候选快照目录、未结束后续任务的父目录及 30 分钟内活跃目录，旧尝试（`superseded_attempt`）与已发布旧检视轮次（`superseded_round`）的目录在下一次清理释放并按原因统计；开放 PR 关联工作区保留至合并/关闭后下一轮清理，已结束任务默认保留 1 天、失败保留 7 天。存储页同时列出每个未结束任务当前持有的目录数，便于及时发现异常增长。每个角色最新的检出快照（`role_candidate`）不按 `task_id`+`type` 逐行回表扫描任务全部历史：每个任务只在首次经现有索引读取一次（`task_history_run` 取其 run，`task_history_run_type` 按 run 取候选，另读无 run 的行），此后只按 rowid 读表尾新增行；启动后首次存储页刷新或清理逐任务预热并让出事件循环，存储页刷新在项目之间也让出。
 
 ## 4. 项目知识自由文件与版本引擎（`src/memory/`、`manager/file-tree.mjs`）
 
