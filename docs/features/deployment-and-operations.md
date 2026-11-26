@@ -208,6 +208,7 @@ node scripts/install-acp-product.mjs select --product workswarm --version 0.2.9
 - **数据库索引、候选大载荷外置与通道保护**：
   - 升级启动后控制面自动补齐 `task_runs` 的 `operation_id`、`(lease_scope, status)` 与 `role_instance_id` 索引，避免任务量增长后出现高频 `[slow-sql]` 全表扫描；
   - `development_candidates` 中超过 2 KiB 的文件列表（`files`、`snapshot_files`、`skipped_files`）自动去重外置到 `bot-data` 的共享 `blobs/` 目录，后台迁移会自动瘦身存量旧行，且 PR 发布确认后自动剥离内联 base64 正文（不影响其他任务共享的内容寻址 blob）；
+  - 每次运行的上下文与配置快照超过 2 KiB 时写入运行轨迹文件，数据库只留表头和定位串；升级后后台迁移分批搬出存量旧行（存储页「历史数据迁移」中的 `task_runs` 行显示进度）。搬出的空间要等数据库压缩后才还给磁盘；
   - 验收预检自动按真实字节数跳过 >256 KiB 文件与二进制文件，`workspace_read` 对 >1 MiB 文件返回首尾预览与容器内可读路径（同时保留 manager 对 Docker API 的默认 4 MiB 响应上限保护）。
 - **孤儿笔记卷与 `/readyz` 自愈**：删除仓库后若遗留仍挂载 `-notes` 卷的本部署已停止孤儿容器，manager 会在 `reclaimNotes`、`reclaimStaleNotes`（重连/读笔记/重启前）及项目删除流程中按容器实际挂载自动清理这些已停止容器与对应代次网络/资源后再删除笔记卷，使 `/readyz` 自动恢复 200；若仍有运行中容器挂载该卷，会拒绝误删并返回 `409 notes_volume_in_use`（`/readyz` 保持告警直到人为处理或容器停止）。
 - **服务日志与健康检查**：

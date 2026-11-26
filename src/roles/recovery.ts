@@ -1,4 +1,5 @@
-import { operationResult } from '../storage/payloads.js';
+import { operationResult, runSnapshot } from '../storage/payloads.js';
+import { TrajectoryError } from '../storage/trajectories.js';
 import type {Store,Row} from '../storage/database.js';
 import {TaskRecords} from '../tasks/service.js';
 /** Upgrade recovery for a role run stopped before its first explicit checkpoint.
@@ -6,7 +7,9 @@ import {TaskRecords} from '../tasks/service.js';
 export function recoverRoleCheckpoint(s:Store,task:Row,base:string){
  const input=JSON.parse(s.get('SELECT input FROM tasks WHERE id=?',task.id)!.input);if(input.recovery)return;
  const run=s.get("SELECT context_snapshot,revision FROM task_runs WHERE task_id=? AND role='dev' ORDER BY rowid DESC LIMIT 1",task.id);if(!run)return;
- const context=JSON.parse(run.context_snapshot),records=new TaskRecords(s);
+ // A snapshot whose trajectory record cannot be read proves nothing about the run's baseline: no reconciliation.
+ let context:any;try{context=JSON.parse(runSnapshot(s,run.context_snapshot));}catch(error){if(error instanceof TrajectoryError)return;throw error;}
+ const records=new TaskRecords(s);
  if(!context.complete||context.data?.source_sha!==base||run.revision!==records.get(task.id).revision)return;
  const stopped=s.get("SELECT content FROM task_logs WHERE task_id=? AND json_valid(content) AND json_extract(content,'$.type')='restart_attempt' ORDER BY rowid DESC LIMIT 1",task.id);if(!stopped)return;
  const workspace=JSON.parse(stopped.content).preserved_workspace;if(!workspace||workspace===task.workspace_id)return;
