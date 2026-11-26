@@ -457,8 +457,14 @@ for (const mode of ['cancel', 'close', 'timeout', 'revoked', 'lease expires', 'f
       const session = roleHarness(id).createSession({ ...f.spec, cancelSignal: controller.signal }, {});
       t.after(() => session.close());
       const task = session.send('hold');
-      task.catch(() => {});
-      await waitFor(() => f.runs().some(run => existsSync(join(run, 'prompt.json'))));
+      let settled = false;
+      const markSettled = () => { settled = true; };
+      task.then(markSettled, markSettled);
+      await waitFor(() => settled || f.runs().some(run => existsSync(join(run, 'prompt.json'))));
+      if (settled) {
+        await task; // Surface the original send error before attempting to interrupt the fixture.
+        assert.fail('ACP hold prompt completed before interruption');
+      }
       if (mode === 'cancel') await session.cancel();
       else if (mode === 'close') await session.close();
       else if (mode === 'timeout') controller.abort(new TaskError('role_budget_exhausted', 'waiting_configuration'));
