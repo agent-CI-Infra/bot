@@ -8,6 +8,7 @@ import { Store } from '../../../../dist/storage/database.js';
 import { Workspace } from '../../../../dist/agent/workspace.js';
 import { operationId, Redactor } from '../../../../dist/agent/common.js';
 import { PayloadMigration, migrationKey } from '../../../../dist/storage/migration.js';
+import { TrajectoryError } from '../../../../dist/storage/trajectories.js';
 import { blobValue, logContent, modelSnapshot, operationRequestText, operationResult } from '../../../../dist/storage/payloads.js';
 import { taskTrace, traceSnapshot, traceSource } from '../../../../dist/tasks/trace.js';
 
@@ -249,6 +250,28 @@ test('a row that runs out of descriptors is moved after a pause instead of being
   const state = finished(store);
   assert.equal(state.phases.task_runs.failed, 0); assert.equal(state.phases.task_runs.migrated, 6);
   assert.match(store.get("SELECT context_snapshot FROM task_runs WHERE id='task-1-run-0'").context_snapshot, /^\{"\$trajectory":/);
+  assert.deepEqual(view(store), before);
+});
+
+test('a slice whose read-back runs out of descriptors is read again instead of failing its rows', async t => {
+  const store = open(t, database(t)); legacy(store, { tasks: 2, operations: 1 });
+  const before = view(store), read = store.trajectories.read.bind(store.trajectories);
+  // A file that cannot be opened is reported as truncated, with the file system error as its cause: that cause is what
+  // tells running out of descriptors apart from a missing file.
+  const probe = open(t, ':memory:'), scope = { key: 'probe', path: 'probe/file', repository_id: null, task_id: null, run_id: null, conversation_id: null, turn_id: null };
+  const ref = probe.trajectories.append(scope, 'event', 'probe', {}); probe.trajectories.close('probe'); await probe.trajectories.settle();
+  rmSync(join(probe.trajectories.root, 'probe/file.jsonl'));
+  assert.throws(() => probe.trajectories.read(ref), error => error instanceof TrajectoryError && error.code === 'trajectory_truncated' && error.cause?.code === 'ENOENT');
+  assert.throws(() => probe.trajectories.getBlob('f'.repeat(64)), error => error instanceof TrajectoryError && error.cause?.code === 'ENOENT');
+  let thrown = 0;
+  t.mock.method(store.trajectories, 'read', ref => {
+    if (!thrown) { thrown++; throw new TrajectoryError('trajectory_truncated', 'file is missing', { cause: Object.assign(new Error('EMFILE: too many open files'), { code: 'EMFILE' }) }); }
+    return read(ref);
+  });
+  await migrate(store, { exhaustedMs: 5, log: () => {} });
+  assert.equal(thrown, 1);
+  const state = finished(store);
+  assert.equal(state.phases.task_runs.failed, 0); assert.equal(state.phases.task_runs.migrated, 6);
   assert.deepEqual(view(store), before);
 });
 

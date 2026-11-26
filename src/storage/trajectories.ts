@@ -29,8 +29,9 @@ export interface TrajectoryScope {
 }
 
 export class TrajectoryError extends Error {
-  constructor(readonly code: 'trajectory_corrupt' | 'trajectory_truncated' | 'trajectory_missing' | 'trajectory_ref_invalid' | 'trajectory_expired', readonly detail: string) {
-    super(code + ': ' + detail);
+  /** cause: the file system error behind a file that could not be opened (ENOENT, or EMFILE while out of descriptors). */
+  constructor(readonly code: 'trajectory_corrupt' | 'trajectory_truncated' | 'trajectory_missing' | 'trajectory_ref_invalid' | 'trajectory_expired', readonly detail: string, options?: { cause?: unknown }) {
+    super(code + ': ' + detail, options);
   }
 }
 
@@ -205,7 +206,7 @@ export class Trajectories {
     const path = this.pathOf(file), buffer = Buffer.alloc(length + 1);
     let fd: number;
     try { fd = openSync(join(this.root, path), 'r'); }
-    catch { throw new TrajectoryError('trajectory_truncated', `${path}: file is missing`); }
+    catch (error) { throw new TrajectoryError('trajectory_truncated', `${path}: file is missing`, { cause: error }); }
     try {
       const read = readSync(fd, buffer, 0, length + 1, offset);
       if (read < length + 1) throw new TrajectoryError('trajectory_truncated', `${path}: ends before offset ${offset + length + 1}`);
@@ -271,7 +272,7 @@ export class Trajectories {
   getBlob(hash: string): unknown {
     if (!/^[a-f0-9]{64}$/.test(hash)) throw new TrajectoryError('trajectory_ref_invalid', String(hash).slice(0, 80));
     let data: Buffer;
-    try { data = readFileSync(this.blobPath(hash)); } catch { throw new TrajectoryError('trajectory_truncated', `blob ${hash} is missing`); }
+    try { data = readFileSync(this.blobPath(hash)); } catch (error) { throw new TrajectoryError('trajectory_truncated', `blob ${hash} is missing`, { cause: error }); }
     if (sha256(data) !== hash) throw new TrajectoryError('trajectory_corrupt', `blob ${hash} does not match its hash`);
     return JSON.parse(data.toString('utf8'));
   }

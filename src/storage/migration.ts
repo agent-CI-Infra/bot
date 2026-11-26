@@ -12,8 +12,14 @@ import { createHash } from 'node:crypto';
 // which every reader falls back to, so readers return the same content before and after.
 
 const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
-/** The process ran out of descriptors or memory: no fault of the row being moved, which is read again later. */
-const exhausted = (error: unknown) => ['EMFILE', 'ENFILE', 'ENOMEM'].includes(String((error as { code?: unknown } | null)?.code));
+/**
+ * The process ran out of descriptors or memory: no fault of the row being moved, which is read again later. A record
+ * read back reports a file it could not open as a TrajectoryError whose cause holds the file system error.
+ */
+const exhausted = (error: unknown): boolean => {
+  const value = error as { code?: unknown; cause?: unknown } | null;
+  return ['EMFILE', 'ENFILE', 'ENOMEM'].includes(String(value?.code)) || (!!value?.cause && exhausted(value.cause));
+};
 export const migrationKey = 'trajectory_migration';
 
 export interface PhaseState { cursor: number; migrated: number; skipped: number; failed: number; bytes: number; last_error: string | null; finished_at: string | null }
