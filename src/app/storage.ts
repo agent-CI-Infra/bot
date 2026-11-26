@@ -11,7 +11,7 @@ import { diskState } from '../storage/disk.js';
 import { storageFootprint, type Footprint, type Category } from '../../manager/storage-footprint.mjs';
 import { machineSample, storageOverview, type MachineSample } from '../storage/overview.js';
 import { ManualReclaim } from '../storage/reclaim.js';
-import { noteTaskUsage, unfinishedTaskWorkspaces, workspaceClasses } from '../projects/workspace-cleanup.js';
+import { noteTaskUsage, primeRoleCandidates, unfinishedTaskWorkspaces, workspaceClasses } from '../projects/workspace-cleanup.js';
 import { projectToolsQuotaBytes } from '../projects/tools.js';
 
 // The storage page (#436, #671): every kind of storage the bot uses. Per project, what its trajectory files, records and
@@ -134,8 +134,12 @@ export class StorageReport {
           });
         }
         const unfinished: Record<string, Json> = {};
-        const nowMs = Date.now();
+        // The role checkouts first, a task at a time, then one project at a time, yielding between them (#1398): a
+        // project's records take a few hundred ms in production.
+        await primeRoleCandidates(this.store);
         for (const repoRow of this.store.all('SELECT id FROM repositories')) {
+          await new Promise(resolve => setImmediate(resolve));
+          const nowMs = Date.now();
           const repoId = String(repoRow.id);
           const scan = scannedTasks.get(repoId);
           const scanKey = scan?.scanned_at ?? '';
