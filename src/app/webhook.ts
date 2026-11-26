@@ -18,6 +18,7 @@ import { pruneRejectedArchive, rejectionHeaders, rejectionSummary } from './deli
 import { covers, projectCeiling } from '../projects/ceiling.js';
 import { matchWebhookSubscriptions, shouldFallbackWebhookToManager } from '../tasks/event-subscriptions.js';
 import { queueSubscriptionFallbackEvent } from '../dispatch/store.js';
+import { deliverySummary, inlineDeliveryBytes, removeDeliveryBody, writeDeliveryBody, type StoredBody } from '../storage/webhook-bodies.js';
 
 function markWebhookMemberCacheDirty(store: Store, accountId: string, event: string, payload: Json): string[] {
   if (!['member', 'organization', 'membership', 'team', 'installation', 'installation_repositories', 'installation_target'].includes(event)) {
@@ -128,12 +129,15 @@ export async function ingest(
   if (wakePlan) {
     botWakePreflight = await collectBotWakePreflight(store, owner!, wakePlan, githubUrl, deliveryId);
   }
-  return store.transaction(() => {
+  const id = randomId();
+  const appControl = isInstallationControlEvent(event) && store.get("SELECT 1 FROM accounts WHERE id=? AND type='github_app'", accountId);
+  // An accepted body goes to its own file before the row that points to it is written (#1403); the write waits for the
+  // disk off the event loop. A body the transaction below does not end up pointing to is removed again.
+  const body: StoredBody | null = status === 200 && !appControl && bytes.length > inlineDeliveryBytes ? await writeDeliveryBody(store, owner?.id, id, bytes) : null;
+  try { return store.transaction(() => {
     const duplicate = status === 200 && (!!store.get('SELECT 1 FROM processed_deliveries WHERE account_id=? AND endpoint_id=? AND delivery_id=?', accountId, endpointId, deliveryId)
       || isInstallationControlEvent(event) && !!store.get(`SELECT 1 FROM installation_events e JOIN github_installations g ON g.ref=e.installation_ref
         JOIN accounts a ON a.app_id=g.app_id WHERE a.id=? AND e.delivery_id=?`, accountId, deliveryId));
-    const id = randomId();
-    const appControl = isInstallationControlEvent(event) && store.get("SELECT 1 FROM accounts WHERE id=? AND type='github_app'", accountId);
     const response = status === 200 ? { ok: true, record_id: id, duplicate, tasks_created: 0 }
       : { ok: false, error: outcome, record_id: id };
     // A refused request is archived as a bounded digest; only an accepted one keeps its body for replay and audit.
@@ -142,9 +146,10 @@ export async function ingest(
     const archivedPayload = !accepted ? rejectionSummary(outcome, bytes, !complete)
       : appControl ? Buffer.from(JSON.stringify({ installation_evidence_archived: true, event, action })) : bytes;
     store.run(`INSERT INTO deliveries(id,account_id,endpoint_id,repository_id,delivery_id,event,route,status,duplicate,received_at,
-      http_status,request_headers,payload,body_complete,response) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, endpoint ? accountId : null,
+      http_status,request_headers,payload,body_complete,response,payload_ref,payload_sha256,payload_bytes,payload_summary) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, endpoint ? accountId : null,
       endpoint ? endpointId : null, owner?.id || null, deliveryId, event, route, outcome, Number(duplicate), new Date().toISOString(),
-      status, JSON.stringify(accepted ? safeHeaders : rejectionHeaders(headers)), archivedPayload, Number(complete), JSON.stringify(response));
+      status, JSON.stringify(accepted ? safeHeaders : rejectionHeaders(headers)), body ? Buffer.alloc(0) : archivedPayload, Number(complete), JSON.stringify(response),
+      body?.ref ?? null, body?.sha256 ?? null, body?.bytes ?? null, body ? deliverySummary(bytes) : null);
     if (status === 200 && !duplicate) store.run('INSERT INTO processed_deliveries VALUES(?,?,?)', accountId, endpointId, deliveryId);
     if (status === 200 && !duplicate && payload) boardWebhook(store, accountId, event, payload);
     if (status === 200 && !duplicate && payload && event === 'github_app_authorization' && action === 'revoked') {
@@ -212,5 +217,5 @@ export async function ingest(
       store.run('UPDATE deliveries SET response=? WHERE id=?', JSON.stringify(response), id);
     }
     return { status, response, sync, memberSync };
-  });
+  }); } catch (error) { if (body) try { removeDeliveryBody(store, body.ref); } catch {} throw error; }
 }

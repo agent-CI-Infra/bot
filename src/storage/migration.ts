@@ -2,10 +2,11 @@ import type { Row, Store } from './database.js';
 import { payloadHeader, segment, type RecordType, type TrajectoryScope } from './trajectories.js';
 import { candidateBlobKeys, inlineLogBytes, inlineSnapshotBytes, inputBlobBytes, inputBlobKeys, legacySnapshot, logData, runSnapshotHeader, storedCandidate, storedInput, storedRunSnapshot } from './payloads.js';
 import { diskFull } from './disk.js';
+import { deliveryBody, deliverySummary, inlineDeliveryBytes, removeDeliveryBody, syncDeliveryBody, writeDeliveryBodyUnsynced } from './webhook-bodies.js';
 import { createHash } from 'node:crypto';
 
-// Moves payloads written before #436 (run snapshots: before #1403) out of SQLite rows into trajectory files, in the
-// background after the control plane listens; readiness never waits for it. Each table is walked in rowid order in
+// Moves payloads written before #436 (run snapshots and webhook bodies: before #1403) out of SQLite rows into files,
+// in the background after the control plane listens; readiness never waits for it. Each table is walked in rowid order in
 // slices: a slice reads rows for at most `readMs`, appends their bodies to files, waits until the files are on disk
 // (fdatasync, off the event loop), reads every record back against its hash, and then, in one short transaction,
 // replaces the payload columns with headers and refs and saves the cursor. A restart resumes at the cursor. A row not reached yet still holds its payload,
@@ -26,9 +27,13 @@ export interface PhaseState { cursor: number; migrated: number; skipped: number;
 /** rate: records moved per second over the last minute; paused: why it waits for disk space (#671), or null. */
 export interface MigrationState { started_at: string | null; updated_at: string | null; rate: number; paused?: 'low_disk' | 'disk_full' | null; phases: Record<string, PhaseState> }
 
-/** One row's move: the records it appended (or blobs it stored) and the update that points the row to them. */
-interface Move { refs: string[]; blobs?: string[]; bytes: number; apply: () => void }
-interface Phase { name: string; table: string; move(row: Row): Move | null }
+/**
+ * One row's move: the records it appended (or blobs it stored) and the update that points the row to them. A move that
+ * wrote a file of its own says how to wait until it is on disk (sync) and how to read it back (verify).
+ */
+interface Move { refs: string[]; blobs?: string[]; sync?: () => Promise<void>; verify?: () => void; bytes: number; apply: () => void }
+/** maxRows: the most rows one slice moves (default 200); a phase whose rows each free a large body keeps its transaction short with fewer. */
+interface Phase { name: string; table: string; maxRows?: number; move(row: Row): Move | null }
 
 /** A per-task file for records written before their run was known. */
 export function legacyScope(repositoryId: string, taskId: string): TrajectoryScope {
@@ -115,7 +120,7 @@ export class PayloadMigration {
       const started = this.now(), moves: Move[] = [];
       let cursor = progress.cursor, skipped = 0, failed = 0, readRows = 0, error: string | null = null, full = false, short = false;
       // Read at least one row, then until the slice's time is used; a single row is bounded by its own size.
-      for (let read = 0; read === 0 || this.now() - started < (this.options.readMs ?? 25) && moves.length < 200; read++) {
+      for (let read = 0; read === 0 || this.now() - started < (this.options.readMs ?? 25) && moves.length < (phase.maxRows ?? 200); read++) {
         const row = next.get(cursor) as Row | undefined;
         if (!row) break;
         readRows++;
@@ -137,12 +142,16 @@ export class PayloadMigration {
       }
       // The files reach the disk before any row stops holding its payload; each record is read back against its hash.
       // Lines written before a failed sync are never referenced: the rows keep their payloads.
-      try { await Promise.all([...new Set(moves.map(move => move.refs.at(-1)!).filter(Boolean))].map(ref => this.store.trajectories.sync(ref))); }
-      catch (failure) { if (!diskFull(failure)) throw failure; await this.waitForSpace(state, 'disk_full'); continue; }
+      try { await Promise.all([...[...new Set(moves.map(move => move.refs.at(-1)!).filter(Boolean))].map(ref => this.store.trajectories.sync(ref)), ...moves.map(move => move.sync?.())]); }
+      catch (failure) {
+        if (diskFull(failure)) { await this.waitForSpace(state, 'disk_full'); continue; }
+        if (exhausted(failure)) { await this.waitForResources(); continue; }
+        throw failure;
+      }
       const verifyStarted = this.now();
       let unchecked = false;
       const verified = moves.filter(move => {
-        try { for (const ref of move.refs) this.store.trajectories.read(ref); for (const blob of move.blobs ?? []) this.store.trajectories.getBlob(blob); return true; }
+        try { for (const ref of move.refs) this.store.trajectories.read(ref); for (const blob of move.blobs ?? []) this.store.trajectories.getBlob(blob); move.verify?.(); return true; }
         catch (failure) { if (exhausted(failure)) unchecked = true; else { failed++; error = String((failure as Error).message).slice(0, 300); } this.contexts.clear(); return false; }
       });
       this.logSlowSlice(phase.name, 'verify', this.now() - verifyStarted, moves.length);
@@ -234,6 +243,21 @@ export class PayloadMigration {
         // Snapshots are written once, when the run starts, so the row cannot have changed since it was read.
         return { refs, bytes, apply: () => s.run(`UPDATE task_runs SET ${Object.keys(columns).map(column => column + '=?').join(',')} WHERE id=?`, ...Object.values(columns), row.id) };
       } },
+      // Second: bodies of accepted webhook deliveries (#1403), one file each, written here and synced off the event loop.
+      // Clearing a body frees its overflow pages; 150 rows took 150–190 ms to commit, so a slice moves at most 40.
+      { name: 'deliveries', table: 'deliveries', maxRows: 40, move: row => {
+        if (row.status !== 'accepted' || row.payload_ref || row.payload_removed_at) return null;
+        const body = Buffer.from(row.payload as Uint8Array);
+        if (body.length <= inlineDeliveryBytes) return null;
+        const stored = writeDeliveryBodyUnsynced(s, row.repository_id, String(row.id), body), summary = deliverySummary(body);
+        return { refs: [], bytes: body.length, sync: () => syncDeliveryBody(s, stored.ref),
+          verify: () => { deliveryBody(s, { payload_ref: stored.ref, payload_sha256: stored.sha256 }); },
+          // A body the retention cleanup removed meanwhile stays removed, and the file nothing points to goes.
+          apply: () => {
+            if (!s.run("UPDATE deliveries SET payload=x'',payload_ref=?,payload_sha256=?,payload_bytes=?,payload_summary=? WHERE id=? AND payload_ref IS NULL AND payload_removed_at IS NULL",
+              stored.ref, stored.sha256, stored.bytes, summary, row.id).changes) removeDeliveryBody(s, stored.ref);
+          } };
+      } },
       operation('task_tools'), operation('role_conversation_operations'), operation('service_role_operations'),
       { name: 'model_requests', table: 'model_requests', move: row => {
         if (row.finished_at === null || row.request_ref || row.response_ref || (row.request_snapshot === null && row.response_snapshot === null)) return null;
@@ -299,7 +323,7 @@ export class PayloadMigration {
 }
 
 /** The tables the migration walks, in order. */
-export const migratedTables = ['task_runs', 'task_tools', 'role_conversation_operations', 'service_role_operations', 'model_requests', 'task_logs', 'tasks', 'development_candidates', 'task_history'];
+export const migratedTables = ['task_runs', 'deliveries', 'task_tools', 'role_conversation_operations', 'service_role_operations', 'model_requests', 'task_logs', 'tasks', 'development_candidates', 'task_history'];
 
 /**
  * Progress per table (cursor, counts, bytes, last error, finished time), the rate, and the rows not examined yet per

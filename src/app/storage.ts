@@ -70,7 +70,7 @@ export class StorageReport {
       await this.refresh();
     });
     const data = store.trajectories.root ? dirname(store.trajectories.root) : null;
-    this.paths = Object.fromEntries(Object.entries({ git_cache: paths.git_cache ?? (data && join(data, 'git-cache')), public_boards: paths.public_boards ?? (data && join(data, 'public-boards')), browser_evidence: data && join(data, 'browser-evidence'), channel_resources: data && join(data, 'channel-resources'), channel_cards: data && join(data, 'channel-cards'), feedback: store.path === ':memory:' ? undefined : store.feedbackDir, sync_blobs: store.path === ':memory:' ? undefined : store.syncBlobsDir, ...(paths.project_tools ? { project_tools: paths.project_tools } : {}), ...(paths.skill_store ? { skill_store: paths.skill_store } : {}) })
+    this.paths = Object.fromEntries(Object.entries({ git_cache: paths.git_cache ?? (data && join(data, 'git-cache')), public_boards: paths.public_boards ?? (data && join(data, 'public-boards')), browser_evidence: data && join(data, 'browser-evidence'), channel_resources: data && join(data, 'channel-resources'), channel_cards: data && join(data, 'channel-cards'), feedback: store.path === ':memory:' ? undefined : store.feedbackDir, sync_blobs: store.path === ':memory:' ? undefined : store.syncBlobsDir, webhook_bodies: store.path === ':memory:' ? undefined : store.webhookBodiesDir, ...(paths.project_tools ? { project_tools: paths.project_tools } : {}), ...(paths.skill_store ? { skill_store: paths.skill_store } : {}) })
       .filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
   }
 
@@ -325,6 +325,7 @@ function summary(projects: Record<string, any>[], control: Record<string, any> |
     channel_cards: measured(control?.directories?.channel_cards?.bytes),
     feedback: measured(control?.directories?.feedback?.bytes),
     sync_blobs: measured(control?.directories?.sync_blobs?.bytes),
+    webhook_bodies: measured(control?.directories?.webhook_bodies?.bytes),
     ...(control?.directories && Object.hasOwn(control.directories, 'project_tools') ? { project_tools: measured(control.directories.project_tools?.bytes) } : {}),
     ...(control?.directories && Object.hasOwn(control.directories, 'skill_store') ? { skill_store: measured(control.directories.skill_store?.bytes) } : {}),
     manager_database: database(manager?.database),

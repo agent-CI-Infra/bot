@@ -16,6 +16,7 @@ import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { Trajectories, trajectoryStorage } from './trajectories.js';
+import { webhookBodyStorage } from './webhook-bodies.js';
 import { DiskGuard } from './disk.js';
 import { SecretBox, randomId } from '../core/security.js';
 import { externalStorage } from '../external/storage.js';
@@ -82,6 +83,8 @@ export class Store {
   readonly feedbackDir: string;
   // Content-addressed file sync staging & read-through cache beside the database (separate from trajectory_blobs refcounting).
   readonly syncBlobsDir: string;
+  // Bodies of accepted webhook deliveries, one file each beside the database (#1403; temp dir inside trajectories root for :memory: stores).
+  readonly webhookBodiesDir: string;
   // Content-addressed materialized skill sets (/skill-store in Compose, temp dir inside trajectories root for :memory: stores).
   readonly skillStoreDir: string;
   // Free space of the disk the database is on (#671); null for an in-memory store.
@@ -103,6 +106,7 @@ export class Store {
     this.channelCardsDir = path === ':memory:' ? join(this.trajectories.root, '.channel-cards') : join(dirname(path), 'channel-cards');
     this.feedbackDir = path === ':memory:' ? join(this.trajectories.root, '.feedback') : join(dirname(path), 'feedback');
     this.syncBlobsDir = path === ':memory:' ? join(this.trajectories.root, '.sync-blobs') : join(dirname(path), 'sync-blobs');
+    this.webhookBodiesDir = path === ':memory:' ? join(this.trajectories.root, '.webhook-bodies') : join(dirname(path), 'webhook-bodies');
     this.skillStoreDir = process.env.BOT_SKILL_STORE_DIR?.trim()
       ? resolve(process.env.BOT_SKILL_STORE_DIR.trim())
       : (path === ':memory:' ? join(this.trajectories.root, '.skill-store') : join(dirname(path), 'skill-store'));
@@ -302,6 +306,7 @@ export class Store {
     providerStorage(this);
     // Ref columns on task_tools, model_requests and task_logs; the trace triggers below record them.
     trajectoryStorage(this.db);
+    webhookBodyStorage(this);
     managerStorage(this);
     dispatchStorage(this);
     githubWriteStorage(this);

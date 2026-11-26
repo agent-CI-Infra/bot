@@ -15,6 +15,7 @@ import { ChannelInteractiveCards, sweepOrphanChannelCards } from '../channels/ca
 import { pruneExpiredFeedback, sweepOrphanFeedbackFiles } from '../feedback/storage.js';
 import { pruneUnusedSkillSets } from '../roles/skill-store.js';
 import { pruneSyncData } from '../sync/storage.js';
+import { removeDeliveryBody } from './webhook-bodies.js';
 
 // Cleanup by days (#671). One set of settings for what the bot keeps and for how long, saved in settings.storage_retention
 // by platform administrators (audited) and applied by a daily background job in bounded batches. A cleanup removes
@@ -429,34 +430,42 @@ export class RetentionCleanup {
 
   // Bodies of webhook deliveries received before the window, in received_at order from where the last cleanup stopped
   // (settings.retention_cleanup.deliveries_after; rows behind it are never read again, a body sits before every column
-  // after it): the body becomes empty, its sha256 and size are kept with the time it was removed. A delivery an external
-  // executor has not been sent yet keeps its body until it has been: its id is kept (deliveries_skipped) and looked at
-  // again at the start of each pass.
+  // after it): the body becomes empty, its sha256 and size are kept with the time it was removed. A body kept in its own
+  // file (#1403) loses the file once the row no longer points to it, after the transaction committed. A delivery an
+  // external executor has not been sent yet keeps its body until it has been: its id is kept (deliveries_skipped) and
+  // looked at again at the start of each pass.
   private async deliveries(days: number | null): Promise<Removed> {
     const removed: Removed = { count: 0, bytes: 0, failed: 0 };
     if (days === null) return removed;
     const before = new Date(this.now() - days * day).toISOString();
     const pending = () => new Set(this.store.all("SELECT DISTINCT source_id FROM external_deliveries WHERE state IN ('pending','retry','sending')").map(row => String(row.source_id)));
+    const files: string[] = [];
     const clear = (rows: Row[], waiting: Set<string>, skipped: Set<string>) => {
       const now = new Date(this.now()).toISOString();
       for (const row of rows) {
         if (waiting.has(String(row.id))) { skipped.add(String(row.id)); continue; }
         try {
-          const body = Buffer.from(row.payload as Uint8Array);
-          this.store.run("UPDATE deliveries SET payload=x'',payload_sha256=?,payload_bytes=?,payload_removed_at=? WHERE id=? AND payload_removed_at IS NULL",
-            createHash('sha256').update(body).digest('hex'), body.length, now, row.id);
-          skipped.delete(String(row.id)); removed.count++; removed.bytes += body.length;
+          const body = row.payload_ref ? null : Buffer.from(row.payload as Uint8Array), bytes = body ? body.length : Number(row.payload_bytes ?? 0);
+          const changed = this.store.run("UPDATE deliveries SET payload=x'',payload_ref=NULL,payload_sha256=?,payload_bytes=?,payload_removed_at=? WHERE id=? AND payload_removed_at IS NULL",
+            body ? createHash('sha256').update(body).digest('hex') : row.payload_sha256, bytes, now, row.id).changes;
+          if (changed && row.payload_ref) files.push(String(row.payload_ref));
+          skipped.delete(String(row.id)); removed.count++; removed.bytes += bytes;
         } catch (error) { removed.failed++; this.failure(`delivery ${row.id}`, error); }
       }
     };
+    // Files of bodies whose rows committed without them; one that cannot be removed is recorded and stays behind.
+    const unlink = () => {
+      for (const ref of files.splice(0)) try { removeDeliveryBody(this.store, ref); } catch (error) { removed.failed++; this.failure(`delivery body ${ref}`, error); }
+    };
     const saved = this.state(), skipped = new Set<string>((saved.deliveries_skipped as string[] | undefined) ?? []);
     if (skipped.size) {
-      const rows = this.store.all("SELECT id,payload FROM deliveries WHERE id IN (SELECT value FROM json_each(?)) AND payload_removed_at IS NULL", JSON.stringify([...skipped]));
+      const rows = this.store.all("SELECT id,payload,payload_ref,payload_sha256,payload_bytes FROM deliveries WHERE id IN (SELECT value FROM json_each(?)) AND payload_removed_at IS NULL", JSON.stringify([...skipped]));
       const present = new Set(rows.map(row => String(row.id)));
       for (const id of [...skipped]) if (!present.has(id)) skipped.delete(id);
       this.store.transaction(() => { clear(rows, pending(), skipped); this.record({ deliveries_skipped: [...skipped] }); });
+      unlink();
     }
-    const next = this.store.db.prepare('SELECT id,received_at,payload FROM deliveries WHERE received_at<? AND (received_at,id)>(?,?) ORDER BY received_at,id LIMIT ?');
+    const next = this.store.db.prepare('SELECT id,received_at,payload,payload_ref,payload_sha256,payload_bytes FROM deliveries WHERE received_at<? AND (received_at,id)>(?,?) ORDER BY received_at,id LIMIT ?');
     let after = (saved.deliveries_after as [string, string] | undefined) ?? ['', ''];
     while (!this.stopped) {
       const batch = next.all(before, ...after, this.options.batch ?? 200) as Row[];
@@ -468,6 +477,7 @@ export class RetentionCleanup {
         // Past the limit the oldest kept bodies are no longer tracked; they stay, as with no window.
         this.record({ deliveries_after: after, deliveries_skipped: [...skipped].slice(-skippedLimit) });
       });
+      unlink();
       await this.pause(this.options.pauseMs ?? 50);
     }
     return removed;
