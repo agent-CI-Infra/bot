@@ -107,21 +107,39 @@ export function removeProjectDeliveryBodies(store: Store, repositoryId: string):
 }
 
 /**
- * The fields of a body the console's delivery list reads (deliveryResult), in the body's own shape, so the list reads
- * a summary exactly like the body it stands for: repository name, action, number, and the issue's or pull request's
- * number, PR marker, draft flag and head sha. null for a body that is not a JSON object.
+ * The fields of a body that are read without the body, in the body's own shape, so each reader reads a summary exactly
+ * like the body it stands for:
+ * - the console's delivery list (deliveryResult): repository name, action, number, the issue's or pull request's number,
+ *   PR marker, draft flag and head sha;
+ * - the board triggers (src/board/storage.ts): the issue's or pull request's number, title, state and draft flag, a
+ *   top-level number and title, and the same of each pull request listed in pull_requests and in a check run, check
+ *   suite or workflow run;
+ * - the CI event trigger (src/schedules/storage.ts): a check run's, check suite's or workflow run's id, status and
+ *   conclusion.
+ * A title is kept to its first 2000 UTF-16 units, more than the 1000 characters the board keeps. null for a body that
+ * is not a JSON object.
  */
 export function deliverySummary(body: Buffer): string | null {
   let payload: any;
   try { payload = JSON.parse(body.toString('utf8')); } catch { return null; }
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
   const object = (value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, any> : null;
+  if (!object(payload)) return null;
+  const pick = (source: Record<string, any> | null, keys: string[]) => {
+    const out: Record<string, unknown> = {};
+    for (const key of keys) if (source && key in source) out[key] = key === 'title' && typeof source.title === 'string' ? source.title.slice(0, 2000) : source[key];
+    return out;
+  };
+  const item = ['number', 'title', 'state', 'draft'];
+  const list = (value: unknown) => Array.isArray(value) ? { pull_requests: value.map(entry => object(entry) ? pick(object(entry), item) : null) } : {};
+  const run = (value: unknown) => { const source = object(value); return source ? { ...pick(source, ['id', 'status', 'conclusion']), ...list(source.pull_requests) } : null; };
   const repository = object(payload.repository), issue = object(payload.issue), pr = object(payload.pull_request);
-  return JSON.stringify({
-    ...(typeof payload.action === 'string' ? { action: payload.action } : {}),
-    ...(payload.number !== undefined ? { number: payload.number } : {}),
-    ...(repository && typeof repository.full_name === 'string' ? { repository: { full_name: repository.full_name } } : {}),
-    ...(issue ? { issue: { number: issue.number, ...(issue.pull_request ? { pull_request: {} } : {}) } } : {}),
-    ...(pr ? { pull_request: { number: pr.number, draft: pr.draft, head: { sha: object(pr.head)?.sha } } } : {}),
-  });
+  const summary: Record<string, unknown> = { ...pick(payload, ['action', 'number', 'title']), ...list(payload.pull_requests) };
+  if (repository && typeof repository.full_name === 'string') summary.repository = { full_name: repository.full_name };
+  if (issue) summary.issue = { ...pick(issue, item), ...(issue.pull_request ? { pull_request: {} } : {}) };
+  if (pr) summary.pull_request = { ...pick(pr, item), head: { sha: object(pr.head)?.sha } };
+  for (const key of ['check_run', 'check_suite', 'workflow_run']) { const value = run(payload[key]); if (value) summary[key] = value; }
+  return JSON.stringify(summary);
 }
+
+/** The JSON text of a delivery's body for SQL that reads its fields: the summary of a body kept in its own file, else the body. */
+export const deliveryJsonSql = (row: string) => `CASE WHEN ${row}.payload_ref IS NOT NULL THEN ${row}.payload_summary ELSE CAST(${row}.payload AS TEXT) END`;

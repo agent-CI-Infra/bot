@@ -1,6 +1,7 @@
 import type { Store } from '../storage/database.js';
 import { commitChecksStorage } from '../tasks/external-links.js';
 import { grantStorage } from '../tasks/grants.js';
+import { deliveryJsonSql } from '../storage/webhook-bodies.js';
 
 // Keep a small object projection at ingestion time; board reads never load task inputs or delivery bodies.
 export function boardStorage(store: Store): void {
@@ -77,7 +78,8 @@ export function boardStorage(store: Store): void {
   const insert = `INSERT INTO board_objects(repository_id,object_type,object_number,title,github_state,draft,title_at,state_at,draft_at,last_seen)`;
   const projection = (table: 'tasks' | 'deliveries', source: string, where: string, arrayPath?: string) => {
     const isTask = table === 'tasks';
-    const json = isTask ? `${source}.input` : `CAST(${source}.payload AS TEXT)`;
+    // A delivery whose body is in its own file is read from its summary, which keeps these fields in the body's shape (#1403).
+    const json = isTask ? `${source}.input` : deliveryJsonSql(source);
     const body = `CASE WHEN json_valid(${json}) THEN ${json} ELSE '{}' END`;
     const obj = arrayPath ? `CASE WHEN j.type='object' THEN j.value ELSE '{}' END` : `CASE WHEN json_type(${body},'$.pull_request')='object' THEN json_extract(${body},'$.pull_request')
       WHEN json_type(${body},'$.issue')='object' THEN json_extract(${body},'$.issue') ELSE '{}' END`;
@@ -198,10 +200,12 @@ export function boardStorage(store: Store): void {
       no_changes=excluded.no_changes,summary=excluded.summary,updated_at=excluded.updated_at;`;
   // Triggers also cover executor updates, retries and cancellations without changing execution policy.
   // On tasks, status/lease/phase updates only advance last_seen; input and result JSON are parsed only when those columns change.
-  for (const operation of ['INSERT','UPDATE'] as const) {
-    store.db.exec(`CREATE TRIGGER IF NOT EXISTS board_deliveries_${operation.toLowerCase()} AFTER ${operation} ON deliveries BEGIN
+  // Replaced on every start, so a database created before #1403 gets the triggers that read a moved body's summary.
+  store.transaction(() => {
+    for (const operation of ['INSERT','UPDATE'] as const) store.db.exec(`DROP TRIGGER IF EXISTS board_deliveries_${operation.toLowerCase()};
+      CREATE TRIGGER board_deliveries_${operation.toLowerCase()} AFTER ${operation} ON deliveries BEGIN
       ${projection('deliveries', 's', 's.rowid=NEW.rowid')} ${deliveryArrays('s.rowid=NEW.rowid')} END;`);
-  }
+  });
   // Another worker can open this database concurrently; it must never observe half-replaced task triggers.
   store.transaction(()=>store.db.exec(`
     DROP TRIGGER IF EXISTS board_tasks_insert;

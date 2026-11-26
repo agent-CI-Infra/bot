@@ -284,11 +284,14 @@ test('webhook bodies written before #1403 move to their own files and read the s
   const insert = (id, status, body, removed = null, repository = '101') => store.run(`INSERT INTO deliveries(id,account_id,endpoint_id,repository_id,delivery_id,event,route,status,duplicate,received_at,
     http_status,request_headers,payload,body_complete,response,payload_removed_at) VALUES(?,'a',NULL,?,?,'pull_request','pull_request.opened',?,0,'2026-11-01T00:00:00Z',200,'{}',?,1,'{}',?)`,
     id, repository, id, status, Buffer.from(body), removed);
-  const pr = number => JSON.stringify({ action: 'opened', number, repository: { full_name: 'fixture/project' }, pull_request: { number, draft: false, head: { sha: String(number).repeat(40).slice(0, 40) }, body: 'P'.repeat(4000) } }, null, 1);
+  const pr = number => JSON.stringify({ action: 'opened', number, repository: { full_name: 'fixture/project' }, pull_request: { number, title: 'Change ' + number, state: 'open', draft: false, head: { sha: String(number).repeat(40).slice(0, 40) }, body: 'P'.repeat(4000) } }, null, 1);
   insert('pr-1', 'accepted', pr(1)); insert('pr-2', 'accepted', pr(2)); insert('unregistered', 'accepted', pr(3), null, null);
   insert('small', 'accepted', JSON.stringify({ action: 'closed' })); insert('refused', 'invalid_signature', 'R'.repeat(4000)); insert('removed', 'accepted', '', '2026-11-10T00:00:00Z');
-  const view = () => store.all('SELECT * FROM deliveries ORDER BY id').map(row => [row.id, deliveryBody(store, row).toString('utf8'), deliveryResult(store, row)]);
+  // What reads the bodies without opening them: the delivery list and the board triggers, which read the summary once a body moved.
+  const view = () => [store.all('SELECT * FROM deliveries ORDER BY id').map(row => [row.id, deliveryBody(store, row).toString('utf8'), deliveryResult(store, row)]),
+    store.all('SELECT repository_id,object_type,object_number,title,github_state,draft,title_at,state_at,draft_at,last_seen FROM board_objects ORDER BY object_type,object_number').map(row => ({ ...row }))];
   const before = view();
+  assert.equal(before[1].length, 2, 'the fixture bodies are on the board before they move');
   await migrate(store);
   assert.deepEqual(view(), before);
   const state = finished(store).phases.deliveries;

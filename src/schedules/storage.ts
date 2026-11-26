@@ -1,4 +1,5 @@
 import type { Store } from '../storage/database.js';
+import { deliveryJsonSql } from '../storage/webhook-bodies.js';
 
 export function scheduleStorage(store: Store): void {
   store.db.exec(`
@@ -50,20 +51,26 @@ export function scheduleStorage(store: Store): void {
         json_object('task_id',NEW.id,'status',NEW.status,'error',NEW.error_code),cast(unixepoch('subsec')*1000 AS INTEGER)); END;
     -- Commands no longer wait for approval (#312), so there is no approval.waiting event any more.
     DROP TRIGGER IF EXISTS schedule_approval_event;
-    CREATE TRIGGER IF NOT EXISTS schedule_ci_event AFTER INSERT ON deliveries
+  `);
+  // Replaced on every start, in one transaction so a concurrent insert never misses it: a body kept in its own file
+  // (#1403) is read from the row's summary, which keeps the run's id, status and conclusion in the body's shape.
+  const ciJson = deliveryJsonSql('NEW');
+  store.transaction(() => store.db.exec(`
+    DROP TRIGGER IF EXISTS schedule_ci_event;
+    CREATE TRIGGER schedule_ci_event AFTER INSERT ON deliveries
     WHEN NEW.status='accepted' AND NEW.duplicate=0 AND NEW.body_complete=1 AND NEW.repository_id IS NOT NULL
-      AND NEW.event IN ('workflow_run','check_run','check_suite') AND json_valid(CAST(NEW.payload AS TEXT)) BEGIN
+      AND NEW.event IN ('workflow_run','check_run','check_suite') AND json_valid(${ciJson}) BEGIN
       INSERT OR IGNORE INTO schedule_events(event_key,project_id,type,incident,payload,created_at)
       SELECT 'ci:'||NEW.id,NEW.repository_id,CASE WHEN json_extract(obj,'$.conclusion')='success' THEN 'ci.recovered' ELSE 'ci.failed' END,
         'ci:'||NEW.event||':'||json_extract(obj,'$.id'),
         json_object('run_id',json_extract(obj,'$.id'),'conclusion',json_extract(obj,'$.conclusion'),'delivery_id',NEW.id),
         cast(unixepoch('subsec')*1000 AS INTEGER)
-      FROM (SELECT json_extract(CAST(NEW.payload AS TEXT),'$.'||NEW.event) obj)
+      FROM (SELECT json_extract(${ciJson},'$.'||NEW.event) obj)
       WHERE json_extract(obj,'$.status')='completed' AND json_extract(obj,'$.id') IS NOT NULL
         AND json_extract(obj,'$.conclusion') IN ('success','failure','timed_out','action_required')
         AND (json_extract(obj,'$.conclusion')<>'success' OR EXISTS(SELECT 1 FROM schedule_events e
           WHERE e.project_id=NEW.repository_id AND e.type='ci.failed' AND e.incident='ci:'||NEW.event||':'||json_extract(obj,'$.id'))); END;
-  `);
+  `));
   // One row per daily report plan moved to a Feishu chat timer (#1027), whatever the outcome: the migration report.
   store.db.exec(`CREATE TABLE IF NOT EXISTS schedule_migrations(schedule_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,plan_name TEXT NOT NULL,
     plan_state TEXT NOT NULL,destination_id TEXT,chat_id TEXT,chat_type TEXT,channel_schedule_id TEXT,
