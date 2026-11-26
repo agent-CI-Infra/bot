@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { releaseFixture } from '../../../fixtures/release-fixtures.mjs';
 import { RepositoryExplorer, repositoryTools } from '../../../../dist/agent/exploration.js';
 import { ReadTokens } from '../../../../dist/agent/read-token.js';
+import { ServiceRepositories } from '../../../../dist/service-roles/resources.js';
 import { Redactor } from '../../../../dist/agent/common.js';
 import { agentLoop } from '../../../../dist/agent/loop.js';
 const legacyAgentLoop = (store, task, ...args) => { pinLegacyTaskConfiguration(store, task.id); return agentLoop(store, task, ...args); };
@@ -72,6 +73,31 @@ test('decoded repository text is redacted, permission errors are explicit and a 
   assert.equal((await f.explorer.execute('github_read', { path: '/issues/42' })).error, 'github_permission_403');
   const denied = new RepositoryExplorer(f.tokens, f.redactor, async () => { throw new Error('disabled'); });
   await assert.rejects(denied.execute('github_read_token', {}), /disabled/);
+});
+
+test('assistant repository tools answer a rate-limited connection as a rate limit and connect again once the window resets (#1393)', async t => {
+  const f = await explorerFixture(t), repo = f.h.store.get("SELECT * FROM repositories WHERE id='101'");
+  const reads = new ServiceRepositories(f.h.store, new Redactor(), async () => {}, () => repo, () => ['contents', 'issues', 'pull_requests'], f.apiUrl);
+  t.after(() => reads.close());
+  // GitHub reported the installation's window used up until shortly from now.
+  const reset = Date.now() + 1500;
+  f.h.store.run(`INSERT INTO github_rate_limits(bucket,resource,kind,account_id,installation_id,quota,remaining,used,reset_at,observed_at)
+    VALUES('installation:55','core','installation',?,'55',5000,0,5000,?,?)`, repo.account_id, reset, new Date().toISOString());
+  // Tasks keep their contract: a rate limit stops the attempt, which waits for the reset.
+  await assert.rejects(f.explorer.execute('github_read_token', {}), { code: 'github_rate_limited' });
+  const first = await reads.execute('github_read', { repository: repo.full_name, path: '/contents/src/build.ts' });
+  assert.equal(first.error, 'github_rate_limited'); assert.equal(first.bucket, 'installation:55');
+  assert.ok(Math.abs(Date.parse(first.reset_at) - reset) < 1000, first.reset_at);
+  assert.match(first.detail, /重置后继续/); assert.match(first.instruction, /credentials and permissions are fine/);
+  const minted = f.state.tokens.length;
+  const second = await reads.execute('github_search', { repository: repo.full_name, query: 'dependency' });
+  assert.equal(second.error, 'github_rate_limited'); assert.equal(second.reset_at, first.reset_at);
+  assert.equal(f.state.tokens.length, minted, 'no token is minted into a window that is still used up');
+  await new Promise(resolve => setTimeout(resolve, Math.max(0, Date.parse(first.reset_at) - Date.now()) + 20));
+  const third = await reads.execute('github_read', { repository: repo.full_name, path: '/contents/src/build.ts' });
+  assert.equal(third.repository, repo.full_name); assert.match(third.result.content, /compiler/);
+  assert.equal((await reads.execute('github_search', { repository: repo.full_name, query: 'dependency' })).result.items[0].number, 42);
+  assert.ok(![first, second, third].some(value => JSON.stringify(value).includes('github_read_token_required')));
 });
 
 test('GitHub results beyond 2 MiB are saved and paged without another GitHub request', async t => {

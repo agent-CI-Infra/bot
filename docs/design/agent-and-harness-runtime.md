@@ -10,7 +10,7 @@
   - 多模态请求上限（纯文本 2 MiB、含内联图片 20 MiB，自动缩放与拒图降级恢复，避免会话锁死）；
   - 统一用量记账（`model_requests` 先落账后交付结果，记录当时单价快照与缓存命中 token，支持按 `repository_id` 或 `service_role_id` 归属）。
 - **统一工具集与结果预算**：
-  - **只读仓库探索（`RepositoryExplorer`）**：`github_read`、`github_search`、`read_job_log`、`download_artifact` 固定 GET 与当前仓库范围，返回前脱敏。
+  - **只读仓库探索（`RepositoryExplorer`）**：`github_read`、`github_search`、`read_job_log`、`download_artifact` 固定 GET 与当前仓库范围，返回前脱敏。任务内由 `github_read_token` 显式连接，流控（`github_rate_limited`）照常抛出，使本次尝试进入条件等待；群聊助手与管理助手没有该工具，经 `executeConnected` 在每次调用前自行连接，连接失败不留下半连接的读取器，流控作为观察返回给模型（bucket、`reset_at`，并说明凭证与权限无误），窗口重置前不再签发新令牌。
   - **受控 GitHub 写入（`github_write`）**：类 REST 接口，按路由映射细粒度资源权限与能力上限，单次调用临时签发最小写权限安装令牌并在发出后立即撤销，支持按 scope+key 去重，**永远拒绝直接写入 `.github/workflows/`，且永远拒绝合并/入队修改 `.github/workflows/` 的 PR**（即使在 `auto_merge_policy=allow_all` 下也须由人类维护者在 GitHub 合入）。
   - **超长结果分页**：超过预算或需折叠的工具输出统一脱敏写入 `tool-results` 卷（24 小时过期），仅向模型返回首尾预览与句柄，通过 `read_tool_result` 或容器内只读 `/results/<id>.utf8` 按需读取；`manager/docker.mjs` 保留默认 4 MiB 单次响应保护上限（允许调用方按需显式传入有限上限，防止异常大响应引发 OOM），`runner/workspace.mjs` 的 `workspace_read` 在超过 1 MiB 时返回首尾预览与可读文件路径（Git 对象落盘到任务 `logs/`，调用方分页接口保持 `complete: false`、`truncated: true` 而不误标完整），并支持 `max_bytes` / `skip_binary` 供验收预检跳过 >256 KiB 文件与二进制。
   - **孤儿笔记卷与已停止容器自愈**：`manager/projects.mjs` 将 `reclaimNotes`、`reclaimStaleNotes` 与项目删除（`delete_notes`）统一到共享安全清理入口 `purgeNotesVolume`：删除 `-notes` 卷前按容器实际 `Mounts` 精准识别仍挂载该卷的本部署已停止孤儿容器，仅清理其对应代次的网络与 `resources` 行（不误伤未挂载 `-notes` 卷的运行中容器或活跃项目行；若有运行中容器仍挂载该卷，则以 `409 notes_volume_in_use` / `503 notes_residue_unclearable` 拒绝，绝不误杀运行中实例）。

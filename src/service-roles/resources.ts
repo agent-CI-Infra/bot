@@ -25,8 +25,9 @@ export class ServiceRepositories {
     let client=this.clients.get(project.id);
     if(!client){const tokens=new ReadTokens(this.store,project,this.redactor,this.guard,this.apiUrl,this.scopes(),this.scopes);
       client={tokens,explorer:new RepositoryExplorer(tokens,this.redactor,this.guard)};this.clients.set(project.id,client);}
-    const access=await client.explorer.execute('github_read_token',{});if(access.error)return access;
-    return {repository:project.full_name,result:await client.explorer.execute(name,parameters)};
+    // A rate limit is answered, not thrown, so it never ends the assistant's turn (#1393).
+    const out=await client.explorer.executeConnected(name,parameters);
+    return 'refused' in out?out.refused:{repository:project.full_name,result:out.result};
   }
   async close(){await Promise.allSettled([...this.clients.values()].map(client=>client.tokens.revoke()));}
 }
