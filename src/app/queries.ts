@@ -7,10 +7,11 @@ import { taskBasis } from '../dispatch/basis.js';
 import { sourcePolicies } from '../tasks/management.js';
 import { taskTrace, traceClean } from '../tasks/trace.js';
 import { TaskRecords } from '../tasks/service.js';
-import { type Store } from '../storage/database.js';
+import { type Row, type Store } from '../storage/database.js';
 import { type Actor, repository, scope } from './auth.js';
 import { authorize } from '../identity/authorization.js';
 import { deliveryResult, deliveryDiagnosis } from '../review/delivery.js';
+import { deliveryBody, DeliveryBodyError } from '../storage/webhook-bodies.js';
 import { fail, type Json } from '../core/security.js';
 import { redactEgress } from '../core/redaction.js';
 import { withTaskMetrics } from '../metrics/accounting.js';
@@ -101,7 +102,7 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
     const row = store.get(`SELECT * FROM deliveries WHERE id=? AND ${filter.sql}`, event[1]!, ...filter.args);
     if (!row) return fail(404, 'event_not_found');
     return { event: { ...row, request_headers: redactEgress(JSON.parse(row.request_headers)),
-      payload: redactedBody(Buffer.from(row.payload).toString('utf8')), response: redactEgress(JSON.parse(row.response)), ...deliveryResult(store,row), ...deliveryDiagnosis(store,row) } };
+      ...deliveryBodyView(store, row), response: redactEgress(JSON.parse(row.response)), ...deliveryResult(store,row), ...deliveryDiagnosis(store,row) } };
   }
   if (path === '/api/tasks') {
     const clauses=[filter.sql],args:(string|number)[]=[...filter.args];
@@ -210,4 +211,10 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
   if (path === '/api/audit') return { audit: store.all(`SELECT * FROM audit WHERE ${filter.sql}${repo ? ' AND repository_id=?' : ''}
     ORDER BY created_at DESC LIMIT 100`, ...filter.args, ...(repo ? [repo] : [])) };
   return undefined;
+}
+
+/** A delivery's body for the console's detail view; a body file that cannot be read says why instead of failing the view. */
+function deliveryBodyView(store: Store, row: Row): { payload: string; payload_unreadable?: string } {
+  try { return { payload: redactedBody(deliveryBody(store, row).toString('utf8')) }; }
+  catch (error) { if (error instanceof DeliveryBodyError) return { payload: '', payload_unreadable: error.code }; throw error; }
 }

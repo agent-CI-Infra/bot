@@ -2,7 +2,8 @@ import type { Store } from '../storage/database.js';
 // Derive presentation from the archive and durable task identity, never expose raw payloads in lists.
 export function deliveryResult(store:Store,row:any){
   let tasks=store.all('SELECT id,kind,object_number,status FROM tasks WHERE source_delivery_id=? ORDER BY created_at,id',row.id),reason='not_trigger',fullName=row.full_name||null;
-  let payload:any={};try{payload=JSON.parse(Buffer.from(row.payload).toString('utf8'));}catch{}
+  // A body kept in its own file left its list fields in payload_summary (#1403), in the body's own shape.
+  let payload:any={};try{payload=JSON.parse(row.payload_summary??Buffer.from(row.payload).toString('utf8'));}catch{}
   if(!fullName&&/^[\w.-]+\/[\w.-]+$/.test(payload.repository?.full_name||''))fullName=payload.repository.full_name;
   if(!tasks.length&&row.repository_id){
     const issue=row.event==='issues'&&payload.action==='opened'&&payload.issue&&!payload.issue.pull_request;

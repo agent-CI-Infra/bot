@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readdirSync, readlinkSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readlinkSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
@@ -9,6 +9,8 @@ import { Workspace } from '../../../../dist/agent/workspace.js';
 import { operationId, Redactor } from '../../../../dist/agent/common.js';
 import { PayloadMigration, migrationKey } from '../../../../dist/storage/migration.js';
 import { TrajectoryError } from '../../../../dist/storage/trajectories.js';
+import { deliveryBody } from '../../../../dist/storage/webhook-bodies.js';
+import { deliveryResult } from '../../../../dist/review/delivery.js';
 import { blobValue, logContent, modelSnapshot, operationRequestText, operationResult } from '../../../../dist/storage/payloads.js';
 import { taskTrace, traceSnapshot, traceSource } from '../../../../dist/tasks/trace.js';
 
@@ -275,9 +277,36 @@ test('a slice whose read-back runs out of descriptors is read again instead of f
   assert.deepEqual(view(store), before);
 });
 
+test('webhook bodies written before #1403 move to their own files and read the same; refused, small and removed ones stay', async t => {
+  const store = open(t, database(t));
+  store.run("INSERT INTO accounts VALUES('a','Fixture','bot_account',NULL,'{}','2026-01-01')");
+  store.run("INSERT INTO repositories VALUES('101','fixture/project','10','a')");
+  const insert = (id, status, body, removed = null, repository = '101') => store.run(`INSERT INTO deliveries(id,account_id,endpoint_id,repository_id,delivery_id,event,route,status,duplicate,received_at,
+    http_status,request_headers,payload,body_complete,response,payload_removed_at) VALUES(?,'a',NULL,?,?,'pull_request','pull_request.opened',?,0,'2026-11-01T00:00:00Z',200,'{}',?,1,'{}',?)`,
+    id, repository, id, status, Buffer.from(body), removed);
+  const pr = number => JSON.stringify({ action: 'opened', number, repository: { full_name: 'fixture/project' }, pull_request: { number, draft: false, head: { sha: String(number).repeat(40).slice(0, 40) }, body: 'P'.repeat(4000) } }, null, 1);
+  insert('pr-1', 'accepted', pr(1)); insert('pr-2', 'accepted', pr(2)); insert('unregistered', 'accepted', pr(3), null, null);
+  insert('small', 'accepted', JSON.stringify({ action: 'closed' })); insert('refused', 'invalid_signature', 'R'.repeat(4000)); insert('removed', 'accepted', '', '2026-11-10T00:00:00Z');
+  const view = () => store.all('SELECT * FROM deliveries ORDER BY id').map(row => [row.id, deliveryBody(store, row).toString('utf8'), deliveryResult(store, row)]);
+  const before = view();
+  await migrate(store);
+  assert.deepEqual(view(), before);
+  const state = finished(store).phases.deliveries;
+  assert.equal(state.migrated, 3); assert.equal(state.failed, 0);
+  const rows = Object.fromEntries(store.all('SELECT * FROM deliveries').map(row => [row.id, row]));
+  for (const id of ['pr-1', 'pr-2', 'unregistered']) {
+    const row = rows[id];
+    assert.equal(row.payload.length, 0); assert.ok(row.payload_ref && row.payload_sha256 && row.payload_summary);
+    assert.equal(statSync(join(store.webhookBodiesDir, row.payload_ref)).mode & 0o777, 0o600);
+  }
+  assert.ok(rows.unregistered.payload_ref.startsWith('_/'), 'a body without a project is filed under _');
+  for (const id of ['small', 'refused', 'removed']) assert.equal(rows[id].payload_ref, null, id);
+  assert.equal(Buffer.from(rows.refused.payload).toString('utf8'), 'R'.repeat(4000));
+});
+
 test('the migration reads tables by rowid ranges', t => {
   const store = open(t, ':memory:');
-  for (const table of ['task_runs', 'task_tools', 'model_requests', 'task_logs', 'task_history', 'role_conversation_operations', 'tasks']) {
+  for (const table of ['task_runs', 'deliveries', 'task_tools', 'model_requests', 'task_logs', 'task_history', 'role_conversation_operations', 'tasks']) {
     const plan = store.all(`EXPLAIN QUERY PLAN SELECT rowid AS migration_rowid,* FROM ${table} WHERE rowid>? ORDER BY rowid LIMIT 1`).map(row => row.detail).join(' | ');
     assert.match(plan, /SEARCH \w+ USING INTEGER PRIMARY KEY \(rowid>\?\)/, plan);
   }

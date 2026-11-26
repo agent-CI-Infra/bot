@@ -1,4 +1,5 @@
 import { type Store } from '../storage/database.js';
+import { removeProjectDeliveryBodies } from '../storage/webhook-bodies.js';
 import { type Actor, superAdmin } from '../app/auth.js';
 import { fail, fields, type Json } from '../core/security.js';
 import { type InstallationSync } from '../app/installations.js';
@@ -96,6 +97,7 @@ export function deleteProjectRecords(store: Store, id: string, options: { files?
   // destroy evidence the rows still point at (#771).
   if (options.files === true) {
     store.trajectories.remove({ repository_id: id });
+    removeProjectDeliveryBodies(store, id);
     removeBrowserEvidence(store, taskIds);
     sweepUnreferencedSyncBlobs(store);
   }
@@ -190,6 +192,7 @@ export class ProjectRemoval {
       // reported as the deletion having been rolled back.
       try {
         this.store.trajectories.remove({ repository_id: id });
+        removeProjectDeliveryBodies(this.store, id);
         removeBrowserEvidence(this.store, taskIds);
       }
       catch { this.store.audit(user.id, 'repository.evidence_removal_failed', id, id); }

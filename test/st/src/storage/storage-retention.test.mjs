@@ -14,6 +14,7 @@ import { Redactor } from '../../../../dist/agent/common.js';
 import { beginRun } from '../../../../dist/tasks/trace.js';
 import { removableWorkspaces } from '../../../../dist/projects/workspace-cleanup.js';
 import { externalStorage } from '../../../../dist/external/storage.js';
+import { deliveryBody, deliverySummary, writeDeliveryBody } from '../../../../dist/storage/webhook-bodies.js';
 import { browserEvidenceRoot } from '../../../../dist/browser/evidence.js';
 import { browserEvidenceDir } from '../../../../dist/browser/runtime.js';
 import { harness, setup, testPassword } from '../../../fixtures/helpers.mjs';
@@ -130,6 +131,35 @@ test('webhook bodies past their window are emptied with their hash kept; a body 
   assert.deepEqual((await new RetentionCleanup(store, undefined, { pauseMs: 0 }).run()).deliveries.count, 1);
   assert.equal(store.get("SELECT length(payload) n FROM deliveries WHERE id='forwarding'").n, 0);
   assert.deepEqual(new RetentionCleanup(store).state().deliveries_skipped, []);
+});
+
+// #1403: a body kept in its own file loses the file when its window passes; the row keeps the hash, size and list summary.
+test('webhook bodies kept in files are removed with their window, except one an executor still needs', async t => {
+  const { store } = fixture(t);
+  externalStorage(store);
+  const insert = async (key, days, text) => {
+    const body = Buffer.from(text), stored = await writeDeliveryBody(store, '101', key, body);
+    store.run(`INSERT INTO deliveries(id,account_id,endpoint_id,repository_id,delivery_id,event,route,status,duplicate,received_at,http_status,request_headers,payload,body_complete,response,
+      payload_ref,payload_sha256,payload_bytes,payload_summary) VALUES(?,'a',NULL,'101',?,'issues','app','accepted',0,?,202,'{}',x'',1,'{}',?,?,?,?)`,
+      key, key, daysAgo(days), stored.ref, stored.sha256, stored.bytes, deliverySummary(body));
+    return { ...stored, path: join(store.webhookBodiesDir, stored.ref) };
+  };
+  const text = action => JSON.stringify({ action, repository: { full_name: 'fixture/project' }, body: 'x'.repeat(3000) });
+  const old = await insert('old', 10, text('opened')), forwarding = await insert('forwarding', 10, text('edited')), recent = await insert('new', 1, text('closed'));
+  store.run("INSERT INTO external_clients(id,repository_id,name,auth_type,trust,created_at) VALUES('client','101','fixture','token','trusted',?)", new Date().toISOString());
+  store.run("INSERT INTO external_subscriptions(id,client_id,repository_id,name,url,secret,filters,created_at) VALUES('sub','client','101','fixture','https://x.invalid','s','{}',?)", new Date().toISOString());
+  store.run("INSERT INTO external_deliveries(id,subscription_id,repository_id,source_id,version,state,created_at) VALUES('x','sub','101','forwarding',1,'retry',?)", new Date().toISOString());
+  saveRetention(store, 'admin', { webhook_payload_days: 7 });
+  assert.deepEqual((await new RetentionCleanup(store, undefined, { pauseMs: 0 }).run()).deliveries, { count: 1, bytes: old.bytes, failed: 0 });
+  const row = store.get("SELECT * FROM deliveries WHERE id='old'");
+  assert.equal(existsSync(old.path), false);
+  assert.deepEqual([row.payload.length, row.payload_ref, row.payload_sha256, row.payload_bytes], [0, null, old.sha256, old.bytes]); assert.ok(row.payload_removed_at);
+  assert.equal(JSON.parse(row.payload_summary).repository.full_name, 'fixture/project', 'the list still names the repository');
+  assert.equal(deliveryBody(store, row).length, 0, 'a removed body reads as empty, as before');
+  assert.equal(existsSync(forwarding.path), true); assert.equal(existsSync(recent.path), true);
+  store.run("UPDATE external_deliveries SET state='succeeded' WHERE id='x'");
+  assert.equal((await new RetentionCleanup(store, undefined, { pauseMs: 0 }).run()).deliveries.count, 1);
+  assert.equal(existsSync(forwarding.path), false); assert.equal(store.get("SELECT payload_ref FROM deliveries WHERE id='forwarding'").payload_ref, null);
 });
 
 test('deleting a project after its files expired leaves no totals behind', async t => {

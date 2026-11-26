@@ -27,8 +27,8 @@ export async function githubFixture(t){
  if(t)t.after(()=>new Promise(resolve=>server.close(resolve)));
  return {server,url:'http://127.0.0.1:'+server.address().port,keys,privateKey,tokens,grants,comments,setFail(value){failMint=value;},onMint(hook){mintHook=hook;}};
 }
-export async function externalFixture(t,options={}){
- const github=await githubFixture(t),h=await harness(t,undefined,store=>({external:new ExternalService(store,{githubUrl:github.url,privateHosts:['127.0.0.1'],...options})}));
+export async function externalFixture(t,options={},control={}){
+ const github=await githubFixture(t),h=await harness(t,undefined,store=>({external:new ExternalService(store,{githubUrl:github.url,privateHosts:['127.0.0.1'],...options}),...control}));
  const{admin,password}=await setup(h),a=await account(admin,{type:'github_app',app_id:'123',private_key:github.privateKey,token:undefined});await repository(admin,a.id,'101');await repository(admin,a.id,'202');
  const audience='https://bot.invalid/external/token';await admin('/api/external/settings','PUT',{token_audience:audience});
  async function client(repo='101',extra={}){const keys=extra.auth_type==='github_actions_oidc'?null:generateKeyPairSync('rsa',{modulusLength:2048}),publicKey=keys?.publicKey.export({format:'pem',type:'spki'});

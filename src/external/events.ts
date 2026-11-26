@@ -1,4 +1,5 @@
 import { type Store } from '../storage/database.js';
+import { deliveryBody } from '../storage/webhook-bodies.js';
 import { digest, fail, type Json } from '../core/security.js';
 
 export class EventPoller {
@@ -26,7 +27,7 @@ export class EventPoller {
       const rows=this.store.all(`SELECT e.sequence,d.* FROM external_events e JOIN deliveries d ON d.id=e.source_id
         WHERE e.repository_id=? AND e.sequence>? AND e.received_at>? ORDER BY e.sequence LIMIT 100`,grant.repository_id,cursor,cutoff);
       const events=rows.map(row=>{
-        const payload=JSON.parse(Buffer.from(row.payload).toString('utf8')) as Json;
+        const payload=JSON.parse(deliveryBody(this.store,row).toString('utf8')) as Json;
         const object=payload[row.event==='issues'?'issue':'pull_request'] as Json|undefined;
         return {id:row.id,event:row.event,delivery_id:row.delivery_id,action:payload.action||'',repository_id:row.repository_id,
           object_number:object?.number??payload.number??null,received_at:row.received_at,payload};

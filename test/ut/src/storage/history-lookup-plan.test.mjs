@@ -81,7 +81,8 @@ test('role usage reads history and model requests by run through indexes', t => 
 test('refused archive pruning and its counters read deliveries by status and time, never by scanning it', t => {
   const store = new Store(':memory:', Buffer.alloc(32, 3)); t.after(() => store.close());
   const now = Date.parse('2026-11-11T12:00:00Z');
-  const insert = store.db.prepare('INSERT INTO deliveries VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+  const insert = store.db.prepare(`INSERT INTO deliveries(id,account_id,endpoint_id,repository_id,delivery_id,event,route,status,duplicate,received_at,
+    http_status,request_headers,payload,body_complete,response) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
   for (let i = 0; i < rejectedAudit.maxRows; i++) {
     insert.run(`r${i}`, null, null, null, `d${i}`, 'push', '/', 'invalid_signature', 0,
       new Date(now - i * 60_000).toISOString(), 401, '{}', Buffer.from('{}'), 1, '');
