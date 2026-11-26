@@ -157,7 +157,9 @@ export class GitHub {
     const renewable = !!token && token === this.token && !!this.installationId && !!this.tokenRequest;
     if (renewable) { await this.fresh(); token = this.token; }
     // A window that is used up (or refused a moment ago) is not sent into: the task waits until GitHub resets it.
-    const window = token && token === this.token ? this.tokenWindow : token && token === this.jwt ? this.appWindow : undefined, blocked = window ? blockedUntil(this.store, window) : null;
+    // GraphQL queries have a window of their own, apart from the REST core window.
+    const resource = path === '/graphql' ? 'graphql' : 'core';
+    const window = token && token === this.token ? this.tokenWindow : token && token === this.jwt ? this.appWindow : undefined, blocked = window ? blockedUntil(this.store, window, Date.now(), resource) : null;
     if (blocked) stop('github_rate_limited', 'retry_wait', `GitHub 流控：${bucketName(window!)}本小时的请求额度已用完，${utcTime(blocked)} 重置后继续（${method} ${path} 未发送）。`, blocked - Date.now(), window!.key);
     let response: Response;
     const redirectedDownload = jobLogs || artifactMaxBytes !== undefined;
@@ -213,7 +215,7 @@ export class GitHub {
       const explain=(message:string,note='')=>this.redactor.text(`GitHub 请求 ${method} ${path} 返回 HTTP ${response.status}${note}`
         +(message?'：'+message:'')+(requestId?`（GitHub 请求 ID：${requestId}）`:''));
       // Without a time from GitHub the task backs off on its own (a minute, doubling up to 15 minutes).
-      if(limited){const now=Date.now(),{until,reported}=refused(this.store,window,response.headers,now);
+      if(limited){const now=Date.now(),{until,reported}=refused(this.store,window,response.headers,now,resource);
         stop('github_rate_limited','retry_wait',explain(said||'rate limit exceeded',reported?`，${utcTime(until)} 后重试`:'，GitHub 未给出恢复时间，稍后重试（每次等待加倍）'),reported?until-now:undefined,window?.key);}
       // The second 401 in a row says which tokens GitHub refused, so a person can tell a revoked installation from a bot fault.
       const again = response.status === 401 && replaced ? this.redactor.text(
@@ -273,6 +275,11 @@ export class GitHub {
   async graphql(query:string,variables:Record<string,unknown>,token=this.token):Promise<any>{
     const value=await this.request('POST','/graphql',{query,variables},false,token);
     if(Array.isArray(value?.errors)&&value.errors.length){
+      // A used-up GraphQL window answers 200 with RATE_LIMITED; its headers (already recorded) say when it resets.
+      if(value.errors.some((e:any)=>String(e?.type)==='RATE_LIMITED')){
+        const window=token===this.token?this.tokenWindow:token===this.jwt?this.appWindow:undefined,until=window?blockedUntil(this.store,window,Date.now(),'graphql'):null;
+        stop('github_rate_limited','retry_wait',`GitHub 流控：${window?bucketName(window):'GitHub '}的 GraphQL 额度已用完${until?`，${utcTime(until)} 重置后继续`:'，稍后重试'}。`,until?until-Date.now():undefined,window?.key);
+      }
       const denied=value.errors.some((e:any)=>['FORBIDDEN','INSUFFICIENT_SCOPES'].includes(String(e?.type)));
       stop(denied?'github_permission_graphql':'github_graphql_failed',denied?'waiting_permission':'failed',this.redactor.text(`GitHub GraphQL 请求失败：${value.errors.map((e:any)=>String(e?.message||e?.type||'error')).join('; ').slice(0,500)}`));
     }

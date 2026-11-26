@@ -184,3 +184,30 @@ test('a Token account names its used-up window by the stored login, and probing 
   await assert.rejects(github.connect(false), error => { assert.match(error.detail, /^GitHub 流控：Token 用户 dept-bot本小时的请求额度已用完/); return true; });
   assert.deepEqual(requests, []);
 });
+
+test('GraphQL queries count against their own window: a used-up one stops queries as a rate limit, while REST requests still go', async t => {
+  const requests = [], reset = Date.now() + 600_000, server = createServer((req, res) => {
+    requests.push(`${req.method} ${req.url}`);
+    const send = (value, headers) => { res.writeHead(200, { 'Content-Type': 'application/json', ...headers }); res.end(JSON.stringify(value)); };
+    if (req.url === '/user') return send({ id: 77, login: 'dept-bot' }, windowHeaders(4000, reset));
+    if (req.url === '/repositories/101') return send({ id: 101, owner: { id: 10 }, full_name: 'fixture/project-101', default_branch: 'main' }, windowHeaders(3999, reset));
+    if (req.url === '/repos/fixture/project-101/pulls/7') return send({ number: 7 }, windowHeaders(3998, reset));
+    // GitHub answers a query over a used-up window with 200 and a RATE_LIMITED error.
+    if (req.url === '/graphql') return send({ errors: [{ type: 'RATE_LIMITED', message: 'API rate limit exceeded for user ID 77.' }] }, windowHeaders(0, reset, { 'x-ratelimit-resource': 'graphql' }));
+    res.writeHead(404); res.end('{}');
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening'); t.after(() => new Promise(resolve => server.close(resolve)));
+  const url = 'http://127.0.0.1:' + server.address().port;
+  const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
+  const github = new GitHub(h.store, h.store.get("SELECT * FROM repositories WHERE id='101'"), new Redactor(), async () => {}, url);
+  await github.connect(false);
+  await assert.rejects(github.graphql('query{viewer{login}}', {}), error => { assert.equal(error.code, 'github_rate_limited'); assert.match(error.detail, /GraphQL 额度已用完/); return true; });
+  const bucket = userBucket(a.id);
+  assert.equal(blockedUntil(h.store, bucket, Date.now(), 'graphql'), seconds(reset) * 1000);
+  assert.equal(blockedUntil(h.store, bucket, Date.now(), 'core'), null);
+  // The next query is not sent; a REST read still is.
+  requests.length = 0;
+  await assert.rejects(github.graphql('query{viewer{login}}', {}), error => error.code === 'github_rate_limited');
+  assert.deepEqual(await github.request('GET', github.path('/pulls/7')), { number: 7 });
+  assert.deepEqual(requests, ['GET /repos/fixture/project-101/pulls/7']);
+});

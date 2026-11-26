@@ -204,7 +204,7 @@ node scripts/install-acp-product.mjs select --product workswarm --version 0.2.9
 ## 5. 故障排查速查
 
 - **任务失败或等待**：优先查看控制台任务详情页的「原因分类」与时间线（明确区分外部波动、GitHub 权限、模型配置、项目电脑、仓库内容与 Bot 自身故障）。
-- **GitHub 限流**：在「全局设置 → 机器人账号 → GitHub 请求额度」查看每个安装与 Token 账号的剩余配额与重置时间（限流等待不消耗重试次数）。
+- **GitHub 限流**：在「全局设置 → 机器人账号 → GitHub 请求额度」查看每个安装与 Token 账号的剩余配额与重置时间（限流等待不消耗重试次数）。REST 请求记在 `core` 窗口，GraphQL 查询记在独立的 `graphql` 窗口，各自用完只挡住各自的请求；bot PR 兜底对账的定期读取主要消耗 `graphql` 窗口。
 - **数据库索引、候选大载荷外置与通道保护**：
   - 升级启动后控制面自动补齐 `task_runs` 的 `operation_id`、`(lease_scope, status)` 与 `role_instance_id` 索引，避免任务量增长后出现高频 `[slow-sql]` 全表扫描；
   - `development_candidates` 中超过 2 KiB 的文件列表（`files`、`snapshot_files`、`skipped_files`）自动去重外置到 `bot-data` 的共享 `blobs/` 目录，后台迁移会自动瘦身存量旧行，且 PR 发布确认后自动剥离内联 base64 正文（不影响其他任务共享的内容寻址 blob）；

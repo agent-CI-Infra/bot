@@ -47,19 +47,21 @@ export function observeAll(store: Store, bucket: Bucket, body: any): void {
 // A refused request: the bucket waits until the window resets when it is used up, otherwise (a secondary limit, for
 // requests sent too fast) for as long as GitHub asks. Returns when requests may be sent again, and whether GitHub said
 // so: without Retry-After or a reset the bucket pauses a minute, and the task that was refused backs off on its own.
-export function refused(store: Store, bucket: Bucket | undefined, headers: Headers, now = Date.now()): { until: number, reported: boolean } {
+// resource is the window the request counts against when GitHub's answer does not name it (REST core, or graphql).
+export function refused(store: Store, bucket: Bucket | undefined, headers: Headers, now = Date.now(), resource = 'core'): { until: number, reported: boolean } {
   if (bucket) observe(store, bucket, headers);
   const retryAfter = count(headers.get('retry-after')), reset = count(headers.get('x-ratelimit-reset')), remaining = count(headers.get('x-ratelimit-remaining'));
   const reported = retryAfter !== null || remaining === 0 && reset !== null && reset * 1000 > now;
   const until = retryAfter !== null ? now + retryAfter * 1000 : reported ? reset! * 1000 : now + 60_000;
-  if (bucket) store.run(`INSERT INTO github_rate_limits(bucket,resource,kind,account_id,installation_id,owner,limited_until,observed_at) VALUES(?,'core',?,?,?,?,?,?)
+  if (bucket) store.run(`INSERT INTO github_rate_limits(bucket,resource,kind,account_id,installation_id,owner,limited_until,observed_at) VALUES(?,?,?,?,?,?,?,?)
     ON CONFLICT(bucket,resource) DO UPDATE SET limited_until=MAX(COALESCE(limited_until,0),excluded.limited_until),observed_at=excluded.observed_at`,
-  bucket.key, bucket.kind, bucket.account_id, bucket.installation_id || null, bucket.owner || null, until, new Date(now).toISOString());
+  bucket.key, (headers.get('x-ratelimit-resource') || resource).slice(0, 40), bucket.kind, bucket.account_id, bucket.installation_id || null, bucket.owner || null, until, new Date(now).toISOString());
   return { until, reported };
 }
-// When the bucket's REST window can be used again, if it is used up or refused right now; null when requests may go.
-export function blockedUntil(store: Store, bucket: Bucket, now = Date.now()): number | null {
-  const row = store.get("SELECT remaining,reset_at,limited_until FROM github_rate_limits WHERE bucket=? AND resource='core'", bucket.key);
+// When one of the bucket's windows can be used again, if it is used up or refused right now; null when requests may go.
+// REST requests count against core and GraphQL queries against graphql: a used-up core window does not stop a query.
+export function blockedUntil(store: Store, bucket: Bucket, now = Date.now(), resource = 'core'): number | null {
+  const row = store.get('SELECT remaining,reset_at,limited_until FROM github_rate_limits WHERE bucket=? AND resource=?', bucket.key, resource);
   const until = row ? Math.max(Number(row.limited_until || 0), row.remaining === 0 ? Number(row.reset_at || 0) : 0) : 0;
   return until > now ? until : null;
 }
