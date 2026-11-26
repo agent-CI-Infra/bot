@@ -347,3 +347,39 @@ test('role checkouts of unfinished tasks are read through indexes, never by walk
     /SEARCH task_history USING INTEGER PRIMARY KEY \(rowid>\?\)/, // the rows added since
   ]) assert.ok(plans.some(plan => expected.test(plan)), `${expected}\n${plans.join('\n')}`);
 });
+
+// Production (#1401): the wake facts read the human comments on a bot PR and its Issue with `repository_id=? AND
+// object_number IN (…)`. Without statistics SQLite took dispatch_events_repository (repository_id,created_at), whose order
+// spares the sort, and so read every event of the repository, about 40 KB each: 317 s a day, up to 24 s a call.
+test('bot PR wake facts read the comments on the PR and its Issue through the object index', t => {
+  const store = new Store(':memory:', Buffer.alloc(32, 3)); t.after(() => store.close());
+  store.db.exec('PRAGMA foreign_keys=OFF');
+  const at = i => new Date(Date.parse('2026-11-24T00:00:00Z') + i * 1000).toISOString();
+  const comment = (id, body) => ({ comment: { id, author: 'maria', body, url: null }, trigger: { actor_type: 'User', actor_id: 5 } });
+  const event = (id, type, objectType, number, created, facts) => store.run(
+    `INSERT INTO dispatch_events(id,repository_id,event_key,type,source,object_type,object_number,summary,facts,options,state,created_at)
+     VALUES(?,'r1',?,?,'github',?,?,'',?,'[]','decided',?)`, id, 'r1:' + id, type, objectType, number, JSON.stringify(facts), created);
+  store.transaction(() => {
+    store.run("INSERT INTO repositories(id,full_name,owner_id,account_id) VALUES('r1','o/r1','o','a')");
+    // Bot PR #2468 was opened for Issue #77.
+    store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,created_at,updated_at) VALUES('dev-77','r1','development.issue','pr_opened','s',77,?,?)", at(0), at(0));
+    store.run("INSERT INTO bot_pull_requests(repository_id,number,pr_id,author_id,head_repository_id,branch,sha,source_task_id) VALUES('r1',2468,'PR_1','99','r1','bot/77',?,'dev-77')", 'a'.repeat(40));
+    for (let i = 0; i < 2500; i++) event(`noise-${i}`, i % 2 ? 'issue.updated' : 'pull_request.updated', i % 2 ? 'issue' : 'pr', 1000 + i % 200, at(i + 1), comment(i, 'another discussion'));
+    event('on-pr', 'pull_request.updated', 'pr', 2468, at(3000), comment(9001, 'Please also cover the empty list.'));
+    event('on-issue', 'issue.mention', 'issue', 77, at(3001), comment(9002, 'The CLI needs the same fix.'));
+  });
+  const seen = [], all = store.all.bind(store);
+  store.all = (sql, ...args) => { seen.push(sql); return all(sql, ...args); };
+  const facts = botPrWakeRevisionFacts(store, 'r1', 2468);
+  store.all = all;
+  assert.deepEqual(facts.new_human_comments.map(c => c.body_excerpt), ['Please also cover the empty list.', 'The CLI needs the same fix.']);
+  const [sql] = seen.filter(statement => /FROM dispatch_events\s+WHERE repository_id=\? AND object_type IN/.test(statement));
+  assert.ok(sql, seen.join('\n'));
+  const plan = all('EXPLAIN QUERY PLAN ' + sql, 'r1', 2468, 77).map(row => row.detail).join(' | ');
+  assert.match(plan, /^SEARCH dispatch_events USING INDEX dispatch_events_object \(repository_id=\? AND object_type=\? AND object_number=\?\)/, plan);
+  assert.doesNotMatch(plan, /dispatch_events_repository/, plan);
+  // The statement this replaced reads the whole repository's events.
+  const legacySql = sql.replace(" AND object_type IN ('pr','issue')", '').replace('+created_at', 'created_at');
+  const legacyPlan = all('EXPLAIN QUERY PLAN ' + legacySql, 'r1', 2468, 77).map(row => row.detail).join(' | ');
+  assert.match(legacyPlan, /dispatch_events_(?:repository|object) \(repository_id=\?\)/, legacyPlan);
+});

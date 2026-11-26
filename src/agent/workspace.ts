@@ -36,6 +36,13 @@ export function currentOperation(taskId:string):{id:string;request:any}|null{
  * would get it again: the task starts a new attempt with new operation ids (engine.ts).
  */
 export class VolumeFull extends TaskError {}
+/**
+ * The runner answered a workspace_finalize with an error (#1401). The stop names that operation, so the retry record reads it
+ * by id: searching task_tools by task for it scanned the table (it has no task index) for minutes in production.
+ */
+export class FinalizeFailed extends TaskError {
+  constructor(detail:string,readonly operation:string){super('candidate_unavailable','waiting_environment',detail);}
+}
 // Who made a workspace choice, as the console names it.
 const who=(by:string)=>by==='system'?'系统':by==='agent'?'执行 agent ':`主控 ${by} `;
 const MiB=2**20;
@@ -65,6 +72,8 @@ export class Workspace {
   private settled?:string;
   constructor(readonly store:Store,readonly manager:Manager,readonly task:Row,readonly redactor:Redactor,readonly guard:()=>Promise<void>,readonly log:(value:unknown)=>void,
     readonly operations?:'service_role_operations'){}
+  // The id call() records the operation under: one per key and attempt.
+  private operationOf(key:string){return operationId(`${this.task.id}:${this.task.attempt}:${key}`);}
   // ssh is the run's SSH grant (#1379) for a call that starts processes. It goes to the manager beside the request and is
   // neither recorded nor part of the operation's hash: a repeated call replays the result, not the grant.
   async call(key:string,request:any,{ssh}:{ssh?:SshGrantPayload}={}){
@@ -73,7 +82,7 @@ export class Workspace {
     if(!aside(request)){const ready=await this.ensure();if(ready.error)return ready;}
     useWorkspace(this.store,this.task,request.type);
     request=this.redactor.clean(request);
-    const id=operationId(`${this.task.id}:${this.task.attempt}:${key}`),input={operation_id:id,generation:this.task.generation,request:{...request,workspace_id:this.task.workspace_id}};
+    const id=this.operationOf(key),input={operation_id:id,generation:this.task.generation,request:{...request,workspace_id:this.task.workspace_id}};
     const conversation = !!this.task.conversation_id;
     const table=conversation?(this.operations??'role_conversation_operations'):'task_tools',owner=conversation?'turn_id':'task_id';
     const encoded=JSON.stringify(input),digest=createHash('sha256').update(encoded).digest('hex');
@@ -514,7 +523,8 @@ export class Workspace {
   }
   private async collectArtifact(key:string){
     const result=await this.call(key,{type:'workspace_finalize'});
-    if(result.error||!result.tree_sha||!Array.isArray(result.files))stop('candidate_unavailable','waiting_environment',`Could not finalize workspace: ${result.detail||result.error||'missing manifest'}`);
+    if(result.error)throw new FinalizeFailed(`Could not finalize workspace: ${result.detail||result.error}`,this.operationOf(key));
+    if(!result.tree_sha||!Array.isArray(result.files))stop('candidate_unavailable','waiting_environment',`Could not finalize workspace: ${result.detail||'missing manifest'}`);
     const expectedHead=(()=>{
       try{
         const parsed=this.task?.input?JSON.parse(String(this.task.input)):null;

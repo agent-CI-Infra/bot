@@ -11,6 +11,7 @@ import {TaskRecords} from '../../../../dist/tasks/service.js';
 import {recordRetryFailure,resolveRetry,pendingRetryReport,retryContext,retryNeedsInvestigation} from '../../../../dist/tasks/retries.js';
 import {assessRetryReport} from '../../../../dist/roles/retries.js';
 import {Redactor} from '../../../../dist/agent/common.js';
+import {FinalizeFailed,Workspace} from '../../../../dist/agent/workspace.js';
 import {workspace as runnerWorkspace} from '../../../../runner/workspace.mjs';
 import {randomWorkspaceId} from '../../../fixtures/helpers.mjs';
 import '../../../fixtures/scripted-driver.mjs';
@@ -23,6 +24,33 @@ function setup(t,path=':memory:'){
  return {s,records,task:s.get("SELECT * FROM tasks WHERE id='t'")};
 }
 const failure=(n,group='execution:candidate_unavailable')=>({group,occurrence:'attempt:'+n,code:'candidate_unavailable',detail:'git write-tree failed:128; index is unmerged'});
+
+// Production (#1401): the record of a failed collection looked for the task's latest failed workspace_finalize in task_tools,
+// which has no task index: 6.9 M rows read backwards, up to 306 s with the control plane's thread blocked. The stop names
+// the operation that failed, and the record reads that row by its key.
+test('a failed workspace_finalize is named by its stop, and the retry record reads that operation by id',async t=>{
+ const f=setup(t);f.s.run("UPDATE tasks SET workspace_id='w2',generation=1,attempt=2 WHERE id='t'");const task=f.s.get("SELECT * FROM tasks WHERE id='t'");
+ // An earlier attempt's failed finalize: the search took the task's latest one whatever had stopped this attempt.
+ f.s.run("INSERT INTO task_tools(id,task_id,request,result,state) VALUES('earlier','t',?,?,'completed')",
+  JSON.stringify({request:{type:'workspace_finalize',workspace_id:'w1'}}),JSON.stringify({error:'runner_operation_failed',detail:'an earlier failure'}));
+ const manager={call:async()=>({ok:false,error:'runner_operation_failed',detail:'git add failed: 128; index is unmerged'})};
+ const workspace=new Workspace(f.s,manager,task,new Redactor(),async()=>{},()=>{});workspace.ensure=async()=>({});
+ const stopped=await workspace.artifact('role-collect:1').then(()=>null,error=>error);
+ assert.ok(stopped instanceof FinalizeFailed);assert.deepEqual([stopped.code,stopped.state],['candidate_unavailable','waiting_environment']);
+ assert.equal(f.s.get('SELECT state FROM task_tools WHERE id=?',stopped.operation).state,'completed','the stop names the row its call recorded');
+ const seen=[],get=f.s.get.bind(f.s);f.s.get=(sql,...args)=>{seen.push(sql);return get(sql,...args);};
+ const ref=recordRetryFailure(f.s,task,{group:'execution:candidate_unavailable',occurrence:'run-1',code:stopped.code,detail:stopped.detail},stopped.operation);
+ const other=recordRetryFailure(f.s,task,{group:'execution:candidate_unavailable',occurrence:'run-2',code:'candidate_unavailable',detail:'Conflict base and PR head share no common ancestor.'});
+ f.s.get=get;
+ const fact=ref=>JSON.parse(f.s.get('SELECT data FROM task_history WHERE id=?',Number(ref.split(':')[1])).data);
+ assert.equal(fact(ref).source_ref,'task_tools:'+stopped.operation);
+ assert.deepEqual(fact(ref).operation,{type:'workspace_finalize',workspace_id:'w2',error:'runner_operation_failed',detail:'git add failed: 128; index is unmerged'});
+ // A candidate_unavailable no finalize reported (conflict resolution) cites no operation, not an earlier attempt's.
+ assert.equal(fact(other).operation,undefined);assert.equal(fact(other).source_ref,undefined);
+ const reads=seen.filter(sql=>/FROM task_tools/.test(sql));assert.equal(reads.length,1,reads.join('\n'));
+ const plan=f.s.all('EXPLAIN QUERY PLAN '+reads[0],'x','t').map(row=>row.detail).join(' | ');
+ assert.match(plan,/^SEARCH task_tools USING INDEX sqlite_autoindex_task_tools_1 \(id=\?\)$/,plan);
+});
 
 test('retry reports are persisted at 3/6/9, survive a new Store/session/SHA, and do not pause the task',t=>{
  const dir=mkdtempSync(join(tmpdir(),'retry-report-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));

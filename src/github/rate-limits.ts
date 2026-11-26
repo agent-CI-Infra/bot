@@ -21,13 +21,26 @@ export function rateLimitStorage(store: Store): void {
 interface Window { quota: number, remaining: number, used: number, reset_at: number | null }
 const count = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value
   : typeof value === 'string' && /^\d{1,15}$/.test(value) ? Number(value) : null;
-export function record(store: Store, bucket: Bucket, resource: string, window: Window): void {
+// Every GitHub response reports its window, mostly with the same numbers; one upsert and commit per response cost minutes a
+// day under IO pressure (#1401). A report is stored when it changes what readers act on: a new window or quota, the window
+// running out or coming back (blockedUntil), the bucket's names, or remaining moving by a step (1% of the quota). Otherwise
+// it is stored once the stored one is older than refreshMs, so the console's numbers stay that fresh while requests flow.
+const refreshMs = 30_000;
+function unchanged(row: any, bucket: Bucket, window: Window, now: number): boolean {
+  if (!row || row.quota === null || row.quota !== window.quota || row.reset_at !== window.reset_at) return false;
+  if ((row.remaining === 0) !== (window.remaining === 0) || Math.abs(row.remaining - window.remaining) >= Math.max(1, Math.ceil(window.quota / 100))) return false;
+  if (row.kind !== bucket.kind || row.account_id !== bucket.account_id || bucket.installation_id && row.installation_id !== bucket.installation_id || bucket.owner && row.owner !== bucket.owner) return false;
+  return now - Date.parse(row.observed_at) < refreshMs;
+}
+export function record(store: Store, bucket: Bucket, resource: string, window: Window, now = Date.now()): void {
+  resource = resource.slice(0, 40);
+  if (unchanged(store.get('SELECT kind,account_id,installation_id,owner,quota,remaining,reset_at,observed_at FROM github_rate_limits WHERE bucket=? AND resource=?', bucket.key, resource), bucket, window, now)) return;
   store.run(`INSERT INTO github_rate_limits(bucket,resource,kind,account_id,installation_id,owner,quota,remaining,used,reset_at,limited_until,observed_at)
     VALUES(?,?,?,?,?,?,?,?,?,?,NULL,?) ON CONFLICT(bucket,resource) DO UPDATE SET kind=excluded.kind,account_id=excluded.account_id,
     installation_id=COALESCE(excluded.installation_id,installation_id),owner=COALESCE(excluded.owner,owner),quota=excluded.quota,
     remaining=excluded.remaining,used=excluded.used,reset_at=excluded.reset_at,observed_at=excluded.observed_at`,
-  bucket.key, resource.slice(0, 40), bucket.kind, bucket.account_id, bucket.installation_id || null, bucket.owner || null,
-  window.quota, window.remaining, window.used, window.reset_at, new Date().toISOString());
+  bucket.key, resource, bucket.kind, bucket.account_id, bucket.installation_id || null, bucket.owner || null,
+  window.quota, window.remaining, window.used, window.reset_at, new Date(now).toISOString());
 }
 // The window a response reports in its x-ratelimit-* headers; a response without them changes nothing. A 401 means the
 // credential was not accepted, and its headers describe the anonymous window, not the bucket's.

@@ -1495,11 +1495,15 @@ function collectHumanComments(store: Store, repositoryId: string, prNumber: numb
 
   const numbers = [prNumber, ...(rootIssue ? [rootIssue] : [])];
   const marks = numbers.map(() => '?').join(',');
+  // The PR's and its Issue's events through dispatch_events_object (#1401). Without statistics SQLite read them through
+  // dispatch_events_repository (repository_id,created_at), whose order spares the sort: every event of the repository,
+  // about 40 KB each, for up to 24 s. These four types are recorded with object type 'pr' or 'issue' (review/queue.ts,
+  // review/development.ts), so naming both keeps the rows; `+created_at` sorts the few rows found instead.
   for (const row of store.all(
     `SELECT id,type,facts,created_at FROM dispatch_events
-     WHERE repository_id=? AND object_number IN (${marks})
+     WHERE repository_id=? AND object_type IN ('pr','issue') AND object_number IN (${marks})
        AND type IN ('pull_request.updated','pull_request.mention','issue.updated','issue.mention')
-     ORDER BY created_at ASC, rowid ASC`,
+     ORDER BY +created_at ASC, rowid ASC`,
     repositoryId,
     ...numbers,
   )) {

@@ -154,6 +154,24 @@ test('engine recovery excludes downtime and task deletion retains historical pro
   assert.equal(h.store.get('SELECT task_id FROM model_requests').task_id,null);
   assert.equal((await admin('/api/costs?from=2026-10-22&to=2026-10-22')).value.summary.cost,2);
 });
+// Production (#1401): tick() committed the runtime checkpoint every second, about 0.5 s a time under IO pressure. Readers
+// add the running interval themselves, so it is written every 30 s, and only while some task's clock runs.
+test('the engine checkpoints running clocks every 30 s, and writes nothing while no task runs',async t=>{
+  const {h}=await fixture(t);metricTask(h.store,'clocked');h.store.run("UPDATE tasks SET status='waiting_permission' WHERE id='clocked'");
+  t.mock.timers.enable({apis:['Date'],now:Date.now()});
+  const engine=new TaskEngine(h.store,{call:async()=>null},undefined,undefined,acceptanceFixture),run=h.store.run.bind(h.store),writes=[];
+  h.store.run=(sql,...args)=>{if(/^UPDATE task_metrics SET runtime_ms/.test(sql))writes.push(args[0]);return run(sql,...args);};
+  const seconds=n=>{for(let i=0;i<n;i++){engine.tick();t.mock.timers.tick(1000);}};
+  try{
+    seconds(40);assert.deepEqual(writes,[],'no task runs');
+    h.store.run("UPDATE tasks SET status='running',next_run_at=? WHERE id='clocked'",Date.now()+86400000);
+    const started=h.store.get("SELECT active_since FROM task_metrics WHERE task_id='clocked'").active_since;
+    seconds(120);assert.equal(writes.length,4,'two minutes of one-second ticks wrote 120 times');
+    const clock=h.store.get("SELECT runtime_ms,active_since FROM task_metrics WHERE task_id='clocked'");
+    assert.deepEqual([clock.runtime_ms,clock.active_since],[writes.at(-1)-started,writes.at(-1)]);
+    assert.equal(withTaskMetrics(h.store,[{id:'clocked'}],Date.now())[0].metrics.runtime_ms,Date.now()-started,'readers add the time since the checkpoint');
+  }finally{h.store.run=run;await engine.close();}
+});
 
 import {recordExternalModelRequest} from '../../../../dist/metrics/accounting.js';
 test('external receipts use visible configured prices and cumulative updates never duplicate charges',async t=>{
