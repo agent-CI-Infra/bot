@@ -1,5 +1,5 @@
 import { configuredRedactor } from '../core/redaction.js';
-import {dispatchScope} from '../storage/trajectories.js';
+import {dispatchScope,runScope} from '../storage/trajectories.js';
 import {childTaskContext} from './children.js';
 import { taskControllerReads, memoryAuthorize, type MemoryAccess } from '../memory/access.js';
 import {executionBaseline} from '../agent/common.js';
@@ -9,7 +9,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { randomId, fail } from '../core/security.js';
-import { historyData, historyRefBytes, logContent, modelSnapshot, unreadable } from '../storage/payloads.js';
+import { historyData, historyRefBytes, logContent, modelSnapshot, runSnapshot, storedRunSnapshot, unreadable } from '../storage/payloads.js';
 
 const botVersion=(()=>{try{return process.env.BOT_VERSION||execFileSync('git',['rev-parse','HEAD'],{cwd:fileURLToPath(new URL('../../',import.meta.url)),encoding:'utf8',stdio:['ignore','pipe','ignore']}).trim();}catch{return 'unknown';}})();
 const now=()=>new Date().toISOString();
@@ -127,8 +127,14 @@ export function beginRun(store:Store,task:Row,kind:string,config:any){return ato
   const candidate=JSON.parse(r.candidate||'null'),project=store.get('SELECT * FROM project_context WHERE repository_id=?',t.repository_id);
   const previous=store.get('SELECT id FROM task_runs WHERE task_id=? AND kind=? ORDER BY rowid DESC LIMIT 1',task.id,kind);
   const run={id:randomId(),task_id:task.id,kind,attempt:t.attempt,revision:r.revision,candidate_id:candidate?.id??null};
+  const contextSnapshot=traceSnapshot({context_files:task.trace_context??{},input_candidate:candidate,contract:JSON.parse(r.contract),input:JSON.parse(t.input||'{}'),project:project?{...project,facts:JSON.parse(project.facts)}:null,source_sha:executionBaseline(t),object_head_sha:t.head_sha,workspace_id:t.workspace_id,recovery:JSON.parse(t.input||'{}').recovery??null});
+  const configSnapshot=traceSnapshot({...configuredRedactor(store,t.repository_id).clean(config),execution_revision:store.get('SELECT revision FROM task_execution_configs WHERE task_id=?',task.id)?.revision??null,bot_version:botVersion,node_version:process.version,platform:process.platform,environment:store.get('SELECT generation,state,revision FROM project_environments WHERE repository_id=?',t.repository_id)??null});
+  // The snapshots go to the run's trajectory file (#1403). A context unchanged since the task's latest run shares that
+  // run's record; octet_length reads only the record header, so a latest run still holding its whole snapshot costs nothing.
+  const scope=t.repository_id?runScope(String(t.repository_id),String(task.id),run.id):null;
+  const latest=store.get('SELECT CASE WHEN octet_length(context_snapshot)<=1024 THEN context_snapshot END AS context FROM task_runs WHERE task_id=? ORDER BY rowid DESC LIMIT 1',task.id);
   store.run('INSERT INTO task_runs(id,task_id,kind,attempt,revision,candidate_id,parent_run_id,previous_run_id,started_at,ended_at,status,stop_reason,context_snapshot,config_snapshot) VALUES(?,?,?,?,?,?,?,?,?,?,?, ?,?,?)',run.id,task.id,kind,t.attempt,r.revision,candidate?.id??null,task.trace_run_id??null,previous?.id??null,now(),null,'running',null,
-    traceSnapshot({context_files:task.trace_context??{},input_candidate:candidate,contract:JSON.parse(r.contract),input:JSON.parse(t.input||'{}'),project:project?{...project,facts:JSON.parse(project.facts)}:null,source_sha:executionBaseline(t),object_head_sha:t.head_sha,workspace_id:t.workspace_id,recovery:JSON.parse(t.input||'{}').recovery??null}),traceSnapshot({...configuredRedactor(store,t.repository_id).clean(config),execution_revision:store.get('SELECT revision FROM task_execution_configs WHERE task_id=?',task.id)?.revision??null,bot_version:botVersion,node_version:process.version,platform:process.platform,environment:store.get('SELECT generation,state,revision FROM project_environments WHERE repository_id=?',t.repository_id)??null}));
+    storedRunSnapshot(store,scope,'task_runs:'+run.id+':context',contextSnapshot,latest?.context),storedRunSnapshot(store,scope,'task_runs:'+run.id+':config',configSnapshot));
   traceEvent(store,task.id,'run_started',{...run,parent_run_id:task.trace_run_id??null,previous_run_id:previous?.id??null},run.id);return run;
 });}
 export function endRun(store:Store,run:Row|null,status:string,reason?:string){if(!run)return;return atomic(store,()=>{
@@ -166,7 +172,7 @@ export function traceSource(store:Store,taskId:string,source:string,access?:Memo
     try{return capturedSource(JSON.parse(historyData(store,row)));}catch(error){return unreadable(error);}}}
   // A role run snapshot of this task's project: what a run was configured with, by its content hash.
   const role=/^role_snapshots:([a-f0-9]{64})$/.exec(source);if(role&&store.hasTable('role_snapshots')){const row=store.get('SELECT s.snapshot FROM role_snapshots s JOIN tasks t ON t.repository_id=s.repository_id WHERE t.id=? AND s.id=?',taskId,role[1]!);if(row)return safe(JSON.parse(row.snapshot));}
-  const run=/^task_runs:([^:]+):(context|config)$/.exec(source);if(run){permitRun(run[1]);const row=store.get(`SELECT ${run[2]}_snapshot AS snapshot FROM task_runs WHERE id=? AND task_id=?`,run[1]!,taskId);if(row)return safe(JSON.parse(row.snapshot));}
+  const run=/^task_runs:([^:]+):(context|config)$/.exec(source);if(run){permitRun(run[1]);const row=store.get(`SELECT ${run[2]}_snapshot AS snapshot FROM task_runs WHERE id=? AND task_id=?`,run[1]!,taskId);if(row){let snapshot:string;try{snapshot=runSnapshot(store,row.snapshot);}catch(error){return unreadable(error);}return safe(JSON.parse(snapshot));}}
   const entity=/^(task_tools|task_logs|github_effects):/.test(source);if(entity){const row=store.get('SELECT id,data,run_id,type FROM task_history WHERE task_id=? AND source_ref=? ORDER BY id DESC LIMIT 1',taskId,source);if(row){permitRun(row.run_id);
     let data:string;try{data=historyData(store,row);}catch(error){return {...unreadable(error),source_event_id:'task_history:'+row.id};}
     return {...capturedSource(JSON.parse(data)),source_event_id:'task_history:'+row.id};}

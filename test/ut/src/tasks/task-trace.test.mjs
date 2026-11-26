@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { blobSha } from '../../../../dist/agent/common.js';
 import { Store } from '../../../../dist/storage/database.js';
 import { beginRun,endRun,interruptRuns,taskTrace,traceSource,traceSnapshot,traceEvent,retainedTextArtifact } from '../../../../dist/tasks/trace.js';
+import { runSnapshot } from '../../../../dist/storage/payloads.js';
 import { TaskRecords } from '../../../../dist/tasks/service.js';
 import { queries } from '../../../../dist/app/queries.js';
 function seed(s){s.run("INSERT INTO accounts VALUES('a','a','github_app','1','{}','now')");s.run("INSERT INTO repositories VALUES('r','a/OpenToday','o','a')");s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('t','r','task.request','running','OpenToday release report','{}')");}
@@ -24,6 +25,39 @@ test('run snapshots survive reopen and input/config changes; interrupted run and
  assert.ok(traceSource(s,'t',ops[1].event_id).complete);assert.throws(()=>traceSource(s,'foreign',ops[1].event_id));
  endRun(s,next,'succeeded');endRun(s,next,'succeeded');assert.equal(s.get("SELECT count(*) n FROM task_history WHERE type='run_ended' AND run_id=?",next.id).n,1);
  }finally{s.close();rmSync(dir,{recursive:true,force:true});}
+});
+// #1403: a run's large snapshots are records of its trajectory file; the row keeps their header and a ref.
+test('run snapshots are stored in the run trajectory file, read the same, and an unchanged context shares its record',()=>{
+ const s=new Store(':memory:',Buffer.alloc(32));try{seed(s);s.run("UPDATE tasks SET input=? WHERE id='t'",JSON.stringify({request:'R'.repeat(5000)}));
+ const columns=id=>s.get('SELECT context_snapshot AS context,config_snapshot AS config FROM task_runs WHERE id=?',id);
+ const first=beginRun(s,{id:'t'},'execution',{prompt:'P'.repeat(5000)}),stored=columns(first.id);
+ for(const part of ['context','config']){
+  const header=JSON.parse(stored[part]);assert.ok(stored[part].length<400,part);assert.equal(header.data,undefined);assert.equal(header.complete,true);assert.match(header.sha256,/^[a-f0-9]{64}$/);
+  // The record holds the snapshot as traceSnapshot wrote it: its sha256 is the header's.
+  const whole=JSON.parse(runSnapshot(s,stored[part]));assert.equal(whole.sha256,header.sha256);assert.equal(whole.original_bytes,header.original_bytes);
+  assert.equal(s.get('SELECT run_id FROM trajectory_files WHERE id=?',header.$trajectory.split(':')[0]).run_id,first.id);
+ }
+ assert.equal(traceSource(s,'t','task_runs:'+first.id+':context').data.input.request,'R'.repeat(5000));assert.equal(traceSource(s,'t','task_runs:'+first.id+':config').data.prompt,'P'.repeat(5000));
+ const view=taskTrace(s,'t',url('?include_snapshots=1'),'runs').runs[0];assert.equal(view.context_snapshot.data.input.request,'R'.repeat(5000));assert.equal(view.config_snapshot.data.prompt,'P'.repeat(5000));
+ endRun(s,first,'succeeded');assert.ok(s.get('SELECT closed_at FROM trajectory_files WHERE run_id=?',first.id).closed_at);
+ // The next run starts on the same context: it refers to the first run's record and writes only its new configuration.
+ const second=beginRun(s,{id:'t'},'verification',{prompt:'Q'.repeat(5000)}),again=columns(second.id);
+ assert.equal(JSON.parse(again.context).$trajectory,JSON.parse(stored.context).$trajectory);assert.notEqual(JSON.parse(again.config).$trajectory,JSON.parse(stored.config).$trajectory);
+ assert.equal(traceSource(s,'t','task_runs:'+second.id+':context').data.input.request,'R'.repeat(5000));
+ // A changed context is a new record; a small snapshot stays whole in its column.
+ s.run("UPDATE tasks SET input=? WHERE id='t'",JSON.stringify({request:'S'.repeat(5000)}));
+ const third=beginRun(s,{id:'t'},'attempt',{}),changed=columns(third.id);
+ assert.notEqual(JSON.parse(changed.context).$trajectory,JSON.parse(stored.context).$trajectory);assert.ok(changed.config.startsWith('{"schema_version":1'));assert.equal(traceSource(s,'t','task_runs:'+third.id+':config').complete,true);
+ // A record whose file expired reads as expired, and is not shared with a later run.
+ endRun(s,third,'succeeded');s.trajectories.expire([s.get('SELECT * FROM trajectory_files WHERE id=?',JSON.parse(changed.context).$trajectory.split(':')[0])]);
+ assert.deepEqual({...traceSource(s,'t','task_runs:'+third.id+':context'),detail:undefined},{complete:false,missing_reason:'trajectory_expired',detail:undefined});
+ const fourth=beginRun(s,{id:'t'},'attempt',{});assert.notEqual(JSON.parse(columns(fourth.id).context).$trajectory,JSON.parse(changed.context).$trajectory);
+ assert.equal(traceSource(s,'t','task_runs:'+fourth.id+':context').data.input.request,'S'.repeat(5000));
+ // A snapshot written whole before #1403 reads as before.
+ const legacy=traceSnapshot({input:{request:'legacy '.repeat(1000)}});
+ s.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,context_snapshot,config_snapshot) VALUES('legacy','t','execution',1,1,'now','succeeded',?,'{}')",legacy);
+ assert.deepEqual(traceSource(s,'t','task_runs:legacy:context'),JSON.parse(legacy));assert.deepEqual(traceSource(s,'t','task_runs:legacy:config'),{});
+ }finally{s.close();}
 });
 test('events are transaction-bound, paginated, filterable and authorized without invented legacy runs',()=>{
  const s=new Store(':memory:',Buffer.alloc(32));try{seed(s);assert.equal(taskTrace(s,'t',url(),'runs').runs.length,0);

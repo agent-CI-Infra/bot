@@ -9,7 +9,7 @@ import { Workspace } from '../../../../dist/agent/workspace.js';
 import { operationId, Redactor } from '../../../../dist/agent/common.js';
 import { PayloadMigration, migrationKey } from '../../../../dist/storage/migration.js';
 import { blobValue, logContent, modelSnapshot, operationRequestText, operationResult } from '../../../../dist/storage/payloads.js';
-import { taskTrace, traceSource } from '../../../../dist/tasks/trace.js';
+import { taskTrace, traceSnapshot, traceSource } from '../../../../dist/tasks/trace.js';
 
 const key = Buffer.alloc(32, 9);
 function database(t) {
@@ -21,7 +21,7 @@ const open = (t, path) => { const store = new Store(path, key); t.after(() => { 
 
 // Rows as a deployment before #436 wrote them: whole payloads in the rows, copied into task_history by the triggers,
 // conversation payloads sealed.
-function legacy(store, { tasks = 3, operations = 4, size = 3000 } = {}) {
+function legacy(store, { tasks = 3, operations = 4, size = 3000, runs = true } = {}) {
   store.run("INSERT INTO accounts VALUES('a','Fixture','bot_account',NULL,'{}','2026-01-01')");
   store.run("INSERT INTO repositories VALUES('101','fixture/project','10','a')");
   store.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES('m','101','http://model','fixture',NULL,'now')");
@@ -40,6 +40,13 @@ function legacy(store, { tasks = 3, operations = 4, size = 3000 } = {}) {
     // Pre-#1266 historical runtime_log row in task_history: must still migrate cleanly and read identically.
     store.run("INSERT INTO task_history(task_id,type,data,created_at,source_ref) VALUES(?,'runtime_log',trace_snapshot(?),'now',?)", task, JSON.stringify({ type: 'tool', name: 'run_command', detail: 'why', output: 'L'.repeat(size) }), 'task_logs:' + task + '-log');
     store.run("INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,'now')", task + '-small', task, JSON.stringify({ type: 'phase', phase: 'prepare' }));
+    // Runs as written before #1403: whole snapshots in the row. Two runs start on the same context; a small configuration
+    // stays; a snapshot that is not the canonical JSON text of its value stays as well.
+    const context = traceSnapshot({ input, recovery: null }), run = (id, contextSnapshot, configSnapshot) => runs && store.run(
+      "INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,context_snapshot,config_snapshot) VALUES(?,?,'execution',1,1,'now','succeeded',?,?)", id, task, contextSnapshot, configSnapshot);
+    run(task + '-run-0', context, traceSnapshot({ prompt: 'first '.repeat(size / 6) }));
+    run(task + '-run-1', context, traceSnapshot({ prompt: 'small' }));
+    run(task + '-run-2', JSON.stringify(JSON.parse(context), null, 1), traceSnapshot({ prompt: 'third '.repeat(size / 6) }));
     store.run(`INSERT INTO model_requests(id,task_id,repository_id,request_id,model_id,model_name,requested_at,finished_at,state,request_snapshot,response_snapshot)
       VALUES(?,?,'101','r','m','fixture','now','now','received',?,?)`, task + '-mr', task,
       JSON.stringify({ schema_version: 1, sha256: 'x', original_bytes: 10, complete: true, data: { messages: [{ role: 'user', content: 'Q'.repeat(size) }] } }),
@@ -71,6 +78,7 @@ function view(store) {
       sources: Object.fromEntries([...store.all('SELECT id FROM task_tools WHERE task_id=?', task).map(r => 'task_tools:' + r.id), ...store.all('SELECT id FROM task_logs WHERE task_id=?', task).map(r => 'task_logs:' + r.id),
         `model_requests:${task}-mr:request`, `model_requests:${task}-mr:response`].map(source => [source, traceSource(store, task, source)])),
       history: store.all("SELECT id FROM task_history WHERE task_id=? AND type IN ('operation','runtime_log') ORDER BY id", task).map(r => traceSource(store, task, 'task_history:' + r.id)),
+      runs: store.all('SELECT id FROM task_runs WHERE task_id=? ORDER BY id', task).flatMap(r => ['context', 'config'].map(part => traceSource(store, task, `task_runs:${r.id}:${part}`))),
       events: ['operation', 'runtime_log'].flatMap(type => taskTrace(store, task, url(type), 'events').events.map(({ data, body_chars, source_ref }) => ({ data, body_chars, source_ref }))),
       results: store.all('SELECT * FROM task_tools WHERE task_id=? ORDER BY id', task).map(row => [operationRequestText(store, 'task_tools', row), operationResult(store, 'task_tools', row)]),
       logs: store.all('SELECT * FROM task_logs WHERE task_id=? ORDER BY id', task).map(row => logContent(store, row)),
@@ -109,6 +117,12 @@ test('migrated rows read the same as before; their payloads leave the rows', asy
   assert.equal(store.get("SELECT count(*) n FROM task_logs WHERE content_ref IS NULL AND length(content)>2048").n, 0);
   assert.equal(store.get("SELECT count(*) n FROM task_history WHERE type IN ('operation','runtime_log') AND length(data)>2048").n, 0);
   assert.ok(store.all('SELECT input FROM tasks').every(row => JSON.parse(row.input).snapshot_files.$blob && row.input.length < 300));
+  // Run snapshots: the large ones hold a header and a ref; runs of a task on the same context share one record.
+  const runs = Object.fromEntries(store.all('SELECT id,context_snapshot,config_snapshot FROM task_runs').map(row => [row.id, row]));
+  assert.equal(JSON.parse(runs['task-0-run-0'].context_snapshot).$trajectory, JSON.parse(runs['task-0-run-1'].context_snapshot).$trajectory);
+  assert.ok(JSON.parse(runs['task-0-run-0'].config_snapshot).$trajectory && JSON.parse(runs['task-0-run-2'].config_snapshot).$trajectory);
+  assert.ok(runs['task-0-run-1'].config_snapshot.startsWith('{"schema_version":1') && runs['task-0-run-2'].context_snapshot.startsWith('{\n'));
+  assert.equal(store.get("SELECT count(*) n FROM task_runs WHERE length(context_snapshot)>400 OR length(config_snapshot)>400").n, 3, 'only the non-canonical contexts stay');
   const conversation = store.get("SELECT * FROM role_conversation_operations WHERE id='conv-op'");
   assert.equal(conversation.request, '{}'); assert.equal(conversation.result, null);
   assert.equal(store.get("SELECT conversation_id FROM trajectory_files WHERE id=?", conversation.request_ref.split(':')[0]).conversation_id, 'conv');
@@ -117,6 +131,7 @@ test('migrated rows read the same as before; their payloads leave the rows', asy
   const state = finished(store);
   assert.equal(state.phases.task_tools.migrated, 10); assert.equal(state.phases.task_tools.failed, 0);
   assert.equal(migration.state().remaining.task_tools, 0);
+  assert.equal(state.phases.task_runs.migrated, 9); assert.equal(state.phases.task_runs.failed, 0); assert.equal(migration.state().remaining.task_runs, 0);
   // A call repeated after the migration returns its recorded result from the file without running again.
   const calls = [], manager = { async call() { calls.push(1); return { ok: true, result: {} }; } };
   const workspace = new Workspace(store, manager, { id: 'task-0', repository_id: '101', attempt: 1, generation: 1, workspace_id: 'w' }, new Redactor(), async () => {}, () => {});
@@ -148,7 +163,8 @@ test('the migration resumes from its cursor after a restart and never moves a ro
 });
 
 test('stopping during a file sync commits the current slice without waiting for another pause', async t => {
-  const store = open(t, database(t)); legacy(store, { tasks: 1, operations: 2 });
+  // Without runs, the first slice synced is one of task_tools.
+  const store = open(t, database(t)); legacy(store, { tasks: 1, operations: 2, runs: false });
   const migration = new PayloadMigration(store, { readMs: 0, pauseMs: 60_000 });
   const syncing = Promise.withResolvers(), release = Promise.withResolvers();
   const sync = store.trajectories.sync.bind(store.trajectories);
@@ -192,7 +208,7 @@ test('slices stay short: the event loop is never blocked for long while the migr
 
 test('the migration reads tables by rowid ranges', t => {
   const store = open(t, ':memory:');
-  for (const table of ['task_tools', 'model_requests', 'task_logs', 'task_history', 'role_conversation_operations', 'tasks']) {
+  for (const table of ['task_runs', 'task_tools', 'model_requests', 'task_logs', 'task_history', 'role_conversation_operations', 'tasks']) {
     const plan = store.all(`EXPLAIN QUERY PLAN SELECT rowid AS migration_rowid,* FROM ${table} WHERE rowid>? ORDER BY rowid LIMIT 1`).map(row => row.detail).join(' | ');
     assert.match(plan, /SEARCH \w+ USING INTEGER PRIMARY KEY \(rowid>\?\)/, plan);
   }

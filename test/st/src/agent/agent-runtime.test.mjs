@@ -8,7 +8,7 @@ import { Redactor } from '../../../../dist/agent/common.js';
 import { HttpError } from '../../../../dist/core/security.js';
 import { runAgent, configureModelRetry, modelRetryDelay } from '../../../../dist/agent/runtime.js';
 import { agentLoop } from '../../../../dist/agent/loop.js';
-import { modelSnapshot } from '../../../../dist/storage/payloads.js';
+import { modelSnapshot, runSnapshot } from '../../../../dist/storage/payloads.js';
 
 // Retry waits are 1, 3, 9, 27 and 60 seconds in production; here the same schedule runs in milliseconds.
 configureModelRetry({ baseMs: 1 });
@@ -290,7 +290,7 @@ test('trace retains actual sanitized model I/O and immutable run configuration w
   assert.equal(await runAgent(ask({...f.spec,prompt:'source input',requestPrefix:'acceptance:trace:'})), 'public result');
   const run=f.store.get('SELECT * FROM task_runs'),request=f.store.get('SELECT * FROM model_requests');assert.equal(run.kind,'acceptance');assert.equal(run.status,'succeeded');assert.equal(request.run_id,run.id);
   assert.equal(request.request_snapshot,null);const input=JSON.parse(modelSnapshot(f.store,request,'request')),output=JSON.parse(modelSnapshot(f.store,request,'response'));assert.ok(input.complete&&output.complete);assert.equal(input.data.messages[1].content,'source input');assert.equal(output.data.choices[0].message.content,'public result');assert.doesNotMatch(JSON.stringify(output),/PRIVATE_REASONING_SENTINEL/);
-  f.store.run("UPDATE models SET model_name='later-config' WHERE id='m'");assert.equal(JSON.parse(run.config_snapshot).data.model.name,'fixture');assert.doesNotMatch(run.config_snapshot,/secret-model-key/);
+  f.store.run("UPDATE models SET model_name='later-config' WHERE id='m'");const config=runSnapshot(f.store,run.config_snapshot);assert.equal(JSON.parse(config).data.model.name,'fixture');assert.doesNotMatch(config,/secret-model-key/);
 });
 
 test('a model request that gets no response is retried five times by default, with growing waits, before the run fails', async t => {

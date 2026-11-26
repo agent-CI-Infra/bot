@@ -1,14 +1,14 @@
 import type { Row, Store } from './database.js';
 import { payloadHeader, segment, type RecordType, type TrajectoryScope } from './trajectories.js';
-import { candidateBlobKeys, inlineLogBytes, inputBlobBytes, inputBlobKeys, legacySnapshot, logData, storedCandidate, storedInput } from './payloads.js';
+import { candidateBlobKeys, inlineLogBytes, inlineSnapshotBytes, inputBlobBytes, inputBlobKeys, legacySnapshot, logData, runSnapshotHeader, storedCandidate, storedInput, storedRunSnapshot } from './payloads.js';
 import { diskFull } from './disk.js';
 import { createHash } from 'node:crypto';
 
-// Moves payloads written before #436 out of SQLite rows into trajectory files, in the background after the control
-// plane listens; readiness never waits for it. Each table is walked in rowid order in slices: a slice reads rows for at
-// most `readMs`, appends their bodies to files, waits until the files are on disk (fdatasync, off the event loop),
-// reads every record back against its hash, and then, in one short transaction, replaces the payload columns with
-// headers and refs and saves the cursor. A restart resumes at the cursor. A row not reached yet still holds its payload,
+// Moves payloads written before #436 (run snapshots: before #1403) out of SQLite rows into trajectory files, in the
+// background after the control plane listens; readiness never waits for it. Each table is walked in rowid order in
+// slices: a slice reads rows for at most `readMs`, appends their bodies to files, waits until the files are on disk
+// (fdatasync, off the event loop), reads every record back against its hash, and then, in one short transaction,
+// replaces the payload columns with headers and refs and saves the cursor. A restart resumes at the cursor. A row not reached yet still holds its payload,
 // which every reader falls back to, so readers return the same content before and after.
 
 const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
@@ -39,6 +39,9 @@ export class PayloadMigration {
   // Legacy files this migration has open, oldest first; closed beyond `openFiles` so descriptors stay bounded.
   private readonly touched = new Map<string, TrajectoryScope>();
   private readonly repositories = new Map<string, string | null>();
+  // The context snapshot column the last migrated run of a task got, so a later run with the same context shares its
+  // record. Cleared when a slice is given up or a record fails its check: a run then never shares a record not on disk.
+  private readonly contexts = new Map<string, string>();
   // Records moved per slice in the last minute: [time, records].
   private readonly recent: [number, number][] = [];
   constructor(private readonly store: Store, private readonly options: { readMs?: number; pauseMs?: number; openFiles?: number; idleMs?: number; slowSliceMs?: number; lowDiskMs?: number;
@@ -66,7 +69,7 @@ export class PayloadMigration {
   // became full during the slice (#671): the rows not reached keep their payloads and move once there is space again.
   private async waitForSpace(state: MigrationState, reason: 'low_disk' | 'disk_full') {
     if (state.paused !== reason) { state.paused = reason; try { this.save(state); } catch {} }
-    this.closeTouched(0);
+    this.closeTouched(0); this.contexts.clear();
     await this.pause(this.options.lowDiskMs ?? 60_000);
   }
 
@@ -122,7 +125,7 @@ export class PayloadMigration {
       const verifyStarted = this.now();
       const verified = moves.filter(move => {
         try { for (const ref of move.refs) this.store.trajectories.read(ref); for (const blob of move.blobs ?? []) this.store.trajectories.getBlob(blob); return true; }
-        catch (failure) { failed++; error = String((failure as Error).message).slice(0, 300); return false; }
+        catch (failure) { failed++; error = String((failure as Error).message).slice(0, 300); this.contexts.clear(); return false; }
       });
       this.logSlowSlice(phase.name, 'verify', this.now() - verifyStarted, moves.length);
       const now = Date.now();
@@ -191,6 +194,24 @@ export class PayloadMigration {
         conversation ? '{}' : JSON.stringify(payloadHeader(request)), conversation ? null : JSON.stringify(payloadHeader(result)), requestRef, resultRef, sha256(text), row.id) };
     } });
     return [
+      // First: run snapshots are the largest bodies (#1403).
+      { name: 'task_runs', table: 'task_runs', move: row => {
+        const scope = this.taskScope(row.task_id), columns: Record<string, string> = {}, refs: string[] = [];
+        if (!scope) return null;
+        let bytes = 0;
+        for (const part of ['context', 'config'] as const) {
+          const text = String(row[part + '_snapshot']);
+          if (runSnapshotHeader(text) || Buffer.byteLength(text) <= inlineSnapshotBytes) continue;
+          // Only a snapshot that serializes back to its own text reads the same from its record; any other stays.
+          if (JSON.stringify(JSON.parse(text)) !== text) continue;
+          const stored = storedRunSnapshot(s, scope, `task_runs:${row.id}:${part}`, text, part === 'context' ? this.contexts.get(String(row.task_id)) : null);
+          columns[part + '_snapshot'] = stored; refs.push(runSnapshotHeader(stored)!.$trajectory); bytes += text.length;
+          if (part === 'context') { if (this.contexts.size > 10_000) this.contexts.clear(); this.contexts.set(String(row.task_id), stored); }
+        }
+        if (!refs.length) return null;
+        // Snapshots are written once, when the run starts, so the row cannot have changed since it was read.
+        return { refs, bytes, apply: () => s.run(`UPDATE task_runs SET ${Object.keys(columns).map(column => column + '=?').join(',')} WHERE id=?`, ...Object.values(columns), row.id) };
+      } },
       operation('task_tools'), operation('role_conversation_operations'), operation('service_role_operations'),
       { name: 'model_requests', table: 'model_requests', move: row => {
         if (row.finished_at === null || row.request_ref || row.response_ref || (row.request_snapshot === null && row.response_snapshot === null)) return null;
@@ -256,7 +277,7 @@ export class PayloadMigration {
 }
 
 /** The tables the migration walks, in order. */
-export const migratedTables = ['task_tools', 'role_conversation_operations', 'service_role_operations', 'model_requests', 'task_logs', 'tasks', 'development_candidates', 'task_history'];
+export const migratedTables = ['task_runs', 'task_tools', 'role_conversation_operations', 'service_role_operations', 'model_requests', 'task_logs', 'tasks', 'development_candidates', 'task_history'];
 
 /**
  * Progress per table (cursor, counts, bytes, last error, finished time), the rate, and the rows not examined yet per

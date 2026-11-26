@@ -1,6 +1,6 @@
 import { configuredRedactor } from '../core/redaction.js';
 import type { Row, Store } from './database.js';
-import { payloadHeader, TrajectoryError } from './trajectories.js';
+import { parseRef, payloadHeader, TrajectoryError, type TrajectoryScope } from './trajectories.js';
 import { currentRunTrace, traceSnapshot } from '../tasks/trace.js';
 import { randomId } from '../core/security.js';
 
@@ -89,6 +89,42 @@ export function historyRefBytes(row: Row): number | null {
 
 /** Logs larger than this go to the run's trajectory file; the row keeps their small fields. */
 export const inlineLogBytes = 2048;
+
+// A run's context and configuration snapshots (#1403). One larger than inlineSnapshotBytes is a record of a trajectory
+// file; its task_runs column keeps the snapshot's header fields and the record's ref in $trajectory. Smaller ones, and
+// those written before #1403 that the background migration has not reached yet, stay whole in the column.
+export const inlineSnapshotBytes = 2048;
+const snapshotHeaderKeys = ['schema_version', 'sha256', 'original_bytes', 'content_bytes', 'complete', 'missing_reason'];
+export interface RunSnapshotHeader { $trajectory: string; sha256?: string; original_bytes?: number }
+
+/** The header a moved snapshot left in its column, or null for a column that holds its snapshot. */
+export function runSnapshotHeader(stored: unknown): RunSnapshotHeader | null {
+  // A snapshot written whole starts with its own fields ({"schema_version":…); checking the prefix avoids parsing one.
+  if (typeof stored !== 'string' || !stored.startsWith('{"$trajectory":')) return null;
+  try { const header = JSON.parse(stored); return typeof header?.$trajectory === 'string' ? header : null; } catch { return null; }
+}
+
+/** A task_runs snapshot column's snapshot, the same text traceSnapshot produced when the run started. */
+export function runSnapshot(store: Store, stored: string): string {
+  const header = runSnapshotHeader(stored);
+  return header ? JSON.stringify(store.trajectories.read(header.$trajectory).data) : stored;
+}
+
+/**
+ * The text a task_runs snapshot column is stored as. text is a snapshot as traceSnapshot wrote it (JSON that serializes
+ * back to the same text). A large one is appended to scope's file as an event record, unless `same` — the column of an
+ * earlier run of the task — refers to a record of an identical snapshot (same sha256 and size) that has not expired:
+ * a run started on unchanged context then shares that record instead of writing it again.
+ */
+export function storedRunSnapshot(store: Store, scope: TrajectoryScope | null, id: string, text: string, same?: unknown): string {
+  if (!scope || Buffer.byteLength(text) <= inlineSnapshotBytes) return text;
+  const snapshot = JSON.parse(text), earlier = runSnapshotHeader(same);
+  let reuse = !!earlier && typeof snapshot?.sha256 === 'string' && earlier.sha256 === snapshot.sha256 && earlier.original_bytes === snapshot.original_bytes;
+  try { reuse &&= !!store.get('SELECT 1 FROM trajectory_files WHERE id=? AND expired_at IS NULL', parseRef(earlier!.$trajectory).file); } catch { reuse = false; }
+  const header: Record<string, unknown> = { $trajectory: reuse ? earlier!.$trajectory : store.trajectories.append(scope, 'event', id, snapshot) };
+  if (snapshot && typeof snapshot === 'object') for (const key of snapshotHeaderKeys) if (key in snapshot) header[key] = snapshot[key];
+  return JSON.stringify(header);
+}
 
 /**
  * Inserts a task log. A large log of a task inside a run goes to the run's trajectory file: the row keeps its small
