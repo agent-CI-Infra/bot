@@ -12,6 +12,8 @@ import { createHash } from 'node:crypto';
 // which every reader falls back to, so readers return the same content before and after.
 
 const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
+/** The process ran out of descriptors or memory: no fault of the row being moved, which is read again later. */
+const exhausted = (error: unknown) => ['EMFILE', 'ENFILE', 'ENOMEM'].includes(String((error as { code?: unknown } | null)?.code));
 export const migrationKey = 'trajectory_migration';
 
 export interface PhaseState { cursor: number; migrated: number; skipped: number; failed: number; bytes: number; last_error: string | null; finished_at: string | null }
@@ -44,7 +46,7 @@ export class PayloadMigration {
   private readonly contexts = new Map<string, string>();
   // Records moved per slice in the last minute: [time, records].
   private readonly recent: [number, number][] = [];
-  constructor(private readonly store: Store, private readonly options: { readMs?: number; pauseMs?: number; openFiles?: number; idleMs?: number; slowSliceMs?: number; lowDiskMs?: number;
+  constructor(private readonly store: Store, private readonly options: { readMs?: number; pauseMs?: number; openFiles?: number; idleMs?: number; slowSliceMs?: number; lowDiskMs?: number; exhaustedMs?: number;
     guard?: { check(): { low: boolean } | null } | null; log?: (line: string) => void; now?: () => number } = {}) {}
 
   private get now() { return this.options.now ?? (() => performance.now()); }
@@ -72,6 +74,13 @@ export class PayloadMigration {
     this.closeTouched(0); this.contexts.clear();
     await this.pause(this.options.lowDiskMs ?? 60_000);
   }
+  // Out of descriptors or memory: the slice gave up before the row that hit it; every migration file is closed and the
+  // row is read again after a pause, instead of being counted failed and passed by the cursor for good.
+  private async waitForResources() {
+    (this.options.log ?? console.warn)('[migration] out of descriptors or memory; retrying shortly');
+    this.closeTouched(0); this.contexts.clear();
+    await this.pause(this.options.exhaustedMs ?? 60_000);
+  }
 
   private async loop() {
     const state = readState(this.store);
@@ -98,7 +107,7 @@ export class PayloadMigration {
       if ((this.options.guard === undefined ? this.store.disk : this.options.guard)?.check()?.low) { await this.waitForSpace(state, 'low_disk'); continue; }
       if (state.paused) { state.paused = null; this.save(state); }
       const started = this.now(), moves: Move[] = [];
-      let cursor = progress.cursor, skipped = 0, failed = 0, readRows = 0, error: string | null = null, full = false;
+      let cursor = progress.cursor, skipped = 0, failed = 0, readRows = 0, error: string | null = null, full = false, short = false;
       // Read at least one row, then until the slice's time is used; a single row is bounded by its own size.
       for (let read = 0; read === 0 || this.now() - started < (this.options.readMs ?? 25) && moves.length < 200; read++) {
         const row = next.get(cursor) as Row | undefined;
@@ -109,6 +118,7 @@ export class PayloadMigration {
         catch (failure) {
           // A full disk is not the row's fault: the slice ends before it.
           if (diskFull(failure)) { full = true; break; }
+          if (exhausted(failure)) { short = true; break; }
           failed++; error = `${phase.table} rowid ${rowid}: ${String((failure as Error)?.message ?? failure).slice(0, 300)}`;
         }
         cursor = rowid;
@@ -116,6 +126,7 @@ export class PayloadMigration {
       this.logSlowSlice(phase.name, 'read', this.now() - started, readRows);
       if (cursor === progress.cursor) {
         if (full) { await this.waitForSpace(state, 'disk_full'); continue; }
+        if (short) { await this.waitForResources(); continue; }
         progress.finished_at ??= new Date().toISOString(); this.save(state); return total;
       }
       // The files reach the disk before any row stops holding its payload; each record is read back against its hash.
@@ -123,11 +134,14 @@ export class PayloadMigration {
       try { await Promise.all([...new Set(moves.map(move => move.refs.at(-1)!).filter(Boolean))].map(ref => this.store.trajectories.sync(ref))); }
       catch (failure) { if (!diskFull(failure)) throw failure; await this.waitForSpace(state, 'disk_full'); continue; }
       const verifyStarted = this.now();
+      let unchecked = false;
       const verified = moves.filter(move => {
         try { for (const ref of move.refs) this.store.trajectories.read(ref); for (const blob of move.blobs ?? []) this.store.trajectories.getBlob(blob); return true; }
-        catch (failure) { failed++; error = String((failure as Error).message).slice(0, 300); this.contexts.clear(); return false; }
+        catch (failure) { if (exhausted(failure)) unchecked = true; else { failed++; error = String((failure as Error).message).slice(0, 300); } this.contexts.clear(); return false; }
       });
       this.logSlowSlice(phase.name, 'verify', this.now() - verifyStarted, moves.length);
+      // A record that could not be read back for want of descriptors is not known to be bad: the whole slice is read again.
+      if (unchecked) { await this.waitForResources(); continue; }
       const now = Date.now();
       this.recent.push([now, verified.length]);
       while (this.recent.length && this.recent[0]![0] < now - 60_000) this.recent.shift();
@@ -150,6 +164,7 @@ export class PayloadMigration {
       total += verified.length;
       this.closeTouched(this.options.openFiles ?? 32);
       if (full) { await this.waitForSpace(state, 'disk_full'); continue; }
+      if (short) { await this.waitForResources(); continue; }
       // Leave at least as much time to everything else as this slice took.
       await this.pause(Math.max(this.options.pauseMs ?? 10, this.now() - started));
     }
@@ -204,7 +219,8 @@ export class PayloadMigration {
           if (runSnapshotHeader(text) || Buffer.byteLength(text) <= inlineSnapshotBytes) continue;
           // Only a snapshot that serializes back to its own text reads the same from its record; any other stays.
           if (JSON.stringify(JSON.parse(text)) !== text) continue;
-          const stored = storedRunSnapshot(s, scope, `task_runs:${row.id}:${part}`, text, part === 'context' ? this.contexts.get(String(row.task_id)) : null);
+          const stored = storedRunSnapshot(s, scope, `task_runs:${row.id}:${part}`, text, part === 'context' ? this.contexts.get(String(row.task_id)) : null,
+            (scope, type, id, data) => this.append(scope, type, id, data));
           columns[part + '_snapshot'] = stored; refs.push(runSnapshotHeader(stored)!.$trajectory); bytes += text.length;
           if (part === 'context') { if (this.contexts.size > 10_000) this.contexts.clear(); this.contexts.set(String(row.task_id), stored); }
         }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readlinkSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
@@ -204,6 +204,52 @@ test('slices stay short: the event loop is never blocked for long while the migr
   assert.equal(finished(store).phases.task_tools.migrated, 581);
   // The 1 s limit of the acceptance with a wide margin for a loaded test machine.
   assert.ok(delay.max / 1e6 < 500, `longest block ${(delay.max / 1e6).toFixed(0)} ms`);
+});
+
+test('moving run snapshots keeps at most openFiles migration files open, however many tasks there are', async t => {
+  const store = open(t, database(t));
+  store.run("INSERT INTO accounts VALUES('a','Fixture','bot_account',NULL,'{}','2026-01-01')");
+  store.run("INSERT INTO repositories VALUES('101','fixture/project','10','a')");
+  // Only runs: no later phase appends to (and so closes) the same task files.
+  store.transaction(() => {
+    for (let i = 0; i < 40; i++) {
+      const task = 'runs-' + i;
+      store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES(?,'101','task.request','running','Fixture','{}')", task);
+      for (let r = 0; r < 2; r++) store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,context_snapshot,config_snapshot) VALUES(?,?,'execution',1,1,'now','succeeded',?,?)",
+        `${task}-${r}`, task, traceSnapshot({ request: 'C'.repeat(3000), task }), traceSnapshot({ prompt: `P${r} `.repeat(1000) }));
+    }
+  });
+  const openEntries = () => store.get('SELECT count(*) n FROM trajectory_files WHERE closed_at IS NULL').n;
+  let most = 0;
+  const sync = store.trajectories.sync.bind(store.trajectories);
+  t.mock.method(store.trajectories, 'sync', ref => { most = Math.max(most, openEntries()); return sync(ref); });
+  await migrate(store, { readMs: 0, openFiles: 4 });
+  const state = finished(store);
+  assert.equal(state.phases.task_runs.migrated, 80); assert.equal(state.phases.task_runs.failed, 0);
+  // Sampled before each slice closes files beyond openFiles: the kept 4 plus the slice's own.
+  assert.ok(most <= 5, `${most} migration files open at once`);
+  assert.equal(openEntries(), 0);
+  await store.trajectories.settle();
+  if (existsSync('/proc/self/fd')) {
+    const held = readdirSync('/proc/self/fd').filter(fd => { try { return readlinkSync('/proc/self/fd/' + fd).startsWith(store.trajectories.root); } catch { return false; } });
+    assert.equal(held.length, 0, 'no descriptor into the trajectory files is left open');
+  }
+});
+
+test('a row that runs out of descriptors is moved after a pause instead of being counted failed and passed', async t => {
+  const store = open(t, database(t)); legacy(store, { tasks: 2, operations: 1 });
+  const before = view(store), append = store.trajectories.append.bind(store.trajectories);
+  let thrown = 0;
+  t.mock.method(store.trajectories, 'append', (...args) => {
+    if (!thrown && String(args[2]).startsWith('task_runs:task-1-run-0')) { thrown++; throw Object.assign(new Error('EMFILE: too many open files'), { code: 'EMFILE' }); }
+    return append(...args);
+  });
+  await migrate(store, { exhaustedMs: 5, log: () => {} });
+  assert.equal(thrown, 1);
+  const state = finished(store);
+  assert.equal(state.phases.task_runs.failed, 0); assert.equal(state.phases.task_runs.migrated, 6);
+  assert.match(store.get("SELECT context_snapshot FROM task_runs WHERE id='task-1-run-0'").context_snapshot, /^\{"\$trajectory":/);
+  assert.deepEqual(view(store), before);
 });
 
 test('the migration reads tables by rowid ranges', t => {
