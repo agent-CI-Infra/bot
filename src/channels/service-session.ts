@@ -170,7 +170,7 @@ export class ChannelServiceSessions {
     };
     // Before each model request: the model still serves every project in scope, or the turn stops instead of switching.
     const guard = async () => { check(); if (modelGaps(this.store, model.id, projects).length) fail(409, 'channel_service_model_unavailable'); };
-    const explorers = new Map<string, { tokens: ReadTokens; explorer: RepositoryExplorer; error?: Json }>();
+    const explorers = new Map<string, { tokens: ReadTokens; explorer: RepositoryExplorer }>();
     const github = async (name: string, args: Json) => {
       const { repository: selected, ...rest } = args, project = this.bindings.project(binding, selected);
       if (!project) return { error: 'repository_out_of_scope', detail: '该仓库不在本群可用的项目范围内，请先查看 list_projects。' };
@@ -179,10 +179,10 @@ export class ChannelServiceSessions {
       if (!entry) {
         const tokens = new ReadTokens(this.store, this.store.get('SELECT * FROM repositories WHERE id=?', project.id)!, redactor, guard, this.githubUrl,githubReadScopes(permissions()),()=>githubReadScopes(permissions()));
         entry = { tokens, explorer: new RepositoryExplorer(tokens, redactor, guard) }; explorers.set(project.id, entry);
-        const connected = await entry.explorer.execute('github_read_token', {});
-        if (connected.error) entry.error = connected;
       }
-      return entry.error ?? { repository: project.full_name, result: await entry.explorer.execute(name, rest) };
+      // Each call connects again if needed: one refused connection (a rate limit, #1393) never ends reads for the turn.
+      const out = await entry.explorer.executeConnected(name, rest);
+      return 'refused' in out ? out.refused : { repository: project.full_name, result: out.result };
     };
     // github_write (#381): only where the binding's level has write, only in repositories of the group's scope, and only while
     // the person who configured the binding may still write tasks there. Keys are unique within this turn.

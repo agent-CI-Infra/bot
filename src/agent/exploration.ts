@@ -61,11 +61,15 @@ export interface ArtifactExtractor {
   canWriteCheckout?: () => boolean;
 }
 
+const rateLimited = (error: unknown): error is TaskError => error instanceof TaskError && error.code === 'github_rate_limited';
+
 export class RepositoryExplorer {
   private client?: GitHub;
   private readonly cache = new Map<number, string[]>();
   readonly logs: any[] = [];
   private scopeKey='';
+  // A connection GitHub rate-limited, and when its window resets (executeConnected only).
+  private refusedConnection?: { error: TaskError; until: number };
   constructor(readonly tokens: ReadTokens, readonly redactor: Redactor, readonly guard: () => Promise<void>, readonly artifacts?: ArtifactExtractor) {}
   async connect() {
     const key=this.tokens.allowedScopes().slice().sort().join(',');
@@ -89,6 +93,42 @@ export class RepositoryExplorer {
       if (!(error instanceof TaskError) || error.code === 'github_rate_limited') throw error;
       return { error: error.code, detail: this.redactor.text(error.detail || '仓库信息读取失败，请查看对应 GitHub 链接。') };
     }
+  }
+
+  /**
+   * One repository tool call for a session that offers no github_read_token tool: the group and assistant repository tools
+   * (#1393). The reader connects on its own before every call, so a failed connection leaves nothing half-connected and the
+   * next call connects again. A rate limit, which stops a task attempt, is answered here as an observation instead, so the
+   * model can wait for the reset rather than blame the credentials. Until a rate-limited connection's window resets, calls
+   * get that answer without minting a token: each mint would run into the same window and count against
+   * ReadTokens.maxIssued, which would end GitHub reads for the session with github_read_token_limit.
+   * Returns the refusal (a failed connection or a rate limit) or the call's own result.
+   */
+  async executeConnected(name: string, args: any): Promise<{ refused: any } | { result: any }> {
+    const until = (error: TaskError) => error.retryAfterMs === undefined ? null : Date.now() + error.retryAfterMs;
+    const waiting = this.refusedConnection;
+    if (waiting && waiting.until > Date.now()) { await this.guard(); return { refused: this.rateLimitObservation(waiting.error, waiting.until) }; }
+    this.refusedConnection = undefined;
+    try {
+      const connected = await this.execute('github_read_token', {});
+      if (connected?.error) return { refused: connected };
+    } catch (error) {
+      if (!rateLimited(error)) throw error;
+      const reset = until(error);
+      if (reset !== null) this.refusedConnection = { error, until: reset };
+      return { refused: this.rateLimitObservation(error, reset) };
+    }
+    try { return { result: await this.execute(name, args) }; }
+    catch (error) { if (!rateLimited(error)) throw error; return { refused: this.rateLimitObservation(error, until(error)) }; }
+  }
+  // Which window is used up, when it resets, and that the credentials are not at fault (#1393).
+  private rateLimitObservation(error: TaskError, until: number | null) {
+    return { error: error.code, bucket: error.bucket ?? null, reset_at: until === null ? null : new Date(until).toISOString(),
+      ...(error.detail ? { detail: this.redactor.text(error.detail) } : {}),
+      instruction: 'GitHub rate limit: the request quota of this GitHub bucket is used up for now. The bot\'s GitHub credentials and permissions are fine; '
+        + 'this is not a credential or permission problem and nobody needs to check or restore them. '
+        + (until === null ? 'GitHub named no reset time: retry in about a minute.' : 'Retry after reset_at.')
+        + ' If you cannot wait, say which reads are missing and when they resume.' };
   }
 
   private async read(name: string, args: any): Promise<any> {

@@ -143,6 +143,38 @@ test('the repository assistant answers any member across its repositories withou
   assert.equal(f.h.store.get('SELECT count(*) n FROM channel_service_turns').n, 1); assert.equal(f.requests.length, 5);
 });
 
+test('a rate-limited first GitHub read is reported as a rate limit and a read after the reset in the same turn succeeds (#1393)', async t => {
+  const f = await fixture(t), bound = await f.bind(); assert.equal(bound.status, 200, JSON.stringify(bound.value));
+  // The installation's window is used up until shortly from now, as when other work there spent it.
+  const reset = Date.now() + 1500;
+  f.h.store.run(`INSERT INTO github_rate_limits(bucket,resource,kind,account_id,installation_id,quota,remaining,used,reset_at,observed_at)
+    VALUES('installation:55','core','installation',?,'55',5000,0,5000,?,?)`, f.a.id, reset, new Date().toISOString());
+  f.modelState.respond = async (body, res) => {
+    const seen = observations(body);
+    if (seen.length === 0) return call(res, 'github_read', { repository: repo(101), path: '/pulls?state=open' });
+    if (seen.length === 1) return call(res, 'github_search', { repository: repo(101), query: 'is:open' });
+    if (seen.length === 2) {
+      await new Promise(resolve => setTimeout(resolve, Math.max(0, Date.parse(seen[0].reset_at) - Date.now()) + 20));
+      return call(res, 'github_read', { repository: repo(101), path: '/pulls?state=open' });
+    }
+    return say(res, 'admin-fixture-101 有 1 个未关闭的 PR：#7 Bind group assistants。');
+  };
+  const row = await done(f, await post(f.h, f.id, groupMessage('bot 仓库最近有哪些未关闭的 PR？')));
+  assert.equal(row.state, 'completed', row.error);
+  const seen = observations(f.requests.at(-1));
+  assert.ok(!JSON.stringify(seen).includes('github_read_token_required'), JSON.stringify(seen));
+  assert.deepEqual(seen.map(o => o.error ?? null), ['github_rate_limited', 'github_rate_limited', null]);
+  for (const limited of seen.slice(0, 2)) {
+    assert.equal(limited.bucket, 'installation:55');
+    assert.match(limited.detail, /本小时的请求额度已用完/); assert.match(limited.instruction, /credentials and permissions are fine/);
+  }
+  assert.ok(Math.abs(Date.parse(seen[0].reset_at) - reset) < 1000, seen[0].reset_at);
+  assert.equal(seen[2].repository, repo(101)); assert.equal(seen[2].result[0].number, 7);
+  // One token for the refused connection, none while the window stayed used up, one after it reset; both revoked.
+  assert.equal(f.gh.state.requests.filter(r => r.path.endsWith('/access_tokens')).length, 2);
+  assert.equal(f.gh.state.requests.filter(r => r.method === 'DELETE' && r.path === '/installation/token').length, 2);
+});
+
 test('binding needs a Feishu-bound maintainer in the group with config.write over every repository or the organization', async t => {
   const f = await fixture(t), { h, chat } = f, bindings = f.service.serviceBindings;
   const input = { model_id: f.assistantModel.id, scope: { kind: 'repositories', repositories: ['101'] }, enabled: true, expected_revision: 0 };
