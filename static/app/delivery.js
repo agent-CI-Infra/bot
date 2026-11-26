@@ -1,4 +1,10 @@
 function deliveryCaption(row){return {tasks_created:'已创建任务',draft:'因草稿跳过',not_trigger:'不是触发事件',duplicate:'重复，不重复建任务',review_disabled:'检视未开启，仅归档',project_disabled:'项目已禁用，仅归档',unregistered_repository:'仓库未启动，仅归档'}[row.processing_result]||row.processing_result||'已归档';}
+// Why a body kept in its own file (#1403) cannot be shown in the raw section.
+const deliveryBodyErrors={
+  delivery_body_missing:'正文文件已不存在，无法显示原始正文。',
+  delivery_body_corrupt:'正文文件与归档时记录的校验值不一致，已拒绝显示。',
+  delivery_body_unreadable:'正文文件暂时读取失败，请稍后刷新。',
+};
 // #238: reception, signature verification and processing are read as separate facts. Archive outcomes keep their own
 // neutral wording, so duplicate/draft/disabled/untriggered rows never borrow the refusal styling of a bad signature.
 const deliveryOutcomes = {
@@ -63,7 +69,9 @@ function deliveryDetail(value){
   // private_key) at every depth of request_headers, payload and response, and a body it cannot filter comes back as a
   // placeholder instead of the raw bytes. The summary says that, so it never promises a sanitiser this exit does not
   // have; a header removed at ingest is already gone before the body is read.
-  const raw=element('details','','fold raw-payload'); raw.append(element('summary','原始请求与响应（凭据字段已脱敏；无法脱敏的正文不显示）'),
-    element('pre',JSON.stringify({request_headers:event.request_headers,payload:event.payload,response:event.response},null,2),'output')); nodes.push(raw);
+  const raw=element('details','','fold raw-payload'); raw.append(element('summary','原始请求与响应（凭据字段已脱敏；无法脱敏的正文不显示）'));
+  // A body kept in its own file that could not be read is named, so it does not look like one removed by retention.
+  if(event.payload_unreadable)raw.append(element('p',deliveryBodyErrors[event.payload_unreadable]||`正文文件读取失败（${event.payload_unreadable}），无法显示。`,'muted'));
+  raw.append(element('pre',JSON.stringify({request_headers:event.request_headers,payload:event.payload,response:event.response},null,2),'output')); nodes.push(raw);
   return nodes;
 }

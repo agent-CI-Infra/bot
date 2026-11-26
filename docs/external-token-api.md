@@ -137,7 +137,7 @@ HTTP 200 示例：
 }
 ```
 
-`payload` 是原本会转发的完整 GitHub 事件载荷；`object_number` 为 Issue 或 PR 编号。超过接收时间 24 小时的事件不再返回，这一窗口只限制轮询，不缩短管理页已有投递档案的保留时间。没有新事件时正常返回 `200 {"events":[]}`。
+`payload` 是原本会转发的完整 GitHub 事件载荷；`object_number` 为 Issue 或 PR 编号。归档正文文件缺失或校验失败时，该事件的 `payload` 为 `null`，并多出 `payload_unavailable`（`delivery_body_missing`、`delivery_body_corrupt` 或 `delivery_body_unreadable`），`action` 与 `object_number` 仍按归档摘要给出；正文因服务端文件句柄或内存暂时不足而读取失败时，整次轮询返回 500 且不推进进度，稍后重试即可拿到完整事件。超过接收时间 24 小时的事件不再返回，这一窗口只限制轮询，不缩短管理页已有投递档案的保留时间。没有新事件时正常返回 `200 {"events":[]}`。
 
 **每个外部客户端各自保存进度**，多个客户端即使绑定同一个仓库，也互不影响。进度按客户端 ID 持久保存，续换 Token 或服务重启都不会重置。同一个客户端的并发轮询串行处理，建议客户端也串行拉取并妥善保存每次响应。
 

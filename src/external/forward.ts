@@ -1,6 +1,6 @@
 import { createHmac } from 'node:crypto';
 import { type Store, type Row } from '../storage/database.js';
-import { deliveryBody, DeliveryBodyError } from '../storage/webhook-bodies.js';
+import { deliveryBody, DeliveryBodyError, transientBodyError } from '../storage/webhook-bodies.js';
 import { randomId, HttpError, type Json } from '../core/security.js';
 import { redactEgress } from '../core/redaction.js';
 import { sendWebhook } from './target.js';
@@ -32,8 +32,9 @@ export class Forwarder{
     const sub=this.store.get('SELECT s.* FROM external_subscriptions s JOIN external_clients c ON c.id=s.client_id JOIN policies p ON p.repository_id=s.repository_id WHERE s.id=? AND s.enabled=1 AND c.enabled=1 AND p.enabled=1',row.subscription_id);
     if(!sub||sub.version!==row.version){this.store.run("UPDATE external_deliveries SET state='cancelled',error='subscription_changed' WHERE id=?",row.id);return;}
     const source=this.store.get("SELECT * FROM deliveries WHERE id=? AND status='accepted' AND duplicate=0",row.source_id);
-    // The body is read before the delivery is claimed: one whose file cannot be read is as unavailable as a missing row.
-    let received:Buffer|null=null;if(source){try{received=deliveryBody(this.store,source);}catch(error){if(!(error instanceof DeliveryBodyError))throw error;}}
+    // The body is read before the delivery is claimed: one whose file is gone or damaged is as unavailable as a missing
+    // row; one that could not be read for want of descriptors stays unclaimed and is tried again on a later tick.
+    let received:Buffer|null=null;if(source){try{received=deliveryBody(this.store,source);}catch(error){if(transientBodyError(error))return;if(!(error instanceof DeliveryBodyError))throw error;}}
     if(!source||!received){this.store.run("UPDATE external_deliveries SET state='failed',error='source_unavailable' WHERE id=?",row.id);return;}
     const claimed=this.store.run("UPDATE external_deliveries SET state='sending',attempts=attempts+1 WHERE id=? AND state IN ('pending','retry')",row.id);if(!claimed.changes)return;
     // The subscriber receives the accepted body, which is the same body the console shows: a credential-named field is

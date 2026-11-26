@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { mkdir as mkdirAsync, open as openAsync } from 'node:fs/promises';
+import { mkdir as mkdirAsync, open as openAsync, rm as rmAsync } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
 import type { Row, Store } from './database.js';
 import { addColumns, segment } from './trajectories.js';
@@ -19,11 +19,20 @@ export const inlineDeliveryBytes = 2048;
 
 const sha256 = (data: Buffer) => createHash('sha256').update(data).digest('hex');
 
+/**
+ * A body that cannot be returned: its file is gone (delivery_body_missing), does not match the sha256 in the row
+ * (delivery_body_corrupt), or could not be read for another reason (delivery_body_unreadable, the file system error
+ * as cause). transientBodyError() tells a read that may work again from one that will not.
+ */
 export class DeliveryBodyError extends Error {
-  /** cause: the file system error behind a body file that could not be read (ENOENT, or EMFILE while out of descriptors). */
-  constructor(readonly code: 'delivery_body_missing' | 'delivery_body_corrupt' | 'delivery_body_ref_invalid', readonly detail: string, options?: { cause?: unknown }) {
+  constructor(readonly code: 'delivery_body_missing' | 'delivery_body_corrupt' | 'delivery_body_unreadable' | 'delivery_body_ref_invalid', readonly detail: string, options?: { cause?: unknown }) {
     super(code + ': ' + detail, options);
   }
+}
+
+/** A body file that could not be read for want of descriptors or memory, not because it is gone: worth trying again. */
+export function transientBodyError(error: unknown): boolean {
+  return error instanceof DeliveryBodyError && ['EMFILE', 'ENFILE', 'ENOMEM', 'EAGAIN'].includes(String((error.cause as { code?: unknown } | undefined)?.code));
 }
 
 /** Columns of a body kept outside the row; adding a column does not read the table's rows. */
@@ -49,7 +58,10 @@ export async function writeDeliveryBody(store: Store, repositoryId: string | nul
   const ref = deliveryBodyRef(repositoryId, id), path = bodyPath(store, ref);
   await mkdirAsync(dirname(path), { recursive: true, mode: 0o700 });
   const file = await openAsync(path, 'w', 0o600);
-  try { await file.writeFile(body); await file.datasync(); } finally { await file.close(); }
+  // A write that fails part-way (a full disk) leaves no partial file behind.
+  try { await file.writeFile(body); await file.datasync(); }
+  catch (error) { await file.close().catch(() => {}); await rmAsync(path, { force: true }).catch(() => {}); throw error; }
+  await file.close();
   return { ref, sha256: sha256(body), bytes: body.length };
 }
 
@@ -75,7 +87,11 @@ export function deliveryBody(store: Store, row: Row): Buffer {
   if (!row.payload_ref) return Buffer.from((row.payload ?? new Uint8Array()) as Uint8Array);
   let data: Buffer;
   try { data = readFileSync(bodyPath(store, String(row.payload_ref))); }
-  catch (error) { if (error instanceof DeliveryBodyError) throw error; throw new DeliveryBodyError('delivery_body_missing', String(row.payload_ref), { cause: error }); }
+  catch (error) {
+    if (error instanceof DeliveryBodyError) throw error;
+    const code = (error as NodeJS.ErrnoException).code;
+    throw new DeliveryBodyError(code === 'ENOENT' || code === 'ENOTDIR' ? 'delivery_body_missing' : 'delivery_body_unreadable', String(row.payload_ref), { cause: error });
+  }
   if (sha256(data) !== row.payload_sha256) throw new DeliveryBodyError('delivery_body_corrupt', String(row.payload_ref));
   return data;
 }
