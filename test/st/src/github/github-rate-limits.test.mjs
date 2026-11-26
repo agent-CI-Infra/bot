@@ -8,7 +8,8 @@ import { harness, setup, account, repository, testPassword } from '../../../fixt
 import { TaskEngine } from '../../../../dist/agent/engine.js';
 import { enqueue } from '../../../../dist/review/queue.js';
 import { InstallationSync } from '../../../../dist/app/installations.js';
-import { appBucket, installationBucket, userBucket, bucketName, observe, refused, blockedUntil, rateLimitView } from '../../../../dist/github/rate-limits.js';
+import { appBucket, installationBucket, userBucket, bucketName, observe, record, refused, blockedUntil, rateLimitView } from '../../../../dist/github/rate-limits.js';
+import { Store } from '../../../../dist/storage/database.js';
 import { GitHub } from '../../../../dist/github/client.js';
 import { Redactor } from '../../../../dist/agent/common.js';
 
@@ -155,6 +156,40 @@ test('the view groups windows by account and counts the tasks waiting for each t
   const view = rateLimitView(h.store, now), buckets = view.accounts[0].buckets;
   assert.deepEqual(buckets.map(b => [b.kind, b.owner, b.windows[0].remaining, !!b.blocked_until, b.waiting_tasks]),
     [['app', null, 4999, false, 1], ['installation', 'org-a', 12, false, 0], ['installation', 'org-b', 0, true, 1]]);
+});
+
+// Production (#1401): every GitHub response upserted and committed its window, mostly with the same numbers; under IO
+// pressure 834 of those commits a day took 0.4 s or more, 370 s in all. A report is written when it changes what readers act on.
+test('a window is written again only when it changes what readers act on, or once the stored report is 30 s old', t => {
+  const store = new Store(':memory:', Buffer.alloc(32, 5)); t.after(() => store.close());
+  let writes = 0; const run = store.run.bind(store);
+  store.run = (sql, ...args) => { if (/INTO github_rate_limits/.test(sql)) writes++; return run(sql, ...args); };
+  const start = Math.floor(Date.now() / 1000) * 1000, bucket = installationBucket('a', '55', 'org');
+  const report = (remaining, at, reset, { quota = 5000, to = bucket } = {}) => record(store, to, 'core', { quota, remaining, used: quota - remaining, reset_at: reset }, at);
+  const stored = (to = bucket) => store.get("SELECT quota,remaining,reset_at,owner,observed_at FROM github_rate_limits WHERE bucket=? AND resource='core'", to.key);
+  // An hour of one request a second was 3,600 writes: now one every 30 s.
+  let reset = start + 3600_000;
+  for (let i = 0; i < 3600; i++) report(4999 - i, start + i * 1000, reset);
+  assert.equal(writes, 120);
+  // Ten a second for five minutes in the next window was 3,000 writes: now one per 50 requests (1% of the quota).
+  writes = 0; reset += 3600_000;
+  for (let i = 0; i < 3000; i++) report(4999 - i, start + 3600_000 + i * 100, reset);
+  assert.equal(writes, 60); assert.equal(stored().remaining, 2049);
+  // The window running out is written at once, however close the stored count was: requests stop until it resets.
+  let at = start + 3900_000; report(30, at, reset); report(1, at + 1, reset);
+  assert.equal(stored().remaining, 30); assert.equal(blockedUntil(store, bucket, at + 1), null);
+  report(0, at + 2, reset); assert.equal(stored().remaining, 0); assert.equal(blockedUntil(store, bucket, at + 2), reset);
+  // A refused request still records its wait when its window report changed nothing.
+  writes = 0; const { until } = refused(store, bucket, new Headers(windowHeaders(0, reset, { 'retry-after': '30' })), at + 3);
+  assert.equal(writes, 1, 'only the wait'); assert.equal(blockedUntil(store, bucket, at + 3), Math.max(until, reset));
+  // A new window, a new quota and a newly learned owner are written at once; the same numbers again only after 30 s.
+  writes = 0; at = reset + 1000; reset += 3600_000;
+  report(4999, at, reset); assert.deepEqual([stored().remaining, stored().reset_at, blockedUntil(store, bucket, at)], [4999, reset, null]);
+  report(4999, at + 1, reset, { quota: 15000 }); assert.equal(stored().quota, 15000);
+  const user = userBucket('u'), named = userBucket('u', 'dept-bot');
+  report(4999, at, reset, { to: user }); report(4999, at + 1, reset, { to: named }); assert.equal(stored(user).owner, 'dept-bot');
+  report(4999, at + 29_000, reset, { to: named }); assert.equal(writes, 4);
+  report(4999, at + 31_000, reset, { to: named }); assert.equal(writes, 5); assert.equal(stored(user).observed_at, new Date(at + 31_000).toISOString());
 });
 
 test('a window is named by whose requests share it: an App installation on an organization, or the GitHub user of a Token account', () => {

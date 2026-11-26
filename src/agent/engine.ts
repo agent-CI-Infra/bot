@@ -50,7 +50,7 @@ import { classificationLabels, hasLabelName, needsHumanIssueLabel, repositoryLab
 import { agentLoop, type PlatformTools } from './loop.js';
 import { roleAssignmentContext } from './profiles.js';
 import { ReadTokens } from './read-token.js';
-import { currentOperation, VolumeFull, Workspace } from './workspace.js';
+import { currentOperation, FinalizeFailed, VolumeFull, Workspace } from './workspace.js';
 import { workspaceContext } from './workspace-tools.js';
 import {roleBackendWorkspace} from '../roles/workspace.js';
 import {recoverWithManager} from '../roles/manager-recovery.js';
@@ -81,6 +81,8 @@ const terminal=['succeeded','pr_opened','completed','cancelled','superseded'];
 const rulePolicy=(store:Store,task:Row)=>taskConfiguration(store,task)?.policy??store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id)!;
 const automaticRetry=new Set(['retry_wait','waiting_configuration','waiting_environment','waiting_pr_head']);
 const retryCycleMs=8*60*60*1000;
+// How often tick() checkpoints running task clocks into task_metrics; a restart loses at most this much per running task.
+const metricsCheckpointMs=30_000;
 // Reviews and reply tasks answer on the object; development publishes a branch and PR.
 const replies=(kind:string)=>kind.startsWith('review.')||kind.startsWith('workflow.');
 const engineKinds="(kind LIKE 'review.%' OR kind LIKE 'development.%' OR kind LIKE 'workflow.%' OR kind IN ('release.observe','release.notes','actions.failures','task.request','task.development'))";
@@ -123,6 +125,8 @@ export class TaskEngine {
   // The parallel runner calls last granted by the manager, per repository.
   private readonly granted=new Map<string,number>();
   private timer:ReturnType<typeof setInterval>|undefined;private closing=false;private readonly merging=new Map<string,Promise<unknown>>();
+  // When tick() last moved running clocks into task_metrics.runtime_ms.
+  private metricsCheckpointAt=0;
   readonly rules:RuleService;
   // #713: moves tasks nobody needs to act on out of 待处理; main.ts runs it in the background, run() for its own work.
   readonly obsolete:ObsoleteSweep;
@@ -158,8 +162,15 @@ export class TaskEngine {
       traceEvent(this.store,parked.id,'manager_recovery_queued',{previous_status:'needs_replan',code:parked.error_code},null,'framework');
     }
     this.sweepProgress();
+    // Readers add the running interval since active_since themselves (withTaskMetrics, the statistics), so this checkpoint
+    // only bounds what a restart loses: start() drops running intervals. Committing it every tick cost about 0.5 s a time
+    // under IO pressure (#1401); it runs every 30 s, and writes only while some task's clock runs.
     const checkpoint=Date.now();
-    this.store.run('UPDATE task_metrics SET runtime_ms=runtime_ms+max(0,?-active_since),active_since=? WHERE active_since IS NOT NULL',checkpoint,checkpoint);
+    if(checkpoint-this.metricsCheckpointAt>=metricsCheckpointMs){
+      this.metricsCheckpointAt=checkpoint;
+      if(this.store.get('SELECT 1 FROM task_metrics WHERE active_since IS NOT NULL LIMIT 1'))
+        this.store.run('UPDATE task_metrics SET runtime_ms=runtime_ms+max(0,?-active_since),active_since=? WHERE active_since IS NOT NULL',checkpoint,checkpoint);
+    }
     const tasks=this.store.all(`SELECT * FROM tasks WHERE ${engineKinds} AND
       status IN ('queued','retry_wait','waiting_configuration','waiting_environment','waiting_pr_head') AND next_run_at<=? ORDER BY priority,queue_seq,id`,Date.now());
     const limits=new Map<string,number>();
@@ -1048,7 +1059,8 @@ export class TaskEngine {
       // A development whose go-ahead no longer holds goes back to the Manager to answer the person (#815), not to a retry button.
       if(failure.code==='development_not_approved'&&task.kind==='development.issue'&&state==='waiting_permission'&&current?.claim_token===token&&!['cancelled','superseded'].includes(current.status))
         developmentStopped(this.store,{...task,input:this.store.get('SELECT input FROM tasks WHERE id=?',id)?.input??task.input},redactor.text(String(failure.detail||'')));
-      if(counted&&current?.claim_token===token&&!['cancelled','superseded'].includes(current.status))recordRetryFailure(this.store,task,{group:'execution:'+failure.code,occurrence:attemptRun!.id,code:failure.code,detail:redactor.text(String(failure.detail||''))});
+      if(counted&&current?.claim_token===token&&!['cancelled','superseded'].includes(current.status))recordRetryFailure(this.store,task,{group:'execution:'+failure.code,occurrence:attemptRun!.id,code:failure.code,detail:redactor.text(String(failure.detail||''))},
+        failure instanceof FinalizeFailed?failure.operation:undefined);
       if(workspace&&task.phase==='model'&&controlled(this.store,task,'development')&&task.kind.startsWith('development.')&&task.workspace_id){try{await checkpoint(this.store,task,workspace);}catch(saved){records.history(id,'checkpoint_fault',{phase:'role_failure_recovery',code:(saved as any).code||'snapshot_failed'});}}
       // release() reaps the agent. Its cached pi:start receipt describes that dead process, so every model-phase
       // failure must use a new workspace and operation namespace, for development as well as review at any attempt.

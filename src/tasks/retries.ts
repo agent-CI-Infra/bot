@@ -2,8 +2,11 @@ import { operationResult } from '../storage/payloads.js';
 import type {Store,Row} from '../storage/database.js';
 import {traceEvent} from './trace.js';
 
-/** Retry facts live in the task journal; a session or new commit does not start another counter. */
-export function recordRetryFailure(s:Store,task:Row,failure:{group:string;occurrence:string;code:string;detail?:string;source_ref?:string}){
+/**
+ * Retry facts live in the task journal; a session or new commit does not start another counter. finalize is the
+ * workspace_finalize operation whose error stopped the attempt (FinalizeFailed), when that is what stopped it.
+ */
+export function recordRetryFailure(s:Store,task:Row,failure:{group:string;occurrence:string;code:string;detail?:string;source_ref?:string},finalize?:string){
  return s.transaction(()=>{
   const resolved=s.get("SELECT id FROM task_history WHERE task_id=? AND type='retry_resolved' AND json_extract(data,'$.group')=? ORDER BY id DESC LIMIT 1",task.id,failure.group)?.id??0;
   const duplicate=s.get("SELECT id FROM task_history WHERE task_id=? AND id>? AND type='retry_failure' AND json_extract(data,'$.group')=? AND json_extract(data,'$.occurrence')=?",task.id,resolved,failure.group,failure.occurrence);
@@ -14,7 +17,8 @@ export function recordRetryFailure(s:Store,task:Row,failure:{group:string;occurr
   const dev=s.get("SELECT id,data FROM task_history WHERE task_id=? AND type='role_result' AND json_extract(data,'$.role')='dev' ORDER BY id DESC LIMIT 1",task.id);
   const candidate=s.get('SELECT candidate FROM task_records WHERE task_id=?',task.id)?.candidate;
   const saved=s.get('SELECT data FROM development_candidates WHERE task_id=?',task.id),lastSaved=saved?JSON.parse(saved.data):null;
-  const operation=failure.code==='candidate_unavailable'?s.get("SELECT id,request,result,result_ref FROM task_tools WHERE task_id=? AND state='completed' AND json_extract(request,'$.request.type')='workspace_finalize' AND json_extract(result,'$.error') IS NOT NULL ORDER BY rowid DESC LIMIT 1",task.id):null;
+  // Read by its id (#1401): task_tools has no task index, so looking for the task's latest failed finalize scanned millions of rows.
+  const operation=finalize?s.get("SELECT id,request,result,result_ref FROM task_tools WHERE id=? AND task_id=? AND state='completed' AND json_extract(result,'$.error') IS NOT NULL",finalize,task.id):null;
   // The row keeps the error's small fields; the whole result (a long detail) is in the run's file when it has one.
   let rawError=operation?JSON.parse(operation.result):null;
   if(operation?.result_ref)try{rawError=operationResult(s,'task_tools',operation);}catch{}
