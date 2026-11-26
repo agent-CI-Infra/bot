@@ -135,7 +135,7 @@ BOT_NODE_LABELS=region=cn-east,arch=amd64 \
 
 | 卷名 | 内容与重要性 |
 | --- | --- |
-| `bot-data` | 控制面 `control.sqlite`、轨迹文件 `trajectories/`、角色意见箱 `feedback/`（明文 gzip 压缩 `.json.gz`）、共享 `blobs/`、文件同步对象缓存 `sync-blobs/`（可按权威卷重建的暂存与读透 CAS 缓存）、Git 镜像缓存、公开看板快照、飞书加密附件 `channel-resources/` 与历史浏览器证据 |
+| `bot-data` | 控制面 `control.sqlite`、轨迹文件 `trajectories/`、Webhook 正文 `webhook-bodies/`（每条被接受的投递一个文件，数据库只存位置与哈希）、角色意见箱 `feedback/`（明文 gzip 压缩 `.json.gz`）、共享 `blobs/`、文件同步对象缓存 `sync-blobs/`（可按权威卷重建的暂存与读透 CAS 缓存）、Git 镜像缓存、公开看板快照、飞书加密附件 `channel-resources/` 与历史浏览器证据 |
 | `bot-keys` | AES-256-GCM 加密主密钥（**丢了主密钥将无法解密任何已存凭据**） |
 | `internal-keys` | 控制面与 manager 内部认证材料及部署 ID 种子 |
 | `manager-data` | `manager.sqlite`、manager 轨迹与项目知识物理文件（`project-notes/` 及版本历史） |
@@ -149,7 +149,7 @@ BOT_NODE_LABELS=region=cn-east,arch=amd64 \
 
 ### 备份与恢复要点
 
-- **停写一致备份**：备份前先停止 `bot` 和 `manager`，保持 `control.sqlite`、`trajectories/`、`feedback/`、`channel-resources/`、`bot-keys`、`internal-keys`、`manager-data`、`assistant-homes` 与 `project-tools` 来自同一次停写（`sync-blobs/` 仅为可重建的同步暂存/CAS 缓存，无需单独依赖其恢复权威业务数据）。
+- **停写一致备份**：备份前先停止 `bot` 和 `manager`，保持 `control.sqlite`、`trajectories/`、`webhook-bodies/`、`feedback/`、`channel-resources/`、`bot-keys`、`internal-keys`、`manager-data`、`assistant-homes` 与 `project-tools` 来自同一次停写（`sync-blobs/` 仅为可重建的同步暂存/CAS 缓存，无需单独依赖其恢复权威业务数据）。`webhook-bodies/` 必须与 `control.sqlite` 一起恢复：投递记录只存正文文件的位置和哈希，只恢复数据库会让控制台事件详情显示正文文件缺失，外部执行端的拉取与转发也拿不到这些正文。
 - **知识卷恢复（`note_move_uncertain`）**：若项目知识文件因异常移动进入 `note_move_uncertain` 只读保护，切勿手工删除 `.write-history` 里的 pending journal、改 file ID 或直接降级镜像。标准恢复步骤：① 停止该项目的任务派发、项目电脑与访问该卷的 manager 操作；② 对当前整个笔记卷（含 `.write-history`、历史索引与 blob）做只读备份；③ 选取移动前停写状态下生成的整卷备份，在同版 manager/runner 隔离环境中验证目录、正文与历史可读；④ 在停写状态下用验证过的完整备份替换原卷（备份后的新增改动对照第 ② 步通过正常保存接口补录）；⑤ 恢复同版服务并验证读正常后再开放写入。
 - **全局存储与按天数清理（「全局设置 → 存储」）**：超级管理员可查看整机/Launchpad/项目空间占比（含 `feedback/` 角色意见箱目录、`sync-blobs/` 文件同步对象缓存目录与 `webhook-bodies/` Webhook 正文目录），配置轨迹文件、manager 重复正文（默认 2 天）、已完成/失败任务工作区（默认 1 天 / 7 天）、Webhook 正文、角色意见箱保留天数（`feedback_days`，默认永久保留，支持 1–3650 天，每日清理同步回收超过 1 小时的孤儿 `.json.gz`/`.tmp` 文件）以及 **项目知识 `.write-history` 保留策略**（默认每文件至少保留 50 个版本且保留最近 30 天，满足两者的并集并始终保留最新版本后安全清理孤立 blob）的保留参数，每日清理与「立即回收」亦会同步清理超龄的 `memory_consolidation_runs` 记录，以及 `sync_conflicts`（30 天 / 单范围 1000 条上限）、超龄暂存/缓存 `sync_blob_refs`、已过期/吊销 7 天以上的 `sync_tokens` 与 `sync-blobs/` 中无引用对象及残留 `.tmp-*` 文件（删除项目或清空助手 HOME 时亦自动级联清理对应同步记录与无引用缓存对象）；项目电脑区域同步列出各未结束任务当前持有的工作区目录数（区分在用与待清理目录），便于定位长时间循环的任务；飞书群聊与私聊记录的保留天数及手工清理在「飞书会话」页（`#/conversations`）按会话配置（仅超管），存储页做汇总展示。
 - **全平台夜间自动记忆整理（「全局设置 → 夜间记忆整理」）**：默认全平台开启（默认窗口 `02:00`–`05:00`、`Asia/Shanghai`，支持跨零点窗口，最大并发默认 `2`，范围 `1–8`），纯控制面内部后台运行且固定使用 Pi 后端，覆盖全部已启用项目 `../notes/`、已绑定群聊助手 `~/memory/` 与有权限个人管理助手 `~/memory/`，状态与运行记录保存在 `control.sqlite` 的 `memory_consolidation_state` / `memory_consolidation_runs` 表中；用量统一计入 `model_requests`，不进入用户定时任务，也不产生飞书消息或 GitHub 写入。

@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { externalFixture } from '../../../fixtures/external-helpers.mjs';
+import { DeliveryBodyError, transientBodyError } from '../../../../dist/storage/webhook-bodies.js';
 
 // #1403: an accepted webhook body over 2 KiB is kept in its own file beside the database; the row keeps an empty
 // payload, the file's path, its sha256 and size, and the few fields the delivery list shows. Every reader gets the bytes
@@ -59,6 +60,22 @@ test('a large accepted body lives in its own file and the list, detail, external
   await h.external.forwarder.deliver(h.store.get('SELECT * FROM external_deliveries WHERE id=?', forward.id));
   assert.deepEqual({ ...h.store.get('SELECT state,error FROM external_deliveries WHERE id=?', forward.id) }, { state: 'failed', error: 'source_unavailable' });
   assert.equal(received.length, 1);
+  // Another executor polling now gets the other events whole and this one without its body, named from the summary.
+  const other = await h.client(), late = await h.exchange(other.client.id, other.privateKey);
+  const polled = await (await fetch(h.webhook + '/external/events', { headers: { Authorization: 'Bearer ' + late.value.token } })).json();
+  const damaged = polled.events.find(event => event.delivery_id === 'large-pr');
+  assert.deepEqual([damaged.payload, damaged.payload_unavailable, damaged.action, damaged.object_number], [null, 'delivery_body_corrupt', 'opened', 5]);
+  assert.deepEqual(polled.events.find(event => event.delivery_id === 'small-issue').payload, small);
+  // A file that is gone reads as missing.
+  rmSync(file);
+  assert.equal((await h.admin('/api/events/' + row.id)).value.event.payload_unreadable, 'delivery_body_missing');
+});
+
+test('only a read that failed for want of descriptors or memory is worth retrying', () => {
+  const failed = code => new DeliveryBodyError('delivery_body_unreadable', 'x', { cause: Object.assign(new Error(code), { code }) });
+  assert.deepEqual(['EMFILE', 'ENFILE', 'ENOMEM', 'EAGAIN', 'EACCES', 'EIO'].map(code => transientBodyError(failed(code))), [true, true, true, true, false, false]);
+  assert.equal(transientBodyError(new DeliveryBodyError('delivery_body_corrupt', 'x')), false);
+  assert.equal(transientBodyError(Object.assign(new Error('EMFILE'), { code: 'EMFILE' })), false, 'only a body read failure');
 });
 
 test('deleting a project removes its webhook body files', async t => {
