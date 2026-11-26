@@ -14,6 +14,7 @@ import { LocalManager } from '../../../../dist/projects/local-manager.js';
 import { TaskEngine } from '../../../../dist/agent/engine.js';
 import { configureDispatch } from '../../../../dist/dispatch/worker.js';
 import {
+  BOT_PR_RECONCILE_MIN_MS,
   BotPrWakeScanner,
   computePatrolEnvironmentSnapshot,
   diffPatrolEnvironments,
@@ -24,6 +25,7 @@ import { appEvents, appPermissions } from '../../../../dist/github/client.js';
 import { setGrant } from '../../../../dist/tasks/grants.js';
 import { deleteProjectRecords } from '../../../../dist/projects/removal.js';
 import { scriptedRoles } from '../../../fixtures/scripted-roles.mjs';
+import { botPrGraphql } from '../../../fixtures/bot-pr-graphql.mjs';
 
 const gitObjHash = (type, data) => createHash('sha1').update(`${type} ${data.length}\0`).update(data).digest('hex');
 const toolCall = (id, name, args) => ({
@@ -129,6 +131,8 @@ async function createPatrolFixture(t, { accountType = 'github_app', initialPermi
       res.end(JSON.stringify(val));
     };
     const path = decodeURIComponent(url.pathname);
+    // The scheduled reconcile's batched read (#1396) is a query, not a write.
+    if (path === '/graphql' && method === 'POST') return send(botPrGraphql(body, { pulls: state.pulls, refs: state.refs, checkSuites: state.commitCheckSuites }));
     if (method !== 'GET' && !path.endsWith('/access_tokens') && path !== '/installation/token') {
       state.writes.push({ method, path, body });
     }
@@ -539,7 +543,7 @@ test('environment, permission, and capability changes wake previously blocked or
   assert.notEqual(env2.fingerprint, env1.fingerprint);
   assert.ok(diffPatrolEnvironments(env1.summary, env2.summary).includes('installation.permissions.workflows: none -> write'));
 
-  clockMs += 2 * 60_000; // only 2 minutes later (well inside 6h interval and 24h cooldown!)
+  clockMs += BOT_PR_RECONCILE_MIN_MS; // the next read allowed, 5 minutes later (well inside 6h interval and 24h cooldown!)
   await engine.botPrWake.tick();
 
   const pr88Patrol = h.store.all("SELECT * FROM dispatch_events WHERE object_number=88 AND type='pull_request.patrol'");
@@ -852,7 +856,7 @@ for (const accountType of ['github_app', 'bot_account']) {
       capabilityVersion: '2026-11-24.v2',
       now: () => clockMs,
     });
-    clockMs += 2 * 60_000;
+    clockMs += BOT_PR_RECONCILE_MIN_MS; // a PR is read at most every 5 minutes (#1396)
     await engine.botPrWake.tick();
 
     const envPatrol = h.store.all("SELECT * FROM dispatch_events WHERE object_number=88 AND type='pull_request.patrol'");
@@ -883,7 +887,7 @@ for (const accountType of ['github_app', 'bot_account']) {
     const baseSha6 = state.putCommit({ 'app.mjs': 'export const ported = 6;\n' }, [prevBase], 'main advance 6');
     state.refs.main = baseSha6;
     state.pulls.get(88).base.sha = baseSha6;
-    clockMs += 2 * 60_000;
+    clockMs += BOT_PR_RECONCILE_MIN_MS;
     await engine.botPrWake.tick();
     assert.equal(h.store.get("SELECT count(*) n FROM dispatch_events WHERE object_number=88 AND type='pull_request.conflicted'").n, 2, 'after human comment clears suppression, next base advance resumes conflict wakeup');
 
@@ -895,6 +899,7 @@ for (const accountType of ['github_app', 'bot_account']) {
     );
     const pr88Head2 = state.putCommit({ 'app.mjs': 'export const ok = 99;\n' }, [baseSha6], 'pr 88 head 2');
     state.pulls.get(88).head.sha = pr88Head2;
+    clockMs += BOT_PR_RECONCILE_MIN_MS;
     await engine.botPrWake.tick();
     const afterHeadChange = h.store.get("SELECT conflict_suppressed_head_sha,head_sha FROM bot_pr_states WHERE repository_id='101' AND number=88");
     assert.equal(afterHeadChange.head_sha, pr88Head2);

@@ -20,6 +20,7 @@ import { appEvents, appPermissions } from '../../../../dist/github/client.js';
 import { accessGaps } from '../../../../dist/app/access.js';
 import { setGrant } from '../../../../dist/tasks/grants.js';
 import { scriptedRoles } from '../../../fixtures/scripted-roles.mjs';
+import { botPrGraphql } from '../../../fixtures/bot-pr-graphql.mjs';
 
 const gitObjHash = (type, data) => createHash('sha1').update(`${type} ${data.length}\0`).update(data).digest('hex');
 
@@ -187,6 +188,8 @@ async function createBotPrWakeFixture(t, { accountType = 'github_app', installat
     };
 
     const path = decodeURIComponent(url.pathname);
+    // The scheduled reconcile's batched read (#1396) is a query, not a write.
+    if (path === '/graphql' && method === 'POST') return send(botPrGraphql(body, { pulls: state.pulls, refs: state.refs, checkSuites: state.commitCheckSuites }));
     if (method !== 'GET' && !path.endsWith('/access_tokens') && path !== '/installation/token') {
       state.writes.push({ method, path, body });
     }

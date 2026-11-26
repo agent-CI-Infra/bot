@@ -19,6 +19,13 @@ export const DEFAULT_BOT_PR_PATROL_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 export const DEFAULT_BOT_PR_SUPPRESSED_DIRTY_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
 export const DEFAULT_BOT_PR_STALLED_TASK_AGE_MS = 2 * 60 * 60 * 1000;
 export const DEFAULT_BOT_CAPABILITY_VERSION = '2026-11-24.v1';
+// The fallback reconcile reads each open bot PR on its own schedule (#1396): first after 5 minutes, then twice as long each
+// time nothing changed, up to 4 hours. A change it finds, or a webhook about the PR, its head commit or its base branch,
+// starts the interval over. It never reads one PR more often than every 5 minutes.
+export const BOT_PR_RECONCILE_MIN_MS = 5 * 60_000;
+export const BOT_PR_RECONCILE_MAX_MS = 4 * 60 * 60_000;
+// Pull requests per GraphQL query; 50 of them with their check suites cost one point.
+const RECONCILE_BATCH = 50;
 
 const ACTIVE_EXECUTING_TASK_STATUSES = [
   'queued',
@@ -55,18 +62,14 @@ let patrolTestOverrides: Partial<BotPatrolConfig> | null = null;
 const pendingRechecks = new Set<string>();
 const pendingSuiteFlushes = new Map<string, { repositoryId: string; headSha: string; checkSuiteId: number | null; workflowRunId: number | null; attempt: number }>();
 
-const settledReconcileChecks = new Map<string, { headSha: string; updatedAt: string; settledAt: number }>();
-
 /** Allows integration tests to shorten background `mergeable === null` and suite-completion poll delays deterministically. */
 export function setBotWakeRecheckDelaysForTest(delays: number[] | null) {
   recheckDelaysMs = delays ? [...delays] : [1500, 4000];
-  settledReconcileChecks.clear();
 }
 
 /** Allows unit/integration tests to configure patrol intervals, cooldowns, capability version, and clock deterministically. */
 export function setBotPatrolConfigForTest(overrides: Partial<BotPatrolConfig> | null) {
   patrolTestOverrides = overrides ? { ...overrides } : null;
-  settledReconcileChecks.clear();
 }
 
 function resolvePatrolConfig(overrides?: Partial<BotPatrolConfig>): BotPatrolConfig {
@@ -148,9 +151,83 @@ export function botPrWakeStorage(store: Store) {
     ['conflict_suppressed_env', 'TEXT'],
     ['conflict_suppressed_at', 'TEXT'],
     ['conflict_suppressed_reason', 'TEXT'],
+    // The fallback reconcile's schedule (#1396), in epoch milliseconds: when it last read the PR, when it reads it next
+    // and the interval in between; what it saw (a digest of state, head, base, mergeability, updated_at and check suites);
+    // and the digest of the project's local settings then, so a change to them makes the PR due again.
+    ['reconcile_at', 'INTEGER'],
+    ['reconcile_due_at', 'INTEGER'],
+    ['reconcile_interval_ms', 'INTEGER'],
+    ['reconcile_fingerprint', 'TEXT'],
+    ['reconcile_env', 'TEXT'],
   ] as const) {
     if (!cols.has(name)) store.db.exec(`ALTER TABLE bot_pr_states ADD COLUMN ${name} ${type}`);
   }
+}
+
+/**
+ * Makes the open bot PRs a webhook is about due for the fallback reconcile as soon as their 5-minute minimum allows, with
+ * the interval back at its minimum: the PR itself (its events, reviews and comments), the PRs whose head is the commit a
+ * check or status reports on, and the PRs whose head or base is a pushed branch or the base a merged PR advanced.
+ */
+export function markBotPrsForReconcile(store: Store, repositoryId: string, event: string, payload: any, nowMs = resolvePatrolConfig().now()): number {
+  if (!repositoryId || !payload || typeof payload !== 'object' || !store.hasTable('bot_pull_requests')) return 0;
+  const numbers = new Set<number>(), shas = new Set<string>(), heads = new Set<string>(), bases = new Set<string>();
+  const addNumber = (value: unknown) => { const n = Number(value); if (Number.isSafeInteger(n) && n > 0) numbers.add(n); };
+  const addLinked = (prs: unknown) => {
+    if (Array.isArray(prs)) for (const pr of prs) if (pr?.base?.repo?.id == null || String(pr.base.repo.id) === repositoryId) addNumber(pr?.number);
+  };
+  const branch = (value: unknown) => typeof value === 'string' && value && value.length <= 255 ? value : null;
+  if (['pull_request', 'pull_request_review', 'pull_request_review_comment', 'pull_request_review_thread'].includes(event)) {
+    addNumber(payload.pull_request?.number);
+    if (event === 'pull_request' && payload.action === 'closed' && payload.pull_request?.merged === true) {
+      const base = branch(payload.pull_request?.base?.ref);
+      if (base) bases.add(base);
+    }
+  } else if (event === 'issue_comment') {
+    if (payload.issue?.pull_request) addNumber(payload.issue.number);
+  } else if (event === 'check_run' || event === 'check_suite' || event === 'workflow_run') {
+    const check = payload[event];
+    const sha = normSha(check?.head_sha ?? check?.check_suite?.head_sha);
+    if (sha) shas.add(sha);
+    addLinked(check?.pull_requests);
+    const head = branch(check?.head_branch ?? check?.check_suite?.head_branch);
+    if (head) heads.add(head);
+  } else if (event === 'status') {
+    const sha = normSha(payload.sha);
+    if (sha) shas.add(sha);
+  } else if (event === 'push') {
+    const ref = typeof payload.ref === 'string' && payload.ref.startsWith('refs/heads/') ? branch(payload.ref.slice('refs/heads/'.length)) : null;
+    if (ref) { heads.add(ref); bases.add(ref); }
+  }
+  if (!numbers.size && !shas.size && !heads.size && !bases.size) return 0;
+  if (!store.hasTable('bot_pr_states')) botPrWakeStorage(store);
+  const list = (values: Set<number> | Set<string>): Array<number | string | null> => values.size ? [...values] : [null];
+  const marks = (values: Set<number> | Set<string>) => list(values).map(() => '?').join(',');
+  // A PR without a state row has never been reconciled and is due already.
+  const rows = store.all(
+    `SELECT b.number FROM bot_pull_requests b JOIN bot_pr_states s ON s.repository_id=b.repository_id AND s.number=b.number
+     WHERE b.repository_id=? AND s.state<>'closed'
+       AND (b.number IN (${marks(numbers)}) OR lower(b.sha) IN (${marks(shas)}) OR lower(s.head_sha) IN (${marks(shas)})
+         OR b.branch IN (${marks(heads)}) OR s.base_ref IN (${marks(bases)}))`,
+    repositoryId,
+    ...list(numbers),
+    ...list(shas),
+    ...list(shas),
+    ...list(heads),
+    ...list(bases),
+  );
+  for (const row of rows) {
+    store.run(
+      `UPDATE bot_pr_states SET reconcile_interval_ms=?, reconcile_due_at=max(?, coalesce(reconcile_at,0)+?)
+       WHERE repository_id=? AND number=?`,
+      BOT_PR_RECONCILE_MIN_MS,
+      nowMs,
+      BOT_PR_RECONCILE_MIN_MS,
+      repositoryId,
+      Number(row.number),
+    );
+  }
+  return rows.length;
 }
 
 export interface PatrolEnvironmentSummary {
@@ -2037,6 +2114,7 @@ export function botPrWakeEvents(
     syncBotPullRequestState(store, repositoryId, p.pull_request);
   }
   clearBotPrConflictSuppressionOnHumanActivity(store, repositoryId, event, p);
+  markBotPrsForReconcile(store, repositoryId, event, p);
 
   const events: EventInput[] = [];
 
@@ -2688,6 +2766,122 @@ interface ReconcileOptions {
   forcePatrol?: boolean;
 }
 
+// What one read of a bot PR saw: a digest of the PR fields the reconcile acts on, and one of its head commit's check suites.
+interface BotPrSnapshot {
+  pr: string;
+  checks: string;
+  headSha: string | null;
+  baseRef: string | null;
+  baseTip: string | null;
+  // Completed check suites on the head that did not pass: failed, timed out, never started (startup_failure, which has
+  // no check run), or cancelled or awaiting action after some of their check runs failed.
+  unpassedSuites: number;
+}
+
+const snapshotDigest = (value: unknown) => digest(JSON.stringify(value)).slice(0, 24);
+const checksDigest = (headSha: string | null, total: unknown, suites: Array<[unknown, unknown, unknown]>) =>
+  snapshotDigest([headSha, Number(total) || suites.length, suites.map(([id, status, conclusion]) =>
+    `${Number(id) || 0}:${String(status ?? '').toLowerCase()}:${String(conclusion ?? '').toLowerCase()}`).sort()]);
+
+const PASSED_SUITE_CONCLUSIONS = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']);
+const BOT_PR_FIELDS = 'number state isDraft mergeable updatedAt headRefName headRefOid baseRefName baseRefOid baseRef{target{oid}} '
+  + 'commits(last:1){nodes{commit{oid checkSuites(first:100){totalCount nodes{databaseId status conclusion}}}}}';
+
+/**
+ * Reads the given bot PRs of one repository with GraphQL, 50 to a query: state, draft, mergeability, head, base and the
+ * base branch's tip, updated_at, and the head commit's check suites. A PR GitHub does not find maps to null. Returns null
+ * when GraphQL cannot answer (the caller then reads each PR over REST) and rateLimited when its window is used up.
+ */
+async function readBotPrSnapshots(github: GitHub, numbers: number[]): Promise<{ snapshots: Map<number, BotPrSnapshot | null> | null; rateLimited: boolean }> {
+  const [owner, name] = String(github.fullName || '').split('/');
+  if (!owner || !name) return { snapshots: null, rateLimited: false };
+  const snapshots = new Map<number, BotPrSnapshot | null>();
+  for (let i = 0; i < numbers.length; i += RECONCILE_BATCH) {
+    const chunk = numbers.slice(i, i + RECONCILE_BATCH);
+    const query = `query($owner:String!,$name:String!){repository(owner:$owner,name:$name){${chunk.map(n => `p${n}:pullRequest(number:${n}){...BotPr}`).join(' ')}}}`
+      + ` fragment BotPr on PullRequest{${BOT_PR_FIELDS}}`;
+    let value: any;
+    try {
+      value = await github.request('POST', '/graphql', { query, variables: { owner, name } });
+    } catch (err: any) {
+      return { snapshots: null, rateLimited: err?.code === 'github_rate_limited' };
+    }
+    const errors: any[] = Array.isArray(value?.errors) ? value.errors : [];
+    if (errors.some(e => String(e?.type) === 'RATE_LIMITED')) return { snapshots: null, rateLimited: true };
+    // Only "no such pull request" (repository.pN) leaves the rest of the answer usable; any other error falls back to REST.
+    const notFound = (e: any) => String(e?.type) === 'NOT_FOUND' && Array.isArray(e?.path) && e.path.length === 2;
+    const repository = value?.data?.repository;
+    if (!repository || typeof repository !== 'object' || !errors.every(notFound)) return { snapshots: null, rateLimited: false };
+    for (const n of chunk) {
+      const node = repository[`p${n}`];
+      if (!node || typeof node !== 'object') { snapshots.set(n, null); continue; }
+      const commit = node.commits?.nodes?.[0]?.commit;
+      const suites: any[] = Array.isArray(commit?.checkSuites?.nodes) ? commit.checkSuites.nodes.filter(Boolean) : [];
+      const headSha = normSha(node.headRefOid);
+      const baseTip = normSha(node.baseRef?.target?.oid);
+      const baseRef = typeof node.baseRefName === 'string' && node.baseRefName ? node.baseRefName : null;
+      snapshots.set(n, {
+        pr: snapshotDigest(['graphql', node.state, node.isDraft === true, node.mergeable ?? null, node.headRefName ?? null, headSha, baseRef, normSha(node.baseRefOid), baseTip, node.updatedAt ?? null]),
+        checks: checksDigest(normSha(commit?.oid), commit?.checkSuites?.totalCount, suites.map(s => [s.databaseId, s.status, s.conclusion])),
+        headSha,
+        baseRef,
+        baseTip,
+        unpassedSuites: suites.filter(s => String(s.status) === 'COMPLETED' && !PASSED_SUITE_CONCLUSIONS.has(String(s.conclusion || ''))).length,
+      });
+    }
+  }
+  return { snapshots, rateLimited: false };
+}
+
+/** Whether the fallback reconcile reads this open bot PR now (row: its bot_pr_states schedule columns). */
+function botPrReconcileDue(row: Row, nowMs: number, localEnv: string, patrol: BotPatrolConfig): boolean {
+  const last = Number(row.reconcile_at) || 0;
+  if (last && nowMs - last < BOT_PR_RECONCILE_MIN_MS) return false;
+  if (row.reconcile_due_at == null || Number(row.reconcile_due_at) <= nowMs) return true;
+  // A change to the project's policy, roles, installation permissions or computer can unblock a PR (#1316).
+  if (row.reconcile_env && String(row.reconcile_env) !== localEnv) return true;
+  // The patrol's own interval: once per interval, even when the PR's schedule has grown past it.
+  if (patrol.intervalMs > 0) {
+    const lastPatrol = row.last_patrol_at ? Date.parse(String(row.last_patrol_at)) : NaN;
+    const patrolDueAt = Number.isFinite(lastPatrol) ? lastPatrol + patrol.intervalMs : 0;
+    if (patrolDueAt <= nowMs && last < patrolDueAt) return true;
+  }
+  return false;
+}
+
+/**
+ * Records one read of a bot PR and schedules the next: 5 minutes after a change, otherwise twice the previous interval up to
+ * 4 hours. A webhook that marked the PR while it was being read (its due time no longer what the read started from) wins.
+ */
+function saveBotPrReconcile(store: Store, repositoryId: string, prNumber: number, nowMs: number, fingerprint: string, previous: Row, localEnv: string): void {
+  const changed = fingerprint !== (previous.reconcile_fingerprint == null ? null : String(previous.reconcile_fingerprint));
+  const prior = Number(previous.reconcile_interval_ms) || 0;
+  const interval = changed || !prior ? BOT_PR_RECONCILE_MIN_MS : Math.min(BOT_PR_RECONCILE_MAX_MS, Math.max(BOT_PR_RECONCILE_MIN_MS, prior * 2));
+  const readDue = previous.reconcile_due_at == null ? null : Number(previous.reconcile_due_at);
+  store.run(
+    `INSERT INTO bot_pr_states(repository_id,number,updated_at,reconcile_at,reconcile_due_at,reconcile_interval_ms,reconcile_fingerprint,reconcile_env)
+     VALUES(?,?,?,?,?,?,?,?)
+     ON CONFLICT(repository_id,number) DO UPDATE SET
+       reconcile_at=excluded.reconcile_at,
+       reconcile_due_at=CASE WHEN bot_pr_states.reconcile_due_at IS NOT ? THEN ? ELSE excluded.reconcile_due_at END,
+       reconcile_interval_ms=CASE WHEN bot_pr_states.reconcile_due_at IS NOT ? THEN ? ELSE excluded.reconcile_interval_ms END,
+       reconcile_fingerprint=excluded.reconcile_fingerprint,
+       reconcile_env=excluded.reconcile_env`,
+    repositoryId,
+    prNumber,
+    new Date(nowMs).toISOString(),
+    nowMs,
+    nowMs + interval,
+    interval,
+    fingerprint,
+    localEnv,
+    readDue,
+    nowMs + BOT_PR_RECONCILE_MIN_MS,
+    readDue,
+    BOT_PR_RECONCILE_MIN_MS,
+  );
+}
+
 async function reconcileOpenBotPullRequestsForRepo(
   store: Store,
   repo: Row,
@@ -2711,25 +2905,24 @@ async function reconcileOpenBotPullRequestsForRepo(
     ? [...new Set(onlyPrNumbers.filter(n => Number.isSafeInteger(n) && n > 0))]
     : null;
   if (prFilter && !prFilter.length) return;
-  const candidates = prFilter
-    ? store.all(
-        `SELECT b.number, s.base_sha AS prev_base_sha
-         FROM bot_pull_requests b
-         LEFT JOIN bot_pr_states s ON s.repository_id=b.repository_id AND s.number=b.number
-         WHERE b.repository_id=? AND coalesce(s.state,'open')<>'closed'
-           AND b.number IN (${prFilter.map(() => '?').join(',')})
-         ORDER BY b.number DESC LIMIT 25`,
-        repositoryId,
-        ...prFilter,
-      )
-    : store.all(
-        `SELECT b.number, s.base_sha AS prev_base_sha
-         FROM bot_pull_requests b
-         LEFT JOIN bot_pr_states s ON s.repository_id=b.repository_id AND s.number=b.number
-         WHERE b.repository_id=? AND coalesce(s.state,'open')<>'closed'
-         ORDER BY b.number DESC LIMIT 25`,
-        repositoryId,
-      );
+  // Every open bot PR is a candidate (#1396 removed the newest-25 cap). A webhook-driven recheck (prFilter) reads its
+  // PRs over REST at once; the scheduled reconcile reads only the PRs that are due, and connects only when one is.
+  const allCandidates = store.all(
+    `SELECT b.number, s.base_sha AS prev_base_sha, s.reconcile_at, s.reconcile_due_at, s.reconcile_interval_ms,
+            s.reconcile_fingerprint, s.reconcile_env, s.last_patrol_at
+     FROM bot_pull_requests b
+     LEFT JOIN bot_pr_states s ON s.repository_id=b.repository_id AND s.number=b.number
+     WHERE b.repository_id=? AND coalesce(s.state,'open')<>'closed'
+       ${prFilter ? `AND b.number IN (${prFilter.map(() => '?').join(',')})` : ''}
+     ORDER BY b.number DESC`,
+    repositoryId,
+    ...(prFilter ?? []),
+  );
+  const scheduled = !prFilter;
+  const localEnv = scheduled ? computePatrolEnvironmentSnapshot(store, repositoryId, undefined, patrolConfig.capabilityVersion).fingerprint : '';
+  const candidates = scheduled && !options?.forcePatrol
+    ? allCandidates.filter(row => botPrReconcileDue(row, nowMs, localEnv, patrolConfig))
+    : allCandidates;
   if (!candidates.length) return;
 
   const redactor = registeredRedactor(store);
@@ -2752,359 +2945,375 @@ async function reconcileOpenBotPullRequestsForRepo(
       return sha;
     };
 
+    // One GraphQL read of all due PRs says which of them changed since the last read; only those (and PRs whose patrol
+    // is due) are read in detail over REST. Without a GraphQL answer every due PR is read over REST, as before #1396.
+    let snapshots: Map<number, BotPrSnapshot | null> | null = null;
+    if (scheduled) {
+      const batch = await readBotPrSnapshots(github, candidates.map(row => Number(row.number)));
+      if (batch.rateLimited) return;
+      snapshots = batch.snapshots;
+      for (const s of snapshots?.values() ?? []) if (s?.baseRef && s.baseTip && !branchHeads.has(s.baseRef)) branchHeads.set(s.baseRef, s.baseTip);
+    }
+
     for (const row of candidates) {
       if (!store.db.open || rateLimited) break;
       const prNumber = Number(row.number);
       const prevState = store.get('SELECT * FROM bot_pr_states WHERE repository_id=? AND number=?', repositoryId, prNumber);
-      const pr = await guardRequest(github.request('GET', github.path(`/pulls/${prNumber}`), undefined, true));
-      if (!pr || typeof pr !== 'object' || !store.db.open || rateLimited) continue;
-      syncBotPullRequestState(store, repositoryId, pr, nowIso);
-      if (pr.state !== 'open' || pr.draft === true) {
-        settledReconcileChecks.delete(`${repositoryId}:${prNumber}`);
-        continue;
-      }
-      const verified = verifiedOwnedOpenBotPr(store, repositoryId, prNumber, pr);
-      if (!verified) continue;
-
-      const targetBranch = verified.baseRef ?? github.defaultBranch ?? 'main';
-      const liveBranchSha = await readBranchHead(targetBranch);
-      if (rateLimited) break;
-      const effectiveBaseSha = liveBranchSha ?? normSha(pr.base?.sha) ?? verified.baseSha;
-
-      const prevEnvFp = prevState?.patrol_env_fingerprint ? String(prevState.patrol_env_fingerprint) : null;
-      const suppressedOnSameHead = Boolean(
-        prevState?.conflict_suppressed_head_sha
-        && normSha(prevState.conflict_suppressed_head_sha) === verified.headSha,
-      );
-      const envChangedFromPatrol = Boolean(prevEnvFp && prevEnvFp !== currentEnv.fingerprint);
-      const envChangedFromSuppression = Boolean(
-        suppressedOnSameHead
-        && prevState?.conflict_suppressed_env
-        && String(prevState.conflict_suppressed_env) !== currentEnv.fingerprint,
-      );
-      const envChanged = envChangedFromPatrol || envChangedFromSuppression;
-
-      const patrolEnabled = patrolConfig.intervalMs > 0 && (!prFilter || Boolean(options?.forcePatrol));
-      const lastPatrolMs = prevState?.last_patrol_at ? Date.parse(String(prevState.last_patrol_at)) : 0;
-      const patrolDue = patrolEnabled && (
-        Boolean(options?.forcePatrol)
-        || envChanged
-        || !lastPatrolMs
-        || !Number.isFinite(lastPatrolMs)
-        || (nowMs - lastPatrolMs) >= patrolConfig.intervalMs
-      );
-
-      let cachedComments: any[] | undefined;
-      const isConflicted = isPullRequestConflicted(pr, 'pull_request', '');
-      if (isConflicted) {
-        const suppressedFast = suppressedOnSameHead
-          && (
-            (envChangedFromSuppression && patrolEnabled)
-            || isConflictWakeSuppressed(store, repositoryId, verified, undefined, currentEnv.fingerprint)
-          );
-        if (!suppressedFast && effectiveBaseSha && !store.get('SELECT 1 FROM dispatch_events WHERE event_key=?', conflictEventKey(repositoryId, prNumber, verified.headSha, effectiveBaseSha))) {
-          cachedComments = (await guardRequest(github.pages(github.path(`/issues/${prNumber}/comments`)))) ?? [];
-          if (rateLimited) break;
-          if (!isConflictWakeSuppressed(store, repositoryId, verified, cachedComments, currentEnv.fingerprint)) {
-            const ev = buildConflictEventInput(
-              store,
-              repositoryId,
-              'pull_request',
-              'reconciled',
-              '',
-              deliveryId,
-              verified,
-              effectiveBaseSha,
-              targetBranch,
-              typeof pr.mergeable_state === 'string' ? pr.mergeable_state : 'dirty',
-              'reconcile',
-              cachedComments,
-              currentEnv,
-            );
-            store.transaction(() => recordEvent(store, ev));
-          }
-        }
-      } else if (pr.mergeable === null && effectiveBaseSha && effectiveBaseSha !== normSha(row.prev_base_sha)) {
-        scheduleMergeableRecheck(store, repo, [prNumber], targetBranch, effectiveBaseSha, apiUrl, deliveryId);
-      }
-
-      const settledKey = `${repositoryId}:${prNumber}`;
-      const prUpdatedAt = String(pr.updated_at || '');
-      const cachedSettled = !prFilter ? settledReconcileChecks.get(settledKey) : undefined;
-      const checksSettledCacheHit = Boolean(
-        cachedSettled
-        && cachedSettled.headSha === verified.headSha
-        && cachedSettled.updatedAt === prUpdatedAt
-        && nowMs - cachedSettled.settledAt < 10 * 60_000,
-      );
-
-      let fetchedCheckRuns: any[] | null = null;
-      let fetchedCheckSuites: any[] | null = null;
-
-      if (!checksSettledCacheHit) {
-        // Reconcile completed failed check suites on `verified.headSha` without requiring `check_suite` or `workflow_run` webhooks
-        // (including `startup_failure` check suites that fail before creating any `check_run`).
-        const [runsRes, suitesRes] = await Promise.all([
-          guardRequest(github.request('GET', github.path(`/commits/${verified.headSha}/check-runs?filter=latest&per_page=100`), undefined, true)),
-          guardRequest(github.request('GET', github.path(`/commits/${verified.headSha}/check-suites?per_page=100`), undefined, true)),
-        ]);
-        if (rateLimited) break;
-        const checkRuns = Array.isArray(runsRes?.check_runs) ? runsRes.check_runs : [];
-        const checkSuites = Array.isArray(suitesRes?.check_suites) ? suitesRes.check_suites : [];
-        fetchedCheckRuns = checkRuns;
-        fetchedCheckSuites = checkSuites;
-        if (checkRuns.length || checkSuites.length) {
-          const allChecksCompleted =
-            checkRuns.every((cr: any) => String(cr?.status || '') === 'completed')
-            && checkSuites.every((cs: any) => String(cs?.status || '') === 'completed');
-
-          const byGroup = new Map<string, { suiteId: number | null; wfRunId: number | null; attempt: number; runs: any[] }>();
-          const coveredSuiteAttempts = new Set<string>();
-          for (const cr of checkRuns) {
-            const suiteId = Number.isSafeInteger(cr?.check_suite?.id) && cr.check_suite.id >= 1 ? Number(cr.check_suite.id) : null;
-            const wfRunId = extractWorkflowRunIdFromUrl(cr?.details_url, cr?.html_url);
-            const attempt = Number.isSafeInteger(cr?.run_attempt) && cr.run_attempt >= 1
-              ? Number(cr.run_attempt)
-              : Number.isSafeInteger(cr?.check_suite?.run_attempt) && cr.check_suite.run_attempt >= 1
-                ? Number(cr.check_suite.run_attempt)
-                : 1;
-            if (suiteId) coveredSuiteAttempts.add(`${suiteId}:${attempt}`);
-            const key = canonicalCheckGroup(wfRunId, suiteId, Number(cr?.id) || 0) + ':' + attempt;
-            const entry = byGroup.get(key) ?? { suiteId, wfRunId, attempt, runs: [] };
-            if (!entry.wfRunId && wfRunId) entry.wfRunId = wfRunId;
-            if (!entry.suiteId && suiteId) entry.suiteId = suiteId;
-            entry.runs.push(cr);
-            byGroup.set(key, entry);
-          }
-
-          for (const group of byGroup.values()) {
-            if (group.runs.some(cr => String(cr?.status || 'completed') !== 'completed')) continue;
-            const failedRuns = group.runs.filter(cr => FAILED_CONCLUSIONS.has(String(cr?.conclusion || '').toLowerCase()));
-            if (!failedRuns.length) {
-              if (group.suiteId) pendingSuiteFlushes.delete(`${repositoryId}:suite:${group.suiteId}:${group.attempt}`);
-              if (group.wfRunId) pendingSuiteFlushes.delete(`${repositoryId}:run:${group.wfRunId}:${group.attempt}`);
-              continue;
-            }
-            const first = failedRuns[0]!;
-            let workflowName = typeof first.app?.name === 'string' ? first.app.name : null;
-            let workflowUrl = safeHttpUrl(first.html_url || first.details_url) ?? (repoFullName ? `https://github.com/${repoFullName}/commit/${verified.headSha}/checks` : null);
-            if (group.wfRunId) {
-              const runObj = await github.request('GET', github.path(`/actions/runs/${group.wfRunId}`), undefined, true).catch(() => null);
-              if (typeof runObj?.name === 'string' && runObj.name.trim()) workflowName = runObj.name.trim();
-              if (safeHttpUrl(runObj?.html_url)) workflowUrl = safeHttpUrl(runObj.html_url);
-              if (!group.suiteId && Number.isSafeInteger(runObj?.check_suite_id) && runObj.check_suite_id >= 1) group.suiteId = Number(runObj.check_suite_id);
-            }
-            const displayName = failedRuns.length === 1 ? String(first.name || workflowName || 'check_run') : (workflowName || String(first.name || 'check_suite'));
-            const parsed: ParsedFailedCheck = {
-              source: group.wfRunId ? 'workflow_run' : group.suiteId ? 'check_suite' : 'check_run',
-              headSha: verified.headSha,
-              headBranch: verified.headRef,
-              runOrSuiteId: canonicalRunOrSuiteId(group.wfRunId, group.suiteId, Number(first.id) || null),
-              canonicalGroup: canonicalCheckGroup(group.wfRunId, group.suiteId, Number(first.id) || null),
-              workflowRunId: group.wfRunId,
-              checkSuiteId: group.suiteId,
-              checkRunId: failedRuns.length === 1 ? (Number(first.id) || null) : null,
-              attempt: group.attempt,
-              conclusion: String(first.conclusion || 'failure').toLowerCase(),
-              name: displayName,
-              workflowName,
-              url: workflowUrl,
-              summary: clip(`Checks "${displayName}" completed with ${failedRuns.length} failed job(s) on attempt ${group.attempt}.`, 1500),
-              pullRequests: [{ number: prNumber }],
-            };
-            if (group.suiteId) pendingSuiteFlushes.delete(`${repositoryId}:suite:${group.suiteId}:${group.attempt}`);
-            if (group.wfRunId) pendingSuiteFlushes.delete(`${repositoryId}:run:${group.wfRunId}:${group.attempt}`);
-            if (hasRecordedCheckFailure(store, repositoryId, prNumber, parsed)) continue;
-            cachedComments ??= (await guardRequest(github.pages(github.path(`/issues/${prNumber}/comments`)))) ?? [];
-            const failedJobs = failedRuns.slice(0, 15).map(summarizeFailedCheckRun);
-            const ev = buildCheckFailedEventInput(store, repositoryId, parsed.source, 'completed', '', deliveryId, verified, parsed, failedJobs, cachedComments);
-            store.transaction(() => recordEvent(store, ev));
-          }
-
-          for (const cs of checkSuites) {
-            const suiteId = Number.isSafeInteger(cs?.id) && cs.id >= 1 ? Number(cs.id) : null;
-            if (!suiteId || String(cs?.status || '') !== 'completed') continue;
-            const conclusion = String(cs?.conclusion || '').toLowerCase();
-            if (!FAILED_CONCLUSIONS.has(conclusion)) continue;
-            const attempt = Number.isSafeInteger(cs?.run_attempt) && cs.run_attempt >= 1 ? Number(cs.run_attempt) : 1;
-            if (coveredSuiteAttempts.has(`${suiteId}:${attempt}`)) continue;
-            const appName = typeof cs?.app?.name === 'string' && cs.app.name.trim() ? cs.app.name.trim() : 'check_suite';
-            const suiteUrl = safeHttpUrl(cs?.html_url) ?? (repoFullName ? `https://github.com/${repoFullName}/commit/${verified.headSha}/checks` : null);
-            const parsed: ParsedFailedCheck = {
-              source: 'check_suite',
-              headSha: verified.headSha,
-              headBranch: verified.headRef,
-              runOrSuiteId: String(suiteId),
-              canonicalGroup: `suite:${suiteId}`,
-              workflowRunId: null,
-              checkSuiteId: suiteId,
-              checkRunId: null,
-              attempt,
-              conclusion,
-              name: appName,
-              workflowName: appName,
-              url: suiteUrl,
-              summary: clip(`Check suite "${appName}" (#${suiteId}, attempt ${attempt}) concluded with ${conclusion}.`, 1500),
-              pullRequests: [{ number: prNumber }],
-            };
-            if (hasRecordedCheckFailure(store, repositoryId, prNumber, parsed)) continue;
-            cachedComments ??= (await guardRequest(github.pages(github.path(`/issues/${prNumber}/comments`)))) ?? [];
-            const ev = buildCheckFailedEventInput(store, repositoryId, 'check_suite', 'completed', '', deliveryId, verified, parsed, [], cachedComments);
-            store.transaction(() => recordEvent(store, ev));
-          }
-          if (allChecksCompleted && !rateLimited) {
-            settledReconcileChecks.set(settledKey, { headSha: verified.headSha, updatedAt: prUpdatedAt, settledAt: nowMs });
-          }
-        }
-      }
-
-      if (!patrolDue || rateLimited || !store.db.open) continue;
-
-      // Low-frequency internal open-PR patrol (strictly internal to control plane; zero external chat/notification triggers).
+      const snapshot = snapshots?.get(prNumber);
+      // What this read saw; null until known (a REST read fills it in), saved with the next schedule when the read ends.
+      let seen: string | null = snapshot ? `${snapshot.pr}:${snapshot.checks}` : snapshot === null ? 'missing' : null;
+      const checksSeenBefore = String(row.reconcile_fingerprint ?? '').split(':')[1] ?? null;
       try {
-        const rootIssue = rootIssueOfBotPr(store, repositoryId, prNumber);
-        const tKey = threadKey(store, {
-          repository_id: repositoryId,
-          object_type: 'pr',
-          object_number: prNumber,
-          source: 'control_plane',
-          type: 'pull_request.patrol',
-        });
-        const hasPendingEvent = Boolean(
-          store.get(
-            // thread_key alone: it already carries the repository id, and adding repository_id scans the repository's events (#1350).
-            "SELECT 1 FROM dispatch_events WHERE thread_key=? AND state IN ('pending','dispatching') LIMIT 1",
-            tKey,
-          ),
+        const prevEnvFp = prevState?.patrol_env_fingerprint ? String(prevState.patrol_env_fingerprint) : null;
+        const envChangedFromPatrol = Boolean(prevEnvFp && prevEnvFp !== currentEnv.fingerprint);
+        const patrolEnabled = patrolConfig.intervalMs > 0 && (!prFilter || Boolean(options?.forcePatrol));
+        const lastPatrolMs = prevState?.last_patrol_at ? Date.parse(String(prevState.last_patrol_at)) : 0;
+        const patrolDueFor = (envChanged: boolean) => patrolEnabled && (
+          Boolean(options?.forcePatrol)
+          || envChanged
+          || !lastPatrolMs
+          || !Number.isFinite(lastPatrolMs)
+          || (nowMs - lastPatrolMs) >= patrolConfig.intervalMs
         );
-        if (hasPendingEvent) continue;
-
-        const local = inspectLocalBotPrTasks(
-          store,
-          repositoryId,
-          verified,
-          rootIssue,
-          tKey,
-          nowMs,
-          patrolConfig.stalledTaskAgeMs,
-          envChanged,
-          prevState,
+        const suppressionEnvChanged = (headSha: string | null) => Boolean(
+          prevState?.conflict_suppressed_head_sha
+          && normSha(prevState.conflict_suppressed_head_sha) === headSha
+          && prevState?.conflict_suppressed_env
+          && String(prevState.conflict_suppressed_env) !== currentEnv.fingerprint,
         );
-        if (local.hasActiveExecutingTask) continue;
+        // GitHub has no such pull request, or reports nothing new since the last read and the patrol is not due:
+        // there is nothing to act on, so nothing is read over REST.
+        if (snapshot === null) continue;
+        if (snapshot && seen === row.reconcile_fingerprint
+          && !patrolDueFor(envChangedFromPatrol || suppressionEnvChanged(snapshot.headSha))) continue;
 
-        if (fetchedCheckRuns === null || fetchedCheckSuites === null) {
+        const pr = await guardRequest(github.request('GET', github.path(`/pulls/${prNumber}`), undefined, true));
+        // A change GitHub reported but that could not be read in detail stays a change: it is read again at the next pass.
+        if (!pr || typeof pr !== 'object') seen = null;
+        if (!pr || typeof pr !== 'object' || !store.db.open || rateLimited) continue;
+        if (!snapshot) seen = `${snapshotDigest(['rest', pr.state, pr.draft === true, pr.mergeable ?? null, pr.head?.ref ?? null, normSha(pr.head?.sha), pr.base?.ref ?? null, normSha(pr.base?.sha), pr.updated_at ?? null])}:unread`;
+        syncBotPullRequestState(store, repositoryId, pr, nowIso);
+        if (pr.state !== 'open' || pr.draft === true) continue;
+        const verified = verifiedOwnedOpenBotPr(store, repositoryId, prNumber, pr);
+        if (!verified) continue;
+
+        const targetBranch = verified.baseRef ?? github.defaultBranch ?? 'main';
+        const liveBranchSha = await readBranchHead(targetBranch);
+        if (rateLimited) break;
+        const effectiveBaseSha = liveBranchSha ?? normSha(pr.base?.sha) ?? verified.baseSha;
+
+        const suppressedOnSameHead = Boolean(
+          prevState?.conflict_suppressed_head_sha
+          && normSha(prevState.conflict_suppressed_head_sha) === verified.headSha,
+        );
+        const envChangedFromSuppression = suppressionEnvChanged(verified.headSha);
+        const envChanged = envChangedFromPatrol || envChangedFromSuppression;
+        const patrolDue = patrolDueFor(envChanged);
+
+        let cachedComments: any[] | undefined;
+        const isConflicted = isPullRequestConflicted(pr, 'pull_request', '');
+        if (isConflicted) {
+          const suppressedFast = suppressedOnSameHead
+            && (
+              (envChangedFromSuppression && patrolEnabled)
+              || isConflictWakeSuppressed(store, repositoryId, verified, undefined, currentEnv.fingerprint)
+            );
+          if (!suppressedFast && effectiveBaseSha && !store.get('SELECT 1 FROM dispatch_events WHERE event_key=?', conflictEventKey(repositoryId, prNumber, verified.headSha, effectiveBaseSha))) {
+            cachedComments = (await guardRequest(github.pages(github.path(`/issues/${prNumber}/comments`)))) ?? [];
+            if (rateLimited) break;
+            if (!isConflictWakeSuppressed(store, repositoryId, verified, cachedComments, currentEnv.fingerprint)) {
+              const ev = buildConflictEventInput(
+                store,
+                repositoryId,
+                'pull_request',
+                'reconciled',
+                '',
+                deliveryId,
+                verified,
+                effectiveBaseSha,
+                targetBranch,
+                typeof pr.mergeable_state === 'string' ? pr.mergeable_state : 'dirty',
+                'reconcile',
+                cachedComments,
+                currentEnv,
+              );
+              store.transaction(() => recordEvent(store, ev));
+            }
+          }
+        } else if (pr.mergeable === null && effectiveBaseSha && effectiveBaseSha !== normSha(row.prev_base_sha)) {
+          scheduleMergeableRecheck(store, repo, [prNumber], targetBranch, effectiveBaseSha, apiUrl, deliveryId);
+        }
+
+        let fetchedCheckRuns: any[] | null = null;
+        let fetchedCheckSuites: any[] | null = null;
+
+        // The check runs and suites are read over REST only when GraphQL showed a completed suite on the head that did not
+        // pass and that it had not shown in the same state before (or could not answer, or this is a webhook-driven recheck).
+        const readChecks = !snapshot || (snapshot.unpassedSuites > 0 && snapshot.checks !== checksSeenBefore);
+        if (readChecks) {
+          // Reconcile completed failed check suites on `verified.headSha` without requiring `check_suite` or `workflow_run` webhooks
+          // (including `startup_failure` check suites that fail before creating any `check_run`).
           const [runsRes, suitesRes] = await Promise.all([
             guardRequest(github.request('GET', github.path(`/commits/${verified.headSha}/check-runs?filter=latest&per_page=100`), undefined, true)),
             guardRequest(github.request('GET', github.path(`/commits/${verified.headSha}/check-suites?per_page=100`), undefined, true)),
           ]);
           if (rateLimited) break;
-          fetchedCheckRuns = Array.isArray(runsRes?.check_runs) ? runsRes.check_runs : [];
-          fetchedCheckSuites = Array.isArray(suitesRes?.check_suites) ? suitesRes.check_suites : [];
+          const checkRuns = Array.isArray(runsRes?.check_runs) ? runsRes.check_runs : [];
+          const checkSuites = Array.isArray(suitesRes?.check_suites) ? suitesRes.check_suites : [];
+          fetchedCheckRuns = checkRuns;
+          fetchedCheckSuites = checkSuites;
+          if (!snapshot && suitesRes) seen = `${String(seen).split(':')[0]}:${checksDigest(verified.headSha, checkSuites.length, checkSuites.map((cs: any) => [cs?.id, cs?.status, cs?.conclusion]))}`;
+          // Checks that could not be read are read again at the next pass, as a change.
+          if (snapshot && (!runsRes || !suitesRes)) seen = `${snapshot.pr}:unread`;
+          if (checkRuns.length || checkSuites.length) {
+            const byGroup = new Map<string, { suiteId: number | null; wfRunId: number | null; attempt: number; runs: any[] }>();
+            const coveredSuiteAttempts = new Set<string>();
+            for (const cr of checkRuns) {
+              const suiteId = Number.isSafeInteger(cr?.check_suite?.id) && cr.check_suite.id >= 1 ? Number(cr.check_suite.id) : null;
+              const wfRunId = extractWorkflowRunIdFromUrl(cr?.details_url, cr?.html_url);
+              const attempt = Number.isSafeInteger(cr?.run_attempt) && cr.run_attempt >= 1
+                ? Number(cr.run_attempt)
+                : Number.isSafeInteger(cr?.check_suite?.run_attempt) && cr.check_suite.run_attempt >= 1
+                  ? Number(cr.check_suite.run_attempt)
+                  : 1;
+              if (suiteId) coveredSuiteAttempts.add(`${suiteId}:${attempt}`);
+              const key = canonicalCheckGroup(wfRunId, suiteId, Number(cr?.id) || 0) + ':' + attempt;
+              const entry = byGroup.get(key) ?? { suiteId, wfRunId, attempt, runs: [] };
+              if (!entry.wfRunId && wfRunId) entry.wfRunId = wfRunId;
+              if (!entry.suiteId && suiteId) entry.suiteId = suiteId;
+              entry.runs.push(cr);
+              byGroup.set(key, entry);
+            }
+
+            for (const group of byGroup.values()) {
+              if (group.runs.some(cr => String(cr?.status || 'completed') !== 'completed')) continue;
+              const failedRuns = group.runs.filter(cr => FAILED_CONCLUSIONS.has(String(cr?.conclusion || '').toLowerCase()));
+              if (!failedRuns.length) {
+                if (group.suiteId) pendingSuiteFlushes.delete(`${repositoryId}:suite:${group.suiteId}:${group.attempt}`);
+                if (group.wfRunId) pendingSuiteFlushes.delete(`${repositoryId}:run:${group.wfRunId}:${group.attempt}`);
+                continue;
+              }
+              const first = failedRuns[0]!;
+              let workflowName = typeof first.app?.name === 'string' ? first.app.name : null;
+              let workflowUrl = safeHttpUrl(first.html_url || first.details_url) ?? (repoFullName ? `https://github.com/${repoFullName}/commit/${verified.headSha}/checks` : null);
+              if (group.wfRunId) {
+                const runObj = await github.request('GET', github.path(`/actions/runs/${group.wfRunId}`), undefined, true).catch(() => null);
+                if (typeof runObj?.name === 'string' && runObj.name.trim()) workflowName = runObj.name.trim();
+                if (safeHttpUrl(runObj?.html_url)) workflowUrl = safeHttpUrl(runObj.html_url);
+                if (!group.suiteId && Number.isSafeInteger(runObj?.check_suite_id) && runObj.check_suite_id >= 1) group.suiteId = Number(runObj.check_suite_id);
+              }
+              const displayName = failedRuns.length === 1 ? String(first.name || workflowName || 'check_run') : (workflowName || String(first.name || 'check_suite'));
+              const parsed: ParsedFailedCheck = {
+                source: group.wfRunId ? 'workflow_run' : group.suiteId ? 'check_suite' : 'check_run',
+                headSha: verified.headSha,
+                headBranch: verified.headRef,
+                runOrSuiteId: canonicalRunOrSuiteId(group.wfRunId, group.suiteId, Number(first.id) || null),
+                canonicalGroup: canonicalCheckGroup(group.wfRunId, group.suiteId, Number(first.id) || null),
+                workflowRunId: group.wfRunId,
+                checkSuiteId: group.suiteId,
+                checkRunId: failedRuns.length === 1 ? (Number(first.id) || null) : null,
+                attempt: group.attempt,
+                conclusion: String(first.conclusion || 'failure').toLowerCase(),
+                name: displayName,
+                workflowName,
+                url: workflowUrl,
+                summary: clip(`Checks "${displayName}" completed with ${failedRuns.length} failed job(s) on attempt ${group.attempt}.`, 1500),
+                pullRequests: [{ number: prNumber }],
+              };
+              if (group.suiteId) pendingSuiteFlushes.delete(`${repositoryId}:suite:${group.suiteId}:${group.attempt}`);
+              if (group.wfRunId) pendingSuiteFlushes.delete(`${repositoryId}:run:${group.wfRunId}:${group.attempt}`);
+              if (hasRecordedCheckFailure(store, repositoryId, prNumber, parsed)) continue;
+              cachedComments ??= (await guardRequest(github.pages(github.path(`/issues/${prNumber}/comments`)))) ?? [];
+              const failedJobs = failedRuns.slice(0, 15).map(summarizeFailedCheckRun);
+              const ev = buildCheckFailedEventInput(store, repositoryId, parsed.source, 'completed', '', deliveryId, verified, parsed, failedJobs, cachedComments);
+              store.transaction(() => recordEvent(store, ev));
+            }
+
+            for (const cs of checkSuites) {
+              const suiteId = Number.isSafeInteger(cs?.id) && cs.id >= 1 ? Number(cs.id) : null;
+              if (!suiteId || String(cs?.status || '') !== 'completed') continue;
+              const conclusion = String(cs?.conclusion || '').toLowerCase();
+              if (!FAILED_CONCLUSIONS.has(conclusion)) continue;
+              const attempt = Number.isSafeInteger(cs?.run_attempt) && cs.run_attempt >= 1 ? Number(cs.run_attempt) : 1;
+              if (coveredSuiteAttempts.has(`${suiteId}:${attempt}`)) continue;
+              const appName = typeof cs?.app?.name === 'string' && cs.app.name.trim() ? cs.app.name.trim() : 'check_suite';
+              const suiteUrl = safeHttpUrl(cs?.html_url) ?? (repoFullName ? `https://github.com/${repoFullName}/commit/${verified.headSha}/checks` : null);
+              const parsed: ParsedFailedCheck = {
+                source: 'check_suite',
+                headSha: verified.headSha,
+                headBranch: verified.headRef,
+                runOrSuiteId: String(suiteId),
+                canonicalGroup: `suite:${suiteId}`,
+                workflowRunId: null,
+                checkSuiteId: suiteId,
+                checkRunId: null,
+                attempt,
+                conclusion,
+                name: appName,
+                workflowName: appName,
+                url: suiteUrl,
+                summary: clip(`Check suite "${appName}" (#${suiteId}, attempt ${attempt}) concluded with ${conclusion}.`, 1500),
+                pullRequests: [{ number: prNumber }],
+              };
+              if (hasRecordedCheckFailure(store, repositoryId, prNumber, parsed)) continue;
+              cachedComments ??= (await guardRequest(github.pages(github.path(`/issues/${prNumber}/comments`)))) ?? [];
+              const ev = buildCheckFailedEventInput(store, repositoryId, 'check_suite', 'completed', '', deliveryId, verified, parsed, [], cachedComments);
+              store.transaction(() => recordEvent(store, ev));
+            }
+          }
         }
-        const { checksPending, failedChecks } = summarizePatrolChecks(repoFullName, verified.headSha, fetchedCheckRuns ?? [], fetchedCheckSuites ?? []);
 
-        const reviews = (await guardRequest(github.pages(github.path(`/pulls/${prNumber}/reviews`)))) ?? [];
-        if (rateLimited) break;
-        const unresolvedChangesRequested = collectUnresolvedChangesRequested(store, repositoryId, verified, reviews);
+        if (!patrolDue || rateLimited || !store.db.open) continue;
 
-        if (isConflicted && suppressedOnSameHead && cachedComments === undefined) {
-          cachedComments = (await guardRequest(github.pages(github.path(`/issues/${prNumber}/comments`)))) ?? [];
+        // Low-frequency internal open-PR patrol (strictly internal to control plane; zero external chat/notification triggers).
+        try {
+          const rootIssue = rootIssueOfBotPr(store, repositoryId, prNumber);
+          const tKey = threadKey(store, {
+            repository_id: repositoryId,
+            object_type: 'pr',
+            object_number: prNumber,
+            source: 'control_plane',
+            type: 'pull_request.patrol',
+          });
+          const hasPendingEvent = Boolean(
+            store.get(
+              // thread_key alone: it already carries the repository id, and adding repository_id scans the repository's events (#1350).
+              "SELECT 1 FROM dispatch_events WHERE thread_key=? AND state IN ('pending','dispatching') LIMIT 1",
+              tKey,
+            ),
+          );
+          if (hasPendingEvent) continue;
+
+          const local = inspectLocalBotPrTasks(
+            store,
+            repositoryId,
+            verified,
+            rootIssue,
+            tKey,
+            nowMs,
+            patrolConfig.stalledTaskAgeMs,
+            envChanged,
+            prevState,
+          );
+          if (local.hasActiveExecutingTask) continue;
+
+          if (fetchedCheckRuns === null || fetchedCheckSuites === null) {
+            const [runsRes, suitesRes] = await Promise.all([
+              guardRequest(github.request('GET', github.path(`/commits/${verified.headSha}/check-runs?filter=latest&per_page=100`), undefined, true)),
+              guardRequest(github.request('GET', github.path(`/commits/${verified.headSha}/check-suites?per_page=100`), undefined, true)),
+            ]);
+            if (rateLimited) break;
+            fetchedCheckRuns = Array.isArray(runsRes?.check_runs) ? runsRes.check_runs : [];
+            fetchedCheckSuites = Array.isArray(suitesRes?.check_suites) ? suitesRes.check_suites : [];
+          }
+          const { checksPending, failedChecks } = summarizePatrolChecks(repoFullName, verified.headSha, fetchedCheckRuns ?? [], fetchedCheckSuites ?? []);
+
+          const reviews = (await guardRequest(github.pages(github.path(`/pulls/${prNumber}/reviews`)))) ?? [];
           if (rateLimited) break;
+          const unresolvedChangesRequested = collectUnresolvedChangesRequested(store, repositoryId, verified, reviews);
+
+          if (isConflicted && suppressedOnSameHead && cachedComments === undefined) {
+            cachedComments = (await guardRequest(github.pages(github.path(`/issues/${prNumber}/comments`)))) ?? [];
+            if (rateLimited) break;
+          }
+          const suppressedDirty = isConflicted && isConflictWakeSuppressed(store, repositoryId, verified, cachedComments, currentEnv.fingerprint);
+
+          const prevEnvSummary = parseJsonObject(prevState?.patrol_env_summary) as PatrolEnvironmentSummary | null;
+          const envDiffs = envChanged ? diffPatrolEnvironments(prevEnvSummary, currentEnv.summary) : [];
+          if (envChanged && !envDiffs.length) envDiffs.push('environment_or_policy_fingerprint changed since previous check');
+          const legacyNotes: string[] = [];
+          if (!prevEnvFp && local.lastPrTask) {
+            if (local.lastPrTask.error_code && LEGACY_RETIRED_BLOCKER_CODES.has(local.lastPrTask.error_code)) {
+              legacyNotes.push(`control_plane: legacy blocker ${local.lastPrTask.error_code} is retired in ${currentEnv.summary.control_plane.capability_version}; bot PR delivery now supports workflow changes`);
+            }
+            if (local.lastPrTask.error_code === 'github_workflows_permission_missing' && currentEnv.summary.installation.permissions.workflows === 'write') {
+              legacyNotes.push('installation.permissions.workflows: now write (previously github_workflows_permission_missing)');
+            }
+            if (local.lastPrTask.error_code === 'capability_ceiling_lowered' && covers(currentEnv.summary.policy.capability_ceiling as any, 'develop')) {
+              legacyNotes.push('policy.capability_ceiling: now develop (previously capability_ceiling_lowered)');
+            }
+            if (local.lastPrTask.error_code === 'environment_not_ready' && currentEnv.summary.environment.availability === 'available') {
+              legacyNotes.push('environment.availability: now available (previously environment_not_ready)');
+            }
+            if (local.lastPrTask.degraded_to_report) {
+              legacyNotes.push('previous pull_request revision task degraded to report without updating PR; re-evaluating under current capabilities');
+            }
+          }
+
+          const hasAnyObstacle = local.hasPriorObstacle || isConflicted || failedChecks.length > 0 || unresolvedChangesRequested.length > 0;
+          const effectiveEnvChanged = (envChanged && hasAnyObstacle) || legacyNotes.length > 0;
+          const environmentChanges = [...envDiffs, ...legacyNotes];
+          const prevPatrolBaseSha = normSha(prevState?.patrol_base_sha) ?? normSha(prevState?.base_sha);
+          const baseMoved = Boolean(effectiveBaseSha && prevPatrolBaseSha && effectiveBaseSha !== prevPatrolBaseSha);
+
+          const lastEventAtMs = prevState?.last_patrol_event_at ? Date.parse(String(prevState.last_patrol_event_at)) : 0;
+          const inCooldown = Number.isFinite(lastEventAtMs) && lastEventAtMs > 0 && (nowMs - lastEventAtMs) < patrolConfig.cooldownMs;
+          const suppressedRefMs = Math.max(
+            Number.isFinite(lastEventAtMs) ? lastEventAtMs : 0,
+            prevState?.conflict_suppressed_at ? (Date.parse(String(prevState.conflict_suppressed_at)) || 0) : 0,
+          );
+          const inSuppressedDirtyCooldown = suppressedDirty && suppressedRefMs > 0 && (nowMs - suppressedRefMs) < patrolConfig.suppressedDirtyCooldownMs;
+          const humanBrokeSuppression = suppressedOnSameHead && !envChangedFromSuppression && !suppressedDirty;
+
+          const wakeForEnv = effectiveEnvChanged;
+          const wakeForConflict = isConflicted && (suppressedDirty ? (!inSuppressedDirtyCooldown && baseMoved) : (humanBrokeSuppression || !inCooldown));
+          const wakeForChecksAfterBase = failedChecks.length > 0 && !checksPending && baseMoved && !inCooldown;
+          const wakeForUnresolvedReview = unresolvedChangesRequested.length > 0 && !inCooldown;
+          const wakeForStalledTask = local.stalledTasks.length > 0 && !inCooldown;
+          const shouldWake = wakeForEnv || wakeForConflict || wakeForChecksAfterBase || wakeForUnresolvedReview || wakeForStalledTask;
+
+          if (!shouldWake) {
+            const nextStatus = suppressedDirty
+              ? 'suppressed_dirty'
+              : isConflicted || failedChecks.length > 0 || unresolvedChangesRequested.length > 0 || local.stalledTasks.length > 0
+                ? 'cooldown'
+                : 'clean';
+            savePatrolState(store, repositoryId, prNumber, nowIso, false, currentEnv, verified.headSha, effectiveBaseSha, nextStatus);
+            continue;
+          }
+
+          const changesSinceLastCheck: string[] = [];
+          if (effectiveEnvChanged) changesSinceLastCheck.push('environment_or_policy_changed');
+          if (baseMoved) changesSinceLastCheck.push('base_moved');
+          if (isConflicted) changesSinceLastCheck.push('conflicted');
+          if (failedChecks.length > 0) changesSinceLastCheck.push('checks_failed');
+          if (unresolvedChangesRequested.length > 0) changesSinceLastCheck.push('unresolved_changes_requested');
+          if (local.stalledTasks.length > 0) changesSinceLastCheck.push('stalled_task');
+
+          cachedComments ??= (await guardRequest(github.pages(github.path(`/issues/${prNumber}/comments`)))) ?? [];
+          if (rateLimited) break;
+          const ev = buildPatrolEventInput(
+            store,
+            repositoryId,
+            verified,
+            pr,
+            targetBranch,
+            effectiveBaseSha,
+            prevPatrolBaseSha,
+            baseMoved,
+            isConflicted,
+            checksPending,
+            failedChecks,
+            unresolvedChangesRequested,
+            local,
+            currentEnv,
+            changesSinceLastCheck,
+            environmentChanges,
+            prevState,
+            patrolConfig,
+            nowMs,
+            cachedComments,
+          );
+          store.transaction(() => {
+            const recorded = recordEvent(store, ev);
+            savePatrolState(store, repositoryId, prNumber, nowIso, recorded > 0, currentEnv, verified.headSha, effectiveBaseSha, recorded > 0 ? 'woken' : 'cooldown');
+          });
+        } catch {
+          // Isolate per-PR patrol errors so one malformed row or transient failure never stalls scanning other PRs.
         }
-        const suppressedDirty = isConflicted && isConflictWakeSuppressed(store, repositoryId, verified, cachedComments, currentEnv.fingerprint);
-
-        const prevEnvSummary = parseJsonObject(prevState?.patrol_env_summary) as PatrolEnvironmentSummary | null;
-        const envDiffs = envChanged ? diffPatrolEnvironments(prevEnvSummary, currentEnv.summary) : [];
-        if (envChanged && !envDiffs.length) envDiffs.push('environment_or_policy_fingerprint changed since previous check');
-        const legacyNotes: string[] = [];
-        if (!prevEnvFp && local.lastPrTask) {
-          if (local.lastPrTask.error_code && LEGACY_RETIRED_BLOCKER_CODES.has(local.lastPrTask.error_code)) {
-            legacyNotes.push(`control_plane: legacy blocker ${local.lastPrTask.error_code} is retired in ${currentEnv.summary.control_plane.capability_version}; bot PR delivery now supports workflow changes`);
-          }
-          if (local.lastPrTask.error_code === 'github_workflows_permission_missing' && currentEnv.summary.installation.permissions.workflows === 'write') {
-            legacyNotes.push('installation.permissions.workflows: now write (previously github_workflows_permission_missing)');
-          }
-          if (local.lastPrTask.error_code === 'capability_ceiling_lowered' && covers(currentEnv.summary.policy.capability_ceiling as any, 'develop')) {
-            legacyNotes.push('policy.capability_ceiling: now develop (previously capability_ceiling_lowered)');
-          }
-          if (local.lastPrTask.error_code === 'environment_not_ready' && currentEnv.summary.environment.availability === 'available') {
-            legacyNotes.push('environment.availability: now available (previously environment_not_ready)');
-          }
-          if (local.lastPrTask.degraded_to_report) {
-            legacyNotes.push('previous pull_request revision task degraded to report without updating PR; re-evaluating under current capabilities');
-          }
-        }
-
-        const hasAnyObstacle = local.hasPriorObstacle || isConflicted || failedChecks.length > 0 || unresolvedChangesRequested.length > 0;
-        const effectiveEnvChanged = (envChanged && hasAnyObstacle) || legacyNotes.length > 0;
-        const environmentChanges = [...envDiffs, ...legacyNotes];
-        const prevPatrolBaseSha = normSha(prevState?.patrol_base_sha) ?? normSha(prevState?.base_sha);
-        const baseMoved = Boolean(effectiveBaseSha && prevPatrolBaseSha && effectiveBaseSha !== prevPatrolBaseSha);
-
-        const lastEventAtMs = prevState?.last_patrol_event_at ? Date.parse(String(prevState.last_patrol_event_at)) : 0;
-        const inCooldown = Number.isFinite(lastEventAtMs) && lastEventAtMs > 0 && (nowMs - lastEventAtMs) < patrolConfig.cooldownMs;
-        const suppressedRefMs = Math.max(
-          Number.isFinite(lastEventAtMs) ? lastEventAtMs : 0,
-          prevState?.conflict_suppressed_at ? (Date.parse(String(prevState.conflict_suppressed_at)) || 0) : 0,
-        );
-        const inSuppressedDirtyCooldown = suppressedDirty && suppressedRefMs > 0 && (nowMs - suppressedRefMs) < patrolConfig.suppressedDirtyCooldownMs;
-        const humanBrokeSuppression = suppressedOnSameHead && !envChangedFromSuppression && !suppressedDirty;
-
-        const wakeForEnv = effectiveEnvChanged;
-        const wakeForConflict = isConflicted && (suppressedDirty ? (!inSuppressedDirtyCooldown && baseMoved) : (humanBrokeSuppression || !inCooldown));
-        const wakeForChecksAfterBase = failedChecks.length > 0 && !checksPending && baseMoved && !inCooldown;
-        const wakeForUnresolvedReview = unresolvedChangesRequested.length > 0 && !inCooldown;
-        const wakeForStalledTask = local.stalledTasks.length > 0 && !inCooldown;
-        const shouldWake = wakeForEnv || wakeForConflict || wakeForChecksAfterBase || wakeForUnresolvedReview || wakeForStalledTask;
-
-        if (!shouldWake) {
-          const nextStatus = suppressedDirty
-            ? 'suppressed_dirty'
-            : isConflicted || failedChecks.length > 0 || unresolvedChangesRequested.length > 0 || local.stalledTasks.length > 0
-              ? 'cooldown'
-              : 'clean';
-          savePatrolState(store, repositoryId, prNumber, nowIso, false, currentEnv, verified.headSha, effectiveBaseSha, nextStatus);
-          continue;
-        }
-
-        const changesSinceLastCheck: string[] = [];
-        if (effectiveEnvChanged) changesSinceLastCheck.push('environment_or_policy_changed');
-        if (baseMoved) changesSinceLastCheck.push('base_moved');
-        if (isConflicted) changesSinceLastCheck.push('conflicted');
-        if (failedChecks.length > 0) changesSinceLastCheck.push('checks_failed');
-        if (unresolvedChangesRequested.length > 0) changesSinceLastCheck.push('unresolved_changes_requested');
-        if (local.stalledTasks.length > 0) changesSinceLastCheck.push('stalled_task');
-
-        cachedComments ??= (await guardRequest(github.pages(github.path(`/issues/${prNumber}/comments`)))) ?? [];
-        if (rateLimited) break;
-        const ev = buildPatrolEventInput(
-          store,
-          repositoryId,
-          verified,
-          pr,
-          targetBranch,
-          effectiveBaseSha,
-          prevPatrolBaseSha,
-          baseMoved,
-          isConflicted,
-          checksPending,
-          failedChecks,
-          unresolvedChangesRequested,
-          local,
-          currentEnv,
-          changesSinceLastCheck,
-          environmentChanges,
-          prevState,
-          patrolConfig,
-          nowMs,
-          cachedComments,
-        );
-        store.transaction(() => {
-          const recorded = recordEvent(store, ev);
-          savePatrolState(store, repositoryId, prNumber, nowIso, recorded > 0, currentEnv, verified.headSha, effectiveBaseSha, recorded > 0 ? 'woken' : 'cooldown');
-        });
-      } catch {
-        // Isolate per-PR patrol errors so one malformed row or transient failure never stalls scanning other PRs.
+      } finally {
+        // A read that ran into the rate limit is not recorded: the PR stays due and is read once the window allows.
+        if (scheduled && !rateLimited && store.db.isOpen) saveBotPrReconcile(store, repositoryId, prNumber, nowMs, seen ?? 'unreadable', row, localEnv);
       }
     }
   } finally {
@@ -3118,8 +3327,9 @@ async function reconcileOpenBotPullRequestsForRepo(
  * Background reconciler for open `bot_pull_requests`: detects base-branch advances (without requiring `push` webhook
  * subscriptions), completed failed check suites (without requiring `check_suite` / `workflow_run` subscriptions), and
  * runs strictly internal low-frequency open-PR patrol (with dirty-conflict anti-burn suppression and zero external
- * notifications) under both `github_app` and `bot_account`. Repositories without open `bot_pull_requests` perform
- * zero network calls.
+ * notifications) under both `github_app` and `bot_account`. Each tick reads only the open bot PRs that are due on their
+ * own schedule (#1396: 5 minutes to 4 hours, see BOT_PR_RECONCILE_MIN_MS), with one GraphQL query per repository and REST
+ * details only for PRs that changed; a repository with no due PR makes no GitHub request at all.
  */
 export class BotPrWakeScanner {
   private timer?: ReturnType<typeof setInterval>;
