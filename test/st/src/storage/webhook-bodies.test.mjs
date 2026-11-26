@@ -7,6 +7,9 @@ import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:
 import { join } from 'node:path';
 import { externalFixture } from '../../../fixtures/external-helpers.mjs';
 import { DeliveryBodyError, transientBodyError } from '../../../../dist/storage/webhook-bodies.js';
+import { Store } from '../../../../dist/storage/database.js';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 
 // #1403: an accepted webhook body over 2 KiB is kept in its own file beside the database; the row keeps an empty
 // payload, the file's path, its sha256 and size, and the few fields the delivery list shows. Every reader gets the bytes
@@ -36,7 +39,7 @@ test('a large accepted body lives in its own file and the list, detail, external
   assert.equal(row.payload.length, 0); assert.equal(row.payload_bytes, Buffer.byteLength(raw)); assert.equal(row.payload_sha256, sha(raw)); assert.equal(row.payload_removed_at, null);
   const file = join(h.store.webhookBodiesDir, row.payload_ref);
   assert.equal(readFileSync(file, 'utf8'), raw); assert.equal(statSync(file).mode & 0o777, 0o600);
-  assert.deepEqual(JSON.parse(row.payload_summary), { action: 'opened', number: 5, repository: { full_name: 'fixture/project-101' }, pull_request: { number: 5, draft: false, head: { sha: 'b'.repeat(40) } } });
+  assert.deepEqual(JSON.parse(row.payload_summary), { action: 'opened', number: 5, repository: { full_name: 'fixture/project-101' }, pull_request: { number: 5, title: 'large change', draft: false, head: { sha: 'b'.repeat(40) } } });
   assert.equal(Buffer.from(inline.payload).toString('utf8'), JSON.stringify(small), 'a body of at most 2 KiB stays in its row'); assert.equal(inline.payload_ref, null);
   // The list reads the summary: the same repository name and result as from the body itself.
   const list = await h.admin('/api/events?limit=10');
@@ -76,6 +79,42 @@ test('only a read that failed for want of descriptors or memory is worth retryin
   assert.deepEqual(['EMFILE', 'ENFILE', 'ENOMEM', 'EAGAIN', 'EACCES', 'EIO'].map(code => transientBodyError(failed(code))), [true, true, true, true, false, false]);
   assert.equal(transientBodyError(new DeliveryBodyError('delivery_body_corrupt', 'x')), false);
   assert.equal(transientBodyError(Object.assign(new Error('EMFILE'), { code: 'EMFILE' })), false, 'only a body read failure');
+});
+
+test('large bodies still reach the board and the CI events, which read the summary kept in the row', async t => {
+  const { h } = await fixture(t);
+  const pad = 'L'.repeat(4000), hook = (id, event, body) => h.hook(h.a.path, h.a.secret, id, body, { 'X-GitHub-Event': event });
+  const board = (type, number) => ({ ...h.store.get('SELECT title,github_state,draft FROM board_objects WHERE repository_id=? AND object_type=? AND object_number=?', '101', type, number) });
+  assert.equal((await hook('issue-opened', 'issues', { action: 'opened', repository: { id: 101 }, issue: { number: 31, title: 'Large issue', state: 'open', body: pad } })).status, 200);
+  assert.ok(h.store.get("SELECT payload_ref FROM deliveries WHERE delivery_id='issue-opened'").payload_ref, 'the body went to its own file');
+  assert.deepEqual(board('issue', 31), { title: 'Large issue', github_state: 'open', draft: null });
+  assert.equal((await hook('issue-closed', 'issues', { action: 'closed', repository: { id: 101 }, issue: { number: 31, title: 'Renamed issue', state: 'closed', body: pad } })).status, 200);
+  assert.deepEqual(board('issue', 31), { title: 'Renamed issue', github_state: 'closed', draft: null });
+  assert.equal((await hook('pr-draft', 'pull_request', { action: 'opened', number: 32, repository: { id: 101 }, pull_request: { number: 32, title: 'Draft change', state: 'open', draft: true, head: { sha: 'c'.repeat(40) }, body: pad } })).status, 200);
+  assert.deepEqual(board('pr', 32), { title: 'Draft change', github_state: 'open', draft: 1 });
+  // A check run names the pull requests it ran for.
+  assert.equal((await hook('check-pr', 'check_run', { action: 'created', repository: { id: 101 }, check_run: { id: 5, status: 'queued', output: { text: pad }, pull_requests: [{ number: 33, head: { sha: 'd'.repeat(40) } }] } })).status, 200);
+  assert.ok(h.store.get("SELECT 1 FROM board_objects WHERE repository_id='101' AND object_type='pr' AND object_number=33"));
+  // A failed workflow run opens a CI incident and its success closes it.
+  const run = conclusion => ({ action: 'completed', repository: { id: 101 }, workflow_run: { id: 77, status: 'completed', conclusion, name: 'CI', logs: pad } });
+  assert.equal((await hook('ci-failed', 'workflow_run', run('failure'))).status, 200);
+  assert.equal((await hook('ci-recovered', 'workflow_run', run('success'))).status, 200);
+  assert.deepEqual(h.store.all("SELECT type,incident FROM schedule_events WHERE project_id='101' AND type LIKE 'ci.%' ORDER BY created_at,type").map(row => ({ ...row })),
+    [{ type: 'ci.failed', incident: 'ci:workflow_run:77' }, { type: 'ci.recovered', incident: 'ci:workflow_run:77' }]);
+  assert.equal(h.store.get("SELECT count(*) n FROM deliveries WHERE delivery_id LIKE 'ci-%' AND payload_ref IS NOT NULL").n, 2);
+});
+
+test('a database written before #1403 gets the triggers that read the summary when it starts', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'webhook-bodies-')), path = join(directory, 'control.sqlite'), key = Buffer.alloc(32, 5);
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  let store = new Store(path, key);
+  // The triggers as they were: reading the row's own payload only.
+  store.db.exec(`DROP TRIGGER board_deliveries_insert; CREATE TRIGGER board_deliveries_insert AFTER INSERT ON deliveries BEGIN SELECT CAST(NEW.payload AS TEXT); END;
+    DROP TRIGGER schedule_ci_event; CREATE TRIGGER schedule_ci_event AFTER INSERT ON deliveries BEGIN SELECT CAST(NEW.payload AS TEXT); END;`);
+  store.close();
+  store = new Store(path, key); t.after(() => store.close());
+  for (const name of ['board_deliveries_insert', 'board_deliveries_update', 'schedule_ci_event'])
+    assert.match(store.get("SELECT sql FROM sqlite_schema WHERE type='trigger' AND name=?", name).sql, /payload_summary/, name);
 });
 
 test('deleting a project removes its webhook body files', async t => {

@@ -294,6 +294,8 @@ export class Store {
     // The bot's summary comment on an Issue or PR, which every later review of it edits instead of adding another comment.
     this.db.exec(`CREATE TABLE IF NOT EXISTS review_summaries(repository_id TEXT NOT NULL REFERENCES repositories(id),object_number INTEGER NOT NULL,
       comment_id TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(repository_id,object_number))`);
+    // Body columns of deliveries before the board and schedule triggers that read them (#1403).
+    webhookBodyStorage(this);
     actionsStorage(this);
     rateLimitStorage(this);
     externalStorage(this);
@@ -306,7 +308,6 @@ export class Store {
     providerStorage(this);
     // Ref columns on task_tools, model_requests and task_logs; the trace triggers below record them.
     trajectoryStorage(this.db);
-    webhookBodyStorage(this);
     managerStorage(this);
     dispatchStorage(this);
     githubWriteStorage(this);
