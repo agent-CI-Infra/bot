@@ -49,6 +49,9 @@ export function recordActionsRun(store: Store, id: string, run: any) {
 export function actionsWebhook(store: Store, id: string, event: string, payload: any) {
   if (event !== 'workflow_run' || payload.action !== 'completed' || !actionsWorkflowOn(store, id)) return;
   recordActionsRun(store, id, payload.workflow_run);
+  // A delivery is handled on the next tick even after a failed round (#1411): without this its attempt would wait out the
+  // failed round's ten-minute pause. Only a delivery brings the retry forward, so a lasting fault is not retried every tick.
+  store.run('UPDATE actions_failure_scans SET next_scan=0 WHERE repository_id=? AND error IS NOT NULL', id);
 }
 // Actions failure handling runs while the project, its switch and its comment ceiling are on.
 export function actionsWorkflowOn(store: Store, id: string) {
