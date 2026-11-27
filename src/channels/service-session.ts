@@ -11,6 +11,7 @@ import { ReadTokens } from '../agent/read-token.js';
 import { conversationHistoryTools } from '../roles/conversation.js';
 import { permitsTool, githubReadScopes, githubWriteAllowed, type RolePermissions } from '../roles/permissions.js';
 import { githubWrite, scopedGithubWriteTool } from '../github/write.js';
+import { collectAssistantMedia } from '../github/pull-request-media.js';
 import { autoMergePolicy, scopedMergeBoundary } from '../github/merge-policy.js';
 import { projectCeiling } from '../projects/ceiling.js';
 import { groupAssistant, groupBindingModel, modelGaps } from '../service-roles/roles.js';
@@ -195,7 +196,17 @@ export class ChannelServiceSessions {
         actor: { kind: 'service', service_role_id: roleId, conversation_id: chat.id, source_message: turn.source_message, grantor_id: binding.principal_id },
         allowed: (resource, operation) => githubWriteAllowed(permissions(), resource, operation) && reachable()?.id === project.id,
         // Who sent the message this turn answers: their own linked account, never the binding's grantor (#1170).
-        speaker: () => turn.event ? feishuPrincipal(this.store, turn.event) : null }, rest) };
+        speaker: () => turn.event ? feishuPrincipal(this.store, turn.event) : null,
+        mediaMode: 'assistant',
+        collectMedia: sources => collectAssistantMedia({
+          store: this.store,
+          repositoryId: String(repository.id),
+          redactor,
+          guard,
+          media,
+          computer: computers,
+          canReadComputer: () => computing && permitsTool(permissions(), 'read_file'),
+        }, sources) }, rest) };
     };
     const tasks = async (name: string, args: Json, key: string) => {
       const write = name === 'manage_project_task' || name === 'create_project_task', needs = write ? ['tasks.read', 'tasks.write'] : ['tasks.read'];
@@ -502,7 +513,7 @@ export class ChannelServiceSessions {
           : delegating ? ' Read a task\'s current revision before changing it; only its receipt proves the effect.'
           : offered(granted, 'list_project_tasks') ? ' You may read task progress in scope but cannot change tasks.' : ' You cannot read or change project tasks.')
         + ' For a side question that would clutter this conversation, start_own_task works it through separately with the same tools and permissions and returns only its conclusion; continue_own_task and list_own_tasks reach your earlier own tasks in this group.'
-        + (offered(granted, 'github_write') ? ' github_write writes directly to a repository in scope under the repository\'s configured GitHub bot account, shaped like the GitHub REST API (for example POST /issues to file an Issue someone in this group asks for, or POST /actions/workflows/nightly.yml/dispatches {ref} to start a workflow someone asks to run, after checking that no run of it is queued or in progress). An explicit request in this group to change another author\'s Issue or PR title, labels, assignees or open/closed state is sufficient within the granted repository and resource. Cite the requesting group message when reporting the change. Write only what the group asks for, read the current state first, give each write a stable key and report the link GitHub returns. Never push to another author\'s branch or the default branch unless someone here explicitly asks for that push; quote their message when you report it.'
+        + (offered(granted, 'github_write') ? ' github_write writes directly to a repository in scope under the repository\'s configured GitHub bot account, shaped like the GitHub REST API (for example POST /issues to file an Issue someone in this group asks for, or POST /actions/workflows/nightly.yml/dispatches {ref} to start a workflow someone asks to run, after checking that no run of it is queued or in progress). To attach screenshots or recordings to a GitHub Issue, PR, comment or review, pass media with authorized Feishu attachments ("resource:<resource_id>" from list_message_resources, works without an assistant computer) and/or assistant computer files ("workspace:<path>" under /workspace, /tmp or ~/), referencing images (PNG/JPEG/GIF/WebP, up to 5 MiB) with ![Description](...) and videos (MP4/WebM, up to 20 MiB; 30 MiB total, up to 8 files) with [Description](...). When a video or oversized/non-standard file benefits from keyframe screenshots, compression or format conversion, import it with import_message_resource and process it on your assistant computer with ffmpeg, Python Pillow or ImageMagick before attaching the resulting workspace:<path> files; extracting keyframes is optional and at your discretion. create_project_task does not bundle Feishu attachments directly—when a project team needs screenshots or videos, attach them to the relevant Issue or PR via github_write first (when permitted) so project roles can fetch them on demand. An explicit request in this group to change another author\'s Issue or PR title, labels, assignees or open/closed state is sufficient within the granted repository and resource. Cite the requesting group message when reporting the change. Write only what the group asks for, read the current state first, give each write a stable key and report the link GitHub returns. Never push to another author\'s branch or the default branch unless someone here explicitly asks for that push; quote their message when you report it.'
           // #1170: each repository's auto-merge policy, as it is now; the control plane enforces the same policy.
           + scopedMergeBoundary(projects.map(id => ({ full_name: String(this.store.get('SELECT full_name FROM repositories WHERE id=?', id)?.full_name ?? id), policy: autoMergePolicy(this.store, id) })))
           + ' A merge someone here asks for in the message you are answering rests on that message: pass merge_request "current_message". Every write is audited.' : '')

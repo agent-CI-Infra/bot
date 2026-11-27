@@ -13,7 +13,7 @@ function sanitizeTrajectoryValue(value) {
   return out;
 }
 export function sanitizeTrajectoryInput(input) {
-  if (input?.request && ['workspace_harness_config', 'workspace_agent_token', 'workspace_agent_config', 'workspace_agent_gateway', 'workspace_agent_tool'].includes(input.request.type) && typeof input.request.base64 === 'string') {
+  if (input?.request && ['workspace_harness_config', 'workspace_agent_token', 'workspace_agent_config', 'workspace_agent_gateway', 'workspace_agent_tool', 'workspace_context', 'workspace_write', 'workspace_artifact_stage'].includes(input.request.type) && typeof input.request.base64 === 'string') {
     return sanitizeTrajectoryValue({ ...input, request: { ...input.request, base64: '[redacted]' } });
   }
   return sanitizeTrajectoryValue(input);

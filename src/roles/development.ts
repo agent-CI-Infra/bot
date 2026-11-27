@@ -1,5 +1,5 @@
 import { commandTool, resolveCommandTimeout, runCommand } from '../agent/command.js';
-import { workspaceRepositoryTools, type RepositoryExplorer } from '../agent/exploration.js';
+import { RepositoryExplorer, workspaceRepositoryTools } from '../agent/exploration.js';
 import { eventSubscriptionToolNames, eventSubscriptionTools, executeTaskSubscriptionTool } from '../tasks/event-subscriptions.js';
 import type {GitHub} from '../github/client.js';
 import {versionTools,versionTool} from '../tasks/versions.js';
@@ -48,7 +48,16 @@ export async function developmentTeam(workspace:Workspace,system:string,prompt:s
   test_command:{type:'string',description:'The command you ran to test the change. The pull request description shows it as your report; the platform reruns only a project test command it has configured.'},
   change_title:{type:'string',description:'The commit subject and pull request title: a concise description of the code change.'},labels:pullRequestLabelsSchema,media:pullRequestMediaSchema},['summary','test_command']);
  const validate=(v:any)=>{if(!v||typeof v.summary!=='string'||!v.summary.trim()||typeof v.test_command!=='string'||!v.test_command.trim())return stop('role_delivery_invalid','retry_wait');return redactor.clean(v);};
- const readTools=explorer?workspaceRepositoryTools.map(t=>({...t,function:{...t.function,description:t.function.description.replace(/\s*Call github_read_token first\./g,'')}})):[];
+ const canWriteCheckout=()=>access.write&&(!spaces.role||spaces.role==='dev'||spaces.role==='manager');
+ const teamExplorer=explorer?new RepositoryExplorer(explorer.tokens,redactor,guard,{
+  extract:(artifactId,data,targetPath)=>spaces.current.extractArtifact(artifactId,data,targetPath),
+  canWriteCheckout,
+ },{
+  writeChunk:(targetPath,data,offset,final)=>spaces.current.writeMediaChunk(targetPath,data,offset,final),
+  truncate:targetPath=>spaces.current.truncateMedia(targetPath),
+  canWriteCheckout,
+ }):undefined;
+ const readTools=teamExplorer?workspaceRepositoryTools.map(t=>({...t,function:{...t.function,description:t.function.description.replace(/\s*Call github_read_token first\./g,'')}})):[];
  prompt=adaptTeamPrompt(prompt);
  for(let round=0;round<3;round++){
   const cmdBudget=resolveCommandTimeout(store,task,'dev',180);
@@ -58,7 +67,7 @@ export async function developmentTeam(workspace:Workspace,system:string,prompt:s
   // An Issue's development reports its milestones on the Issue's status comment (#1047).
   ...(milestone?[teamMilestoneTool]:[])],finish:{name:'submit_delivery',validate},finalizationTools:['submit_delivery'],validate:content=>validate(JSON.parse(content)),execute:async(name,args)=>{
    if(versionTools.some(t=>t.function.name===name))return versionTool(store,task,spaces.current,name,args,remote);
-   if(explorer&&workspaceRepositoryTools.some(t=>t.function.name===name)){const connected=await explorer.execute('github_read_token',{});return connected?.error?connected:explorer.execute(name,args);}
+   if(teamExplorer&&workspaceRepositoryTools.some(t=>t.function.name===name)){if(name==='fetch_github_media')return teamExplorer.execute(name,args);const connected=await teamExplorer.execute('github_read_token',{});return connected?.error?connected:teamExplorer.execute(name,args);}
    if(name==='github_write'&&githubWrite)return githubWrite(args);
    if(name===milestoneToolName&&milestone)return milestone(args);
    const actorTask={...task,active_role:spaces.role,trace_run_id:spaces.runId};

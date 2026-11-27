@@ -33,7 +33,9 @@
 - **统一由 Task Manager 团队开发与独立检视**：所有携带 `pull_request` 写权限的开发与修订任务均统一交由 Task Manager 团队编排（`dev` 实现后，Manager 按改动范围与风险派独立 `reviewer` 检视，行为改动且单测覆盖不足时再派 `test`；纯文案、注释或文档小改可跳过观察者并在 `checks_note` 说明；纯回复或重跑等无需改代码的轮次可经报告收尾）。Manager 提名时和 QA 验收时都能看到当前轮次候选由哪些角色产出了结果（例如「只有 dev，没有独立检视」）。
 - **验证与发布门禁**：开发在项目电脑独立工作区中改代码、跑测试；交付时控制面先固定工作树快照并核对工作区 `HEAD` 未脱离任务发布基线（非合法冲突解冲/变基场景下拒绝跨分支错发 PR），运行项目配置的 `test_command` 并经过独立 QA 核验（通过后只发布该快照，测试临时产物不进入 PR），推送 `bot/issue-*` 任务分支（同一 Issue 在不同基线上各有一条，默认基线为 `bot/issue-<N>`，其他基线为 `bot/issue-<N>-<base>`）并开 PR。
 - **结果标签**：成功开出/更新 PR 后去掉 `bot-developing` 并保留 `bot-developed`；若检视发现需补充信息/需人工决定或开发受阻未产出 PR，自动加上「需人工」标签（默认 `bot-needs-human`），待恢复开发或开出 PR 后移除。
-- **PR 正文与评论媒体**：开发或检视在工作区生成的截图（PNG/JPEG/GIF/WebP，单张 ≤ 5 MiB）与录屏（MP4/WebM，单段 ≤ 20 MiB），可通过工具 `media` 参数显式附带并在 PR 正文或评论中以 `workspace:<路径>` 嵌入（每次最多 8 个文件、合计 ≤ 30 MiB），由平台经公网 HTTPS 随机访问链接托管。
+- **PR/Issue 媒体附带与工作角色按需获取**：
+  - **发布媒体**：开发或检视在任务工作区生成的截图（PNG/JPEG/GIF/WebP，单张 ≤ 5 MiB）与录屏（MP4/WebM，单段 ≤ 20 MiB），可通过工具 `media` 参数显式附带并在 PR 正文、Issue、评论或检视中以 `workspace:<仓内相对路径>` 嵌入（每次最多 8 个文件、合计 ≤ 30 MiB），由平台经公网 HTTPS 随机访问链接（`/pr-media/<token>`）托管；飞书群聊助手与管理助手调用 `github_write` 时同样复用该托管链路附带飞书附件或助手电脑文件。
+  - **按需获取媒体（`fetch_github_media`）**：具备仓库 Issue、PR 或 Contents 任一读取权限的项目工作角色（含只读 `reviewer`/`test`/`ux`/`qa`）在查看 Issue/PR 讨论中引用的截图或视频时，可通过 `fetch_github_media` 按需落盘到 `../context/media/`（默认，不污染 `git diff`）或 `/tmp/`。对本 bot 托管的 `/pr-media/` 链接优先走控制面本地直读映射（零外网请求、`egress=false` 与 PAT 账号均可用）；对 GitHub 官方附件与当前仓库媒体链接执行受控流式下载（图片 ≤ 20 MiB、视频 ≤ 100 MiB，私有仓库附件支持传入 `source_path` 解析签名地址）。
 
 ## 3. bot PR 的持续多轮修订
 

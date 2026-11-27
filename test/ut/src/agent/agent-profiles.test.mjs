@@ -35,5 +35,8 @@ test('all workspace profiles retain unrestricted notes without advertising remov
     assert.ok(write);
     assert.doesNotMatch(write.function.description, /<name>\.md/);
     assert.equal(toolCapabilityError(profile, 'write_file', { path: '../notes/仓库经验.txt' }), null);
+    assert.ok(profile.tools.some(tool => tool.function.name === 'fetch_github_media'), kind + ' exposes fetch_github_media');
+    assert.equal(toolCapabilityError(profile, 'fetch_github_media', { url: 'https://github.com/user-attachments/assets/a' }), null);
   }
+  assert.equal(toolCapabilityError({ capabilities: { github: { permissions: {} } } }, 'fetch_github_media', { url: 'https://github.com/user-attachments/assets/a' }), 'github_read_token_not_allowed');
 });

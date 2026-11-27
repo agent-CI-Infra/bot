@@ -251,9 +251,9 @@ test('a later attempt gets the candidate of an earlier one as references, not th
   assert.deepEqual(candidate.evidence[108],{source:'task_log:108',version:'v108',verified:true});
   assert.deepEqual(candidate.artifacts,[{kind:'report',reference:'report',version:'r1'}]);assert.deepEqual(candidate.claims,{summary:'Earlier attempt.'});
   assert.ok(!raw.includes('command output')&&!raw.includes('artifact body'),'bodies stay out of the prompt');
-  // The bound is about the earlier attempt's bodies; the built-in rule sections (in the system prompt and again in
-  // project_instructions) account for most of the rest and grow with the rules (#1026).
-  assert.ok(raw.length<120000,'the prompt does not grow with the earlier attempt: '+raw.length);
+  // The bound is about the earlier attempt's bodies (~490 KB if leaked); the built-in rule sections (in the system
+  // prompt and again in project_instructions) and repository tool schemas account for most of the rest (#1026, #1413).
+  assert.ok(raw.length<130000,'the prompt does not grow with the earlier attempt: '+raw.length);
 });
 
 test('active Issue development blocks another task, and a review someone asked for on the bot PR offers one revision at a time',async t=>{

@@ -7,7 +7,7 @@ import { covers, projectCeiling, resourceLevel } from '../projects/ceiling.js';
 import { autoMergePolicy, githubMaintainer, isBotPullRequest, mergeBoundary, mergeNeedsRequest, principalMaintainer, type AutoMergePolicy } from './merge-policy.js';
 import { mergeQueue } from './merge-queue.js';
 import { hostedMediaUrl } from './hosted-pr-media.js';
-import { commentMediaSchema, planMarkdownMedia, publishHostedMedia, type StoredMedia } from './pull-request-media.js';
+import { assistantCommentMediaSchema, commentMediaSchema, planMarkdownMedia, publishHostedMedia, type MediaPlanMode, type StoredMedia } from './pull-request-media.js';
 import { formatWorkflowPaths, isWorkflowPath } from './workflow-changes.js';
 
 /**
@@ -52,8 +52,10 @@ export interface WriteContext {
    * platform principal, or null when the sender is not linked to one. Absent where no person's message drives the call.
    */
   speaker?: () => string | null;
-  /** Optional workspace media collector (for attaching screenshots/recordings to comments, issues, PRs and reviews). */
+  /** Optional media collector (for attaching screenshots/recordings to comments, issues, PRs and reviews). */
   collectMedia?: (paths: string[]) => Promise<StoredMedia[] | undefined>;
+  /** Caller media path policy; only service/management assistants may enable 'assistant' mode. */
+  mediaMode?: MediaPlanMode;
 }
 
 // One route: `shared` routes act on an Issue or a pull request by number (GitHub keeps both under /issues), `comment` routes on
@@ -138,8 +140,12 @@ export const withMergePolicy = <T extends { function: { name: string; descriptio
 export const grantedGithubWriteTool = fn('github_write', description.replace("Allowed only where your role has write on the route's GitHub resource (Issues, Pull requests, Contents or Actions)",
   "Offered because this task was granted GitHub writes; each call is allowed only where the task's source (the roles that created or delegated it, a group's level) has write on the route's GitHub resource (Issues, Pull requests, Contents or Actions)"), properties, ['method', 'path', 'key']);
 /** The tool of assistants that serve several repositories: the repository is chosen per call and checked against their scope. */
-export const scopedGithubWriteTool = fn('github_write', description.replace('(/repos/{owner}/{repo} is implied)', 'of the selected repository') + ' The repository argument selects one repository you may use; any other is refused.',
-  { repository: { type: 'string', description: 'Repository full name (owner/name).' }, ...properties }, ['repository', 'method', 'path', 'key']);
+export const scopedGithubWriteTool = fn('github_write', description
+  .replace('(/repos/{owner}/{repo} is implied)', 'of the selected repository')
+  .replace('To attach workspace screenshots or recordings to a comment, Issue, PR or review, pass media with repository-relative paths and reference them in body with ![Screenshot](workspace:path) or [Recording](workspace:path).',
+    'To attach screenshots or recordings to a comment, Issue, PR or review, pass media with authorized Feishu attachments ("resource:<resource_id>") and/or assistant computer files ("workspace:<path>" under /workspace, /tmp or ~/) and reference them in body with ![Screenshot](resource:<id>) / ![Screenshot](workspace:<path>) for images (PNG/JPEG/GIF/WebP, up to 5 MiB) or [Recording](resource:<id>) / [Recording](workspace:<path>) for videos (MP4/WebM, up to 20 MiB; 30 MiB total, up to 8 files).')
+  + ' The repository argument selects one repository you may use; any other is refused.',
+  { repository: { type: 'string', description: 'Repository full name (owner/name).' }, ...properties, media: assistantCommentMediaSchema }, ['repository', 'method', 'path', 'key']);
 
 export function githubWriteStorage(store: Store) {
   store.db.exec(`CREATE TABLE IF NOT EXISTS github_writes(id TEXT PRIMARY KEY,scope TEXT NOT NULL,key TEXT NOT NULL,repository_id TEXT NOT NULL,actor TEXT NOT NULL,
@@ -309,17 +315,22 @@ export async function githubWrite(context: WriteContext, args: unknown): Promise
   // matched on the decoded path GitHub will see (writePath already refused segments that do not decode).
   if (entry.resource === 'contents' && /^\/contents\/\.github\/workflows(?:\/|$)/i.test(decodedPath(path)))
     return refuse('github_workflow_write_forbidden', 'github_write never changes .github/workflows/. A CI change is delivered as a bot pull request through a development task, reviewed and merged by people.');
+  const mediaMode: MediaPlanMode = (context.actor.kind === 'service' || context.actor.kind === 'management') && context.mediaMode === 'assistant'
+    ? 'assistant'
+    : 'task_workspace';
   const mediaTexts = extractHumanMediaTexts(entry, input.body);
   let mediaPlan: ReturnType<typeof planMarkdownMedia> | null = null;
-  if (input.media !== undefined || mediaTexts.some(text => text.includes('workspace:'))) {
+  if (input.media !== undefined || mediaTexts.some(text => text.includes('workspace:') || (mediaMode === 'assistant' && text.includes('resource:')))) {
     if (!entry.human) return refuse('github_write_media_unsupported_route', 'media can only be attached to routes with Markdown body text (Issues, pull requests, comments, and reviews).');
-    try { mediaPlan = planMarkdownMedia(mediaTexts, input.media); }
+    try { mediaPlan = planMarkdownMedia(mediaTexts, input.media, { mode: mediaMode }); }
     catch (error) {
       if (error instanceof TaskError) return refuse(error.code, error.detail);
       throw error;
     }
     if (mediaPlan.paths.length && !context.collectMedia) {
-      return refuse('github_write_media_unavailable', 'This github_write caller has no task workspace to read workspace media files.');
+      return refuse('github_write_media_unavailable', mediaMode === 'assistant'
+        ? 'This github_write caller has no media collector configured.'
+        : 'This github_write caller has no task workspace to read workspace media files.');
     }
   }
   let body: unknown;
@@ -451,6 +462,12 @@ export async function githubWrite(context: WriteContext, args: unknown): Promise
     if (again) return again;
     let effectiveBody: unknown = input.body;
     if (collectedMedia?.length && mediaPlan) {
+      const formatsBySource = new Map(collectedMedia.map(file => [file.source, file.path.slice(file.path.lastIndexOf('.') + 1)]));
+      try { mediaPlan.assertFormats(formatsBySource); }
+      catch (error) {
+        if (error instanceof TaskError) return refuse(error.code, error.detail);
+        throw error;
+      }
       let hosted;
       try { hosted = publishHostedMedia(github, collectedMedia); }
       catch (error) {

@@ -453,6 +453,19 @@ export class Workspace {
     }
     return this.deliver({type:'workspace_artifact_extract',stage_id:stageId,path:targetPath});
   }
+  async writeMediaChunk(targetPath:string,data:Buffer,offset:number,final:boolean){
+    workspaceToolPath(targetPath);
+    if(targetPath==='../notes'||targetPath.startsWith('../notes/'))return {error:'invalid_media_path',detail:'Media cannot be written under ../notes/.'};
+    if(targetPath.startsWith('../context/')){
+      return this.deliver({type:'workspace_context',path:targetPath.slice('../context/'.length),base64:data.toString('base64'),offset});
+    }
+    const req={type:'workspace_write',path:targetPath,base64:data.toString('base64'),offset,final,mode:'100644'};
+    if(!aside(req)){const ready=await this.ensure();if(ready.error)return ready;}
+    return this.deliver(req);
+  }
+  async truncateMedia(targetPath:string){
+    await this.writeMediaChunk(targetPath,Buffer.alloc(0),0,true).catch(()=>{});
+  }
   // Copies the files of one fixed commit into this task's own workspace. With a mirror that holds the commit, the listing
   // and file contents come from it; otherwise (or for a blob the mirror lacks) from the GitHub API, as before.
   async prepare(github:GitHub,commitSha:string,mirror?:Mirror){

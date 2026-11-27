@@ -51,10 +51,16 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
   const prompt = !reply ? undefined : legacy ? { id: String(legacy.id), name: String(legacy.name), prompt: String(legacy.prompt ?? '') }
     : { id: 'reply', name: '事件回复', prompt: effectiveManagerPrompt(store, task.repository_id) };
   const profile = workspaceProfile(profileKind, context, taskPermissions(store, task), prompt, autoMergePolicy(store, String(task.repository_id)));
+  let activeWorkspace = () => workspace;
+  let activeCanWrite = () => profile.capabilities.workspace.write;
   const explorer = tokens && Object.keys(profile.capabilities.github.permissions).length
     ? new RepositoryExplorer(tokens, redactor, guard, {
-        extract: (artifactId, data, targetPath) => workspace.extractArtifact(artifactId, data, targetPath),
-        canWriteCheckout: () => profile.capabilities.workspace.write,
+        extract: (artifactId, data, targetPath) => activeWorkspace().extractArtifact(artifactId, data, targetPath),
+        canWriteCheckout: () => activeCanWrite(),
+      }, {
+        writeChunk: (targetPath, data, offset, final) => activeWorkspace().writeMediaChunk(targetPath, data, offset, final),
+        truncate: targetPath => activeWorkspace().truncateMedia(targetPath),
+        canWriteCheckout: () => activeCanWrite(),
       })
     : null;
   const records = new TaskRecords(store);
@@ -101,9 +107,12 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
     offered: name => profile.tools.some(tool => tool.function.name === name), publication: profile.capabilities.github.publication,
     repository: async (name, args) => {
       const allowed = workspaceRepositoryTools.some(tool => tool.function.name === name);
+      if (!allowed) return { error: 'tool_not_allowed' };
+      if (!explorer) return { error: 'github_read_token_unavailable' };
+      if (name === 'fetch_github_media') return explorer.execute(name, args);
       // A living Pi may retain its read token across a control-plane restart; establish this executor's client too.
-      const access = allowed && explorer ? await explorer.execute('github_read_token', {}) : null;
-      return !allowed ? { error: 'tool_not_allowed' } : !explorer ? { error: 'github_read_token_unavailable' } : access?.error ? access : explorer.execute(name, args);
+      const access = await explorer.execute('github_read_token', {});
+      return access?.error ? access : explorer.execute(name, args);
     },
     token: async () => {
       if (!Object.keys(profile.capabilities.github.permissions).length) stop('github_read_token_not_allowed', undefined, '这条工作流没有 GitHub 读取权限。');
@@ -131,6 +140,8 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
   // that assignment use their selected backend; old V2 entries retain Pi until the dev backend changes.
   if (entry && controlled(store, task, entry)) {
     const { repository, token, complete } = session, round = randomId(), spaces = roleWorkspaces(workspace);
+    activeWorkspace = () => spaces.current;
+    activeCanWrite = () => profile.capabilities.workspace.write && (!spaces.role || spaces.role === 'dev' || spaces.role === 'manager');
     const execute = async (name: string, args: any) => {
       if (spaces.role && spaces.role !== 'dev' && ['read_file', 'run_command'].includes(name)) {
         return name === 'run_command'
