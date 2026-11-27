@@ -182,7 +182,15 @@ export function readDispatchThread(store: Store, key: string, repositoryId = '')
   };
 }
 
-function appendDispatchThread(store: Store, event: Row, checked: Decision, created: string[], continued: string[], now: string) {
+function appendDispatchThread(
+  store: Store,
+  event: Row,
+  checked: Decision,
+  created: string[],
+  continued: string[],
+  now: string,
+  trackContinuedAsActive = true,
+) {
   if (!store.hasTable('dispatch_threads')) return;
   const key = threadKey(store, event);
   const current = readDispatchThread(store, key, String(event.repository_id));
@@ -209,7 +217,7 @@ function appendDispatchThread(store: Store, event: Row, checked: Decision, creat
     const lines = folded.map(item => `[${item.at.slice(0, 19)}] ${item.event_type} -> ${item.decision}${item.role ? `(${item.role})` : ''}: ${item.reason.slice(0, 120)}`);
     summary = [summary, ...lines].filter(Boolean).join('\n').slice(-4000);
   }
-  const activeTaskId = created[0] ?? continued[0] ?? current.active_task_id;
+  const activeTaskId = created[0] ?? (trackContinuedAsActive ? continued[0] : null) ?? current.active_task_id;
   store.run(
     `INSERT INTO dispatch_threads(thread_key,repository_id,object_type,object_number,messages,summary,active_task_id,updated_at)
      VALUES(?,?,?,?,?,?,?,?)
@@ -290,7 +298,13 @@ export interface ContinueOption {
   status: string;
   summary: string;
   created_at: string;
+  match: 'object' | 'subscription';
+  object_type?: string | null;
+  object_number?: number | null;
 }
+
+/** True for tasks bound to the event's own object (or linked root Issue / bot PR); false for cross-object subscription candidates. */
+export const isObjectContinuation = (option: Pick<ContinueOption, 'match'>): boolean => option.match !== 'subscription';
 
 export interface Decision {
   decision: 'create' | 'continue' | 'ignore';
@@ -385,15 +399,23 @@ function optionOffered(store: Store, repositoryId: string, work: string, eventTy
 export function recordEvent(store: Store, input: EventInput): number {
   const options = input.options;
   const offered = options.filter(option => optionOffered(store, input.repositoryId, option.work, input.type));
-  const hasContinuations = !!(
-    (input.merge && continuations(store, { repository_id: input.repositoryId, object_type: input.object?.type ?? null, object_number: input.object?.number ?? null, merge: JSON.stringify(input.merge) }).length) ||
-    activeRepositorySubscriptions(store, input.repositoryId).length
-  );
-  if (!offered.length && !hasContinuations) {
-    for (const option of input.options) if (option.hook) hooks.get(option.hook)?.declined(store, { repository_id: input.repositoryId, type: input.type }, 'work_inactive', option.ref ?? null);
-    const reasons = options.map(option => optionCeilingRefusal(store, input.repositoryId, option.work, input.type)?.reason).filter(Boolean);
-    recordFiltered(store, { ...input, code: 'work_inactive', reason: reasons.length ? [...new Set(reasons)].join(' ') : '这个事件没有项目允许的工作，也没有可以续接的任务。' });
-    return 0;
+  if (!offered.length) {
+    const hasObjectContinuations = !!(
+      input.merge &&
+      continuations(store, {
+        repository_id: input.repositoryId,
+        object_type: input.object?.type ?? null,
+        object_number: input.object?.number ?? null,
+        merge: JSON.stringify(input.merge),
+      }).some(isObjectContinuation)
+    );
+    const hasSubscriptions = activeRepositorySubscriptions(store, input.repositoryId).length > 0;
+    if (!hasObjectContinuations && !hasSubscriptions) {
+      for (const option of input.options) if (option.hook) hooks.get(option.hook)?.declined(store, { repository_id: input.repositoryId, type: input.type }, 'work_inactive', option.ref ?? null);
+      const reasons = options.map(option => optionCeilingRefusal(store, input.repositoryId, option.work, input.type)?.reason).filter(Boolean);
+      recordFiltered(store, { ...input, code: 'work_inactive', reason: reasons.length ? [...new Set(reasons)].join(' ') : '这个事件没有项目允许的工作，也没有可以续接的任务。' });
+      return 0;
+    }
   }
   const id = randomId(), now = new Date().toISOString();
   const computedThreadKey = threadKey(store, {
@@ -451,14 +473,14 @@ export function findResumableBotPrTask(store: Store, repo: string, prNumber: num
   const sourceId = owned?.source_task_id ? String(owned.source_task_id) : null;
   if (sourceId) {
     const sourceTask = store.get(
-      `SELECT t.id,t.repository_id,t.kind,t.status,t.summary,t.created_at,t.input FROM tasks t
+      `SELECT t.id,t.repository_id,t.kind,t.status,t.summary,t.created_at,t.object_number,t.input FROM tasks t
        WHERE t.id=? AND t.repository_id=?`,
       sourceId,
       repo,
     );
     if (sourceTask?.kind === 'task.request') {
       return store.get(
-        `SELECT t.id,t.repository_id,t.kind,t.status,t.summary,t.created_at,t.input FROM tasks t
+        `SELECT t.id,t.repository_id,t.kind,t.status,t.summary,t.created_at,t.object_number,t.input FROM tasks t
          WHERE t.id=? AND t.repository_id=? AND t.kind='task.request' AND t.status IN ('pr_opened','completed')
            AND NOT EXISTS (SELECT 1 FROM task_claims c WHERE c.task_id=t.id)
            AND EXISTS (SELECT 1 FROM task_write_grants g WHERE g.task_id=t.id AND json_valid(g.writes)
@@ -469,7 +491,7 @@ export function findResumableBotPrTask(store: Store, repo: string, prNumber: num
     }
   }
   return store.get(
-    `SELECT t.id,t.repository_id,t.kind,t.status,t.summary,t.created_at,t.input FROM tasks t
+    `SELECT t.id,t.repository_id,t.kind,t.status,t.summary,t.created_at,t.object_number,t.input FROM tasks t
      WHERE t.repository_id=? AND t.object_number=? AND t.kind='task.request'
        AND json_extract(t.input,'$.target.type')='pr'
        AND t.status IN ('pr_opened','completed')
@@ -482,24 +504,70 @@ export function findResumableBotPrTask(store: Store, repo: string, prNumber: num
   );
 }
 
+function continuationObjectMeta(task: Row): { object_type: string | null; object_number: number | null } {
+  let parsedInput: any = {};
+  try { parsedInput = JSON.parse(String(task.input || '{}')); } catch { parsedInput = {}; }
+  const inputType = parsedInput?.target?.type;
+  const object_type = inputType === 'pr' || String(task.kind || '').endsWith('.pr')
+    ? 'pr'
+    : inputType === 'issue' || String(task.kind || '').endsWith('.issue')
+      ? 'issue'
+      : typeof task.sub_object_type === 'string' && task.sub_object_type
+        ? task.sub_object_type
+        : null;
+  const rawNumber = parsedInput?.target?.number ?? task.object_number ?? task.sub_object_number;
+  const num = rawNumber != null ? Number(rawNumber) : NaN;
+  const object_number = Number.isSafeInteger(num) && num > 0 ? num : null;
+  return { object_type, object_number };
+}
+
+function toContinueOption(task: Row, match: 'object' | 'subscription'): ContinueOption {
+  const { object_type, object_number } = continuationObjectMeta(task);
+  return {
+    id: 'continue:' + task.id,
+    task_id: String(task.id),
+    kind: String(task.kind),
+    status: String(task.status),
+    summary: String(task.summary),
+    created_at: String(task.created_at),
+    match,
+    ...(object_type ? { object_type } : {}),
+    ...(object_number != null ? { object_number } : {}),
+  };
+}
+
 /**
- * Tasks the event may join on the same object (#770, #1122, #1331): both generic `task.request` tasks and historical
- * tasks, including active development linked across a root Issue and its bot PR, plus dormant open-PR development tasks
- * (`pr_opened`/`completed`) resumable for continuous multi-round execution.
+ * Tasks the event may join (#770, #1122, #1331, #1409):
+ * - Same-object tasks (`match: 'object'`): active generic `task.request` and legacy tasks on the event's object
+ *   (including active development linked across a root Issue and its bot PR), dormant open-PR development tasks
+ *   (`pr_opened`/`completed`), and finished reviews. Standing rules and `unless_continued` match only these.
+ * - Cross-object event subscription candidates (`match: 'subscription'`): active tasks in the repository holding
+ *   `event_subscriptions`, exposed only so Object Manager can explicitly wake a matching waiting task via
+ *   `continue_task` while inspecting `pending_subscriptions`.
  */
 export function continuations(store: Store, event: Record<string, any>): ContinueOption[] {
   const repo = String(event.repository_id);
+  const nowMs = Date.now();
   const subscribedTasks = store.hasTable('event_subscriptions')
     ? store.all(
-        `SELECT DISTINCT t.id,t.kind,t.status,t.summary,t.created_at
+        `SELECT t.id,t.kind,t.status,t.summary,t.created_at,t.object_number,t.input,
+                (SELECT s2.object_type FROM event_subscriptions s2
+                 WHERE s2.task_id=t.id AND s2.repository_id=s.repository_id AND s2.state='active' AND s2.timeout_at>?
+                 ORDER BY s2.created_at ASC, s2.rowid ASC LIMIT 1) AS sub_object_type,
+                (SELECT s2.object_number FROM event_subscriptions s2
+                 WHERE s2.task_id=t.id AND s2.repository_id=s.repository_id AND s2.state='active' AND s2.timeout_at>?
+                 ORDER BY s2.created_at ASC, s2.rowid ASC LIMIT 1) AS sub_object_number
          FROM event_subscriptions s
          JOIN tasks t ON t.id=s.task_id
          WHERE s.repository_id=? AND s.state='active' AND s.timeout_at>?
            AND t.status IN (${activeStates.map(() => '?').join(',')})
-         ORDER BY s.created_at ASC, t.rowid DESC
+         GROUP BY t.id
+         ORDER BY min(s.created_at) ASC, t.rowid DESC
          LIMIT 10`,
+        nowMs,
+        nowMs,
         repo,
-        Date.now(),
+        nowMs,
         ...activeStates,
       )
     : [];
@@ -508,15 +576,8 @@ export function continuations(store: Store, event: Record<string, any>): Continu
   const objectType = event.object_type ? String(event.object_type) : (String(merge?.kinds?.[0] || '').endsWith('.pr') ? 'pr' : 'issue');
   const openBotPr = objectType === 'pr' && objectNumber > 0 && isBotPrOpen(store, repo, objectNumber);
 
-  if ((!merge?.kinds?.length && !openBotPr) || !objectNumber) {
-    return subscribedTasks.map(task => ({
-      id: 'continue:' + task.id,
-      task_id: String(task.id),
-      kind: String(task.kind),
-      status: String(task.status),
-      summary: String(task.summary),
-      created_at: String(task.created_at),
-    }));
+  if (event.type === 'subscription.check' || ((!merge?.kinds?.length && !openBotPr) || !objectNumber)) {
+    return subscribedTasks.map(task => toContinueOption(task, 'subscription'));
   }
   const mergeKinds: string[] = Array.isArray(merge?.kinds) && merge.kinds.length ? merge.kinds : ['development.pr'];
   const allKinds = [...new Set([...mergeKinds, 'task.request'])];
@@ -526,7 +587,7 @@ export function continuations(store: Store, event: Record<string, any>): Continu
   const allowDev = mergeKinds.some((k: unknown) => String(k).startsWith('development.')) || openBotPr;
   const onlyDev = mergeKinds.every((k: unknown) => String(k).startsWith('development.'));
   const rawActive = store.all(
-    `SELECT t.id,t.repository_id,t.kind,t.status,t.summary,t.created_at,t.input FROM tasks t
+    `SELECT t.id,t.repository_id,t.kind,t.status,t.summary,t.created_at,t.object_number,t.input FROM tasks t
      WHERE t.repository_id=? AND t.object_number=? AND t.kind IN (${marks})
      AND (t.kind<>'task.request' OR json_extract(t.input,'$.target.type') IS NULL OR json_extract(t.input,'$.target.type')=?)
      AND t.status IN (${activeStates.map(() => '?').join(',')})
@@ -544,7 +605,7 @@ export function continuations(store: Store, event: Record<string, any>): Continu
       : undefined;
     if (owned?.source_task_id) {
       const sourceActive = store.get(
-        `SELECT t.id,t.repository_id,t.kind,t.status,t.summary,t.created_at,t.input FROM tasks t
+        `SELECT t.id,t.repository_id,t.kind,t.status,t.summary,t.created_at,t.object_number,t.input FROM tasks t
          WHERE t.id=? AND t.repository_id=? AND t.status IN (${activeStates.map(() => '?').join(',')})`,
         owned.source_task_id,
         repo,
@@ -558,7 +619,7 @@ export function continuations(store: Store, event: Record<string, any>): Continu
       const rootIssue = rootIssueOfBotPr(store, repo, objectNumber);
       if (rootIssue) {
         const linkedIssueDev = store.all(
-          `SELECT t.id,t.repository_id,t.kind,t.status,t.summary,t.created_at,t.input FROM tasks t
+          `SELECT t.id,t.repository_id,t.kind,t.status,t.summary,t.created_at,t.object_number,t.input FROM tasks t
            WHERE t.repository_id=? AND t.object_number=?
            AND (t.kind='development.issue' OR (t.kind='task.request' AND json_extract(t.input,'$.target.type')='issue'
              AND EXISTS (SELECT 1 FROM task_write_grants g WHERE g.task_id=t.id AND json_valid(g.writes) AND EXISTS (SELECT 1 FROM json_each(g.writes) WHERE value='pull_request'))))
@@ -574,7 +635,7 @@ export function continuations(store: Store, event: Record<string, any>): Continu
     if (botPrs.length) {
       const prMarks = botPrs.map(() => '?').join(',');
       const linkedPrDev = store.all(
-        `SELECT t.id,t.repository_id,t.kind,t.status,t.summary,t.created_at,t.input FROM tasks t
+        `SELECT t.id,t.repository_id,t.kind,t.status,t.summary,t.created_at,t.object_number,t.input FROM tasks t
          WHERE t.repository_id=? AND t.object_number IN (${prMarks})
          AND (t.kind='development.pr' OR (t.kind='task.request' AND json_extract(t.input,'$.target.type')='pr'
            AND EXISTS (SELECT 1 FROM task_write_grants g WHERE g.task_id=t.id AND json_valid(g.writes) AND EXISTS (SELECT 1 FROM json_each(g.writes) WHERE value='pull_request'))))
@@ -607,7 +668,7 @@ export function continuations(store: Store, event: Record<string, any>): Continu
   }
   if (!joinable.length && allowReviews) {
     const finished = store.get(
-      `SELECT t.id,t.kind,t.status,t.summary,t.created_at FROM tasks t
+      `SELECT t.id,t.kind,t.status,t.summary,t.created_at,t.object_number,t.input FROM tasks t
        WHERE t.repository_id=? AND t.object_number=? AND t.status='succeeded'
        AND ((t.kind IN (${marks}) AND t.kind LIKE 'review.%')
          OR (t.kind='task.request' AND (json_extract(t.input,'$.target.type') IS NULL OR json_extract(t.input,'$.target.type')=?)
@@ -617,31 +678,25 @@ export function continuations(store: Store, event: Record<string, any>): Continu
     );
     if (finished) joinable.push(finished);
   }
-  const joinableIds = new Set(joinable.map(t => String(t.id)));
+  const options = joinable.map(task => toContinueOption(task, 'object'));
+  const joinableIds = new Set(options.map(option => option.task_id));
   for (const subTask of subscribedTasks) {
     if (!joinableIds.has(String(subTask.id))) {
       joinableIds.add(String(subTask.id));
-      joinable.push(subTask);
+      options.push(toContinueOption(subTask, 'subscription'));
     }
   }
-  return joinable.map(task => ({
-    id: 'continue:' + task.id,
-    task_id: String(task.id),
-    kind: String(task.kind),
-    status: String(task.status),
-    summary: String(task.summary),
-    created_at: String(task.created_at),
-  }));
+  return options;
 }
 
 export function dispatchContext(store: Store, event: Row): DispatchContext {
-  const joinable = continuations(store, event), options: CreateOption[] = [], unavailable: UnavailableWork[] = [];
+  const joinable = continuations(store, event), hasObjectContinuations = joinable.some(isObjectContinuation), options: CreateOption[] = [], unavailable: UnavailableWork[] = [];
   for (const saved of JSON.parse(event.options) as CreateOption[]) {
     // Pending events from earlier versions keep their selection id and use the new task path.
     const option = event.type === 'actions.run_failed' && saved.work === 'actions.failures'
       ? { ...saved, work: 'task.request', spec: { type: 'generic' as const } }
       : saved;
-    if (option.unless_continued && joinable.length) continue;
+    if (option.unless_continued && hasObjectContinuations) continue;
     const refusal = optionCeilingRefusal(store, event.repository_id, option.work, event.type);
     if (refusal) unavailable.push({ id: option.id, work: option.work, title: option.title, ...refusal });
     else options.push(option);
@@ -1263,13 +1318,17 @@ function createOptionTask(store: Store, event: Row, option: CreateOption, decisi
   return id;
 }
 
-function join(store: Store, event: Row, taskId: string, decision: Decision) {
+function join(store: Store, event: Row, taskId: string, decision: Decision, target?: ContinueOption) {
   const merge = event.merge ? JSON.parse(event.merge) : null, task = store.get('SELECT * FROM tasks WHERE id=?', taskId)!;
-  const isDormantDev = task.kind === 'task.request'
+  const isSubscriptionContinuation = target?.match === 'subscription';
+  const isDormantDev = !isSubscriptionContinuation
+    && task.kind === 'task.request'
     && ['pr_opened', 'completed'].includes(String(task.status))
     && taskPermissions(store, task).writes.includes('pull_request');
   let recordedRequests: any[] = [];
-  if (merge) {
+  // Cross-object subscription wakeups only resolve event_subscriptions + log the wakeup; never overwrite the subscribed
+  // task's own PR/Issue merge state, head SHA target, revision requests, or bot_pr_requests with another object's event (#1409).
+  if (merge && !isSubscriptionContinuation) {
     const inserted = store.run('INSERT OR IGNORE INTO review_updates(task_id,event_key,data) VALUES(?,?,?)', taskId, merge.key, JSON.stringify({ ...merge.data, at: event.created_at ?? new Date().toISOString() }));
     if (inserted.changes) {
       const input = JSON.parse(task.input || '{}');
@@ -1299,7 +1358,18 @@ function join(store: Store, event: Row, taskId: string, decision: Decision) {
     }
   }
   resolveSubscriptionsByManager(store, taskId, event, decision.reason);
-  log(store, taskId, { type: 'dispatch', relation: 'continued', event_id: event.id, event_type: event.type, reason: decision.reason, detail: `Manager 把事件「${event.summary}」续接到这个任务：${decision.reason}` });
+  log(store, taskId, {
+    type: 'dispatch',
+    relation: 'continued',
+    ...(isSubscriptionContinuation ? { match: 'subscription' } : {}),
+    event_id: event.id,
+    event_type: event.type,
+    reason: decision.reason,
+    detail: isSubscriptionContinuation
+      ? `Manager 通过事件订阅将事件「${event.summary}」关联并唤醒这个任务：${decision.reason}`
+      : `Manager 把事件「${event.summary}」续接到这个任务：${decision.reason}`,
+  });
+  if (isSubscriptionContinuation) return;
   if (task.status === 'succeeded') continueFinishedReview(store, taskId);
   if (isDormantDev) continueDevelopmentTask(store, taskId, event, merge, decision.reason);
   if (recordedRequests.length) {
@@ -1341,6 +1411,7 @@ export function applyDecision(store: Store, event: Row, decision: Decision, leas
       const options = JSON.parse(current.options) as CreateOption[];
       const created: string[] = [], continued: string[] = [], declined: string[] = [], now = new Date().toISOString();
       const caller = checked.decision === 'ignore' ? null : eventTaskCaller(store, String(current.repository_id), String(current.id));
+      let continuedTarget: ContinueOption | null = null;
 
       if (checked.decision === 'create') {
         const domainOptions = checked.option_ids
@@ -1402,8 +1473,9 @@ export function applyDecision(store: Store, event: Row, decision: Decision, leas
 
       if (checked.decision === 'continue') {
         const target = context.continuations.find(option => option.id === checked.option_ids[0])!;
+        continuedTarget = target;
         assertManagedTask(store, caller!, target.task_id, true);
-        join(store, current, target.task_id, checked);
+        join(store, current, target.task_id, checked, target);
         continued.push(target.task_id);
         store.run('INSERT OR IGNORE INTO task_events VALUES(?,?,?,?)', target.task_id, current.id, 'continued', now);
       }
@@ -1425,8 +1497,10 @@ export function applyDecision(store: Store, event: Row, decision: Decision, leas
         now,
         current.id,
       );
-      appendDispatchThread(store, current, { ...checked, rule: decision.rule ?? checked.rule ?? null }, created, continued, now);
-      recordBotPrDispatchOutcome(store, current, { ...checked, rule: decision.rule ?? checked.rule ?? null }, created, continued, now);
+      appendDispatchThread(store, current, { ...checked, rule: decision.rule ?? checked.rule ?? null }, created, continued, now, continuedTarget?.match !== 'subscription');
+      if (continuedTarget?.match !== 'subscription') {
+        recordBotPrDispatchOutcome(store, current, { ...checked, rule: decision.rule ?? checked.rule ?? null }, created, continued, now);
+      }
       return { created, continued };
     });
   } catch (error) {

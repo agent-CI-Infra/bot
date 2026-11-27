@@ -10,6 +10,7 @@ import {
   InvalidDecision,
   dispatchLeaseMs,
   genericRefusal,
+  isObjectContinuation,
   pruneFiltered,
   threadKey,
   type Decision,
@@ -193,7 +194,7 @@ export function ruleDecider(context: DispatchContext): Decision {
   const defaults = context.options.filter(option => option.default);
   const reviews = defaults.filter(option => option.work.startsWith('review.')), others = defaults.filter(option => !option.work.startsWith('review.'));
   const reviewed = (JSON.parse(String(context.event.options || '[]')) as CreateOption[]).some(option => option.default && option.work.startsWith('review.') && !context.unavailable.some(work => work.id === option.id));
-  const joinable = context.continuations.filter(option => option.status !== 'succeeded' || reviewed);
+  const joinable = context.continuations.filter(option => isObjectContinuation(option) && (option.status !== 'succeeded' || reviewed));
   if (updates.includes(String(context.event.type)) && joinable.length && !others.length) {
     return { decision: 'continue', option_ids: [joinable[0]!.id], reason: 'rule: update joins the review', model: 'rule' };
   }
