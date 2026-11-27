@@ -655,13 +655,19 @@ test('import_message_resource -> computer processing -> view_workspace_image clo
   await assistants.close();
 });
 
-test('detectedMime identifies MP4/WebM (excluding AVIF/HEIC) and Feishu group & private assistants attach resource: and workspace: media via github_write', async t => {
+test('detectedMime identifies MP4/WebM (excluding AVIF/HEIC/MOV/M4A/3GP) and Feishu group & private assistants attach resource: and workspace: media via github_write', async t => {
   const mp4 = Buffer.from('00000018667479706d703432000000006d70343269736f6d', 'hex');
   const webm = Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x9f]), Buffer.from([0x42, 0x82, 0x84, 0x77, 0x65, 0x62, 0x6d]), Buffer.alloc(16)]);
   const avif = Buffer.from('00000018667479706176696600000000', 'hex');
+  const mov = Buffer.from('00000018667479707174202000000000', 'hex');
+  const m4a = Buffer.from('00000018667479704d34412000000000', 'hex');
+  const threeGp = Buffer.from('00000018667479703367703400000000', 'hex');
   assert.equal(detectedMime(mp4, 'application/octet-stream', 'clip.mp4'), 'video/mp4');
   assert.equal(detectedMime(webm, 'application/octet-stream', 'clip.webm'), 'video/webm');
   assert.equal(detectedMime(avif, 'application/octet-stream', 'photo.avif'), 'application/octet-stream');
+  assert.equal(detectedMime(mov, 'application/octet-stream', 'clip.mov'), 'application/octet-stream');
+  assert.equal(detectedMime(m4a, 'application/octet-stream', 'voice.m4a'), 'application/octet-stream');
+  assert.equal(detectedMime(threeGp, 'application/octet-stream', 'clip.3gp'), 'application/octet-stream');
 
   // Verify create_project_task schema never bundles Feishu attachments.
   const createTaskTool = serviceTools.find(tool => tool.function.name === 'create_project_task');

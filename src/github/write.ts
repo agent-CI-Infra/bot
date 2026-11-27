@@ -112,15 +112,19 @@ const routes: Route[] = [
 ];
 
 const fn = (name: string, description: string, properties: any, required: string[]) => ({ type: 'function', function: { name, description, parameters: { type: 'object', properties, required, additionalProperties: false } } });
-const description = 'Write to GitHub through the control plane, exactly like the GitHub REST API: method and a path relative to the repository (/repos/{owner}/{repo} is implied), with the REST JSON body. '
+const taskMediaGuidance = 'To attach workspace screenshots or recordings to a comment, Issue, PR or review, pass media with repository-relative paths and reference them in body with ![Screenshot](workspace:path) or [Recording](workspace:path).';
+const assistantMediaGuidance = 'To attach screenshots or recordings to a comment, Issue, PR or review, pass media with authorized Feishu attachments ("resource:<resource_id>") and/or assistant computer files ("workspace:<path>" under /workspace, /tmp or ~/) and reference them in body with ![Screenshot](resource:<id>) / ![Screenshot](workspace:<path>) for images (PNG/JPEG/GIF/WebP, up to 5 MiB) or [Recording](resource:<id>) / [Recording](workspace:<path>) for videos (MP4/WebM, up to 20 MiB; 30 MiB total, up to 8 files).';
+const writeDescription = (repoNote: string, mediaGuidance: string) =>
+  `Write to GitHub through the control plane, exactly like the GitHub REST API: method and a path relative to the repository ${repoNote}, with the REST JSON body. `
   + 'Examples: POST /issues {title, body}; POST /issues/12/comments {body}; POST /issues/12/labels {labels}; PATCH /issues/12 {state}; POST /pulls {title, head, base, body}; '
   + 'POST /pulls/7/reviews {event, body, comments}; PUT /pulls/7/merge; PUT /contents/docs/a.md {message, content (base64), sha?, branch?}; POST /git/refs {ref, sha}; '
   + 'POST /actions/workflows/nightly.yml/dispatches {ref, inputs?} starts a workflow that declares workflow_dispatch and returns its workflow_run_id and html_url (read its runs first: do not start one that is already queued or running unless asked); '
   + 'POST /actions/runs/99/rerun, POST /actions/runs/99/rerun-failed-jobs, POST /actions/runs/99/rerun-pending-jobs, POST /actions/runs/99/cancel, POST /actions/runs/99/force-cancel, or POST /actions/jobs/88/rerun manage Actions runs and jobs. '
   + 'PUT /pulls/7/merge {sha?, merge_method?} merges the pull request, or adds it to the merge queue when its base branch requires one (the answer says queued); it needs Contents and Pull requests write and is allowed only as the project\'s auto-merge policy says (your instructions state it). Writes that move the default branch without a pull request follow the same policy. '
   + 'Allowed only where your role has write on the route\'s GitHub resource (Issues, Pull requests, Contents or Actions) and the project\'s capability ceiling allows it (comment for Issues, pull requests and Actions, develop for Contents); other repositories, other routes and changes to .github/workflows/ are refused. '
-  + 'Text is sent as written: an @mention notifies that person, so mention someone only when the task asks for it; secrets are removed. To attach workspace screenshots or recordings to a comment, Issue, PR or review, pass media with repository-relative paths and reference them in body with ![Screenshot](workspace:path) or [Recording](workspace:path). key: a short stable name for this write (for example "triage-comment"); calling again with the same key returns the earlier result instead of writing twice, so keep it when retrying and use a new key for a different write. '
+  + `Text is sent as written: an @mention notifies that person, so mention someone only when the task asks for it; secrets are removed. ${mediaGuidance} key: a short stable name for this write (for example "triage-comment"); calling again with the same key returns the earlier result instead of writing twice, so keep it when retrying and use a new key for a different write. `
   + 'Use github_read to check state before writing; write only what your task needs.';
+const description = writeDescription('(/repos/{owner}/{repo} is implied)', taskMediaGuidance);
 const properties = { method: { type: 'string', enum: [...writeMethods] }, path: { type: 'string', description: 'Repository-relative REST path, such as /issues/12/comments. No query string.' },
   body: { type: 'object', description: 'The REST request body. Omit when the route takes none.' }, key: { type: 'string', maxLength: 120 },
   media: commentMediaSchema,
@@ -140,10 +144,7 @@ export const withMergePolicy = <T extends { function: { name: string; descriptio
 export const grantedGithubWriteTool = fn('github_write', description.replace("Allowed only where your role has write on the route's GitHub resource (Issues, Pull requests, Contents or Actions)",
   "Offered because this task was granted GitHub writes; each call is allowed only where the task's source (the roles that created or delegated it, a group's level) has write on the route's GitHub resource (Issues, Pull requests, Contents or Actions)"), properties, ['method', 'path', 'key']);
 /** The tool of assistants that serve several repositories: the repository is chosen per call and checked against their scope. */
-export const scopedGithubWriteTool = fn('github_write', description
-  .replace('(/repos/{owner}/{repo} is implied)', 'of the selected repository')
-  .replace('To attach workspace screenshots or recordings to a comment, Issue, PR or review, pass media with repository-relative paths and reference them in body with ![Screenshot](workspace:path) or [Recording](workspace:path).',
-    'To attach screenshots or recordings to a comment, Issue, PR or review, pass media with authorized Feishu attachments ("resource:<resource_id>") and/or assistant computer files ("workspace:<path>" under /workspace, /tmp or ~/) and reference them in body with ![Screenshot](resource:<id>) / ![Screenshot](workspace:<path>) for images (PNG/JPEG/GIF/WebP, up to 5 MiB) or [Recording](resource:<id>) / [Recording](workspace:<path>) for videos (MP4/WebM, up to 20 MiB; 30 MiB total, up to 8 files).')
+export const scopedGithubWriteTool = fn('github_write', writeDescription('of the selected repository', assistantMediaGuidance)
   + ' The repository argument selects one repository you may use; any other is refused.',
   { repository: { type: 'string', description: 'Repository full name (owner/name).' }, ...properties, media: assistantCommentMediaSchema }, ['repository', 'method', 'path', 'key']);
 
