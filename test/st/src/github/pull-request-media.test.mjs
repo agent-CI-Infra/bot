@@ -9,7 +9,7 @@ import { blobSha, Redactor, sha } from '../../../../dist/agent/common.js';
 import { assertMediaOutsideCode, bytesMatch, collectPullRequestMedia, detectHostedMediaFormat, normalizeAssistantMediaPath, planMarkdownMedia, planPullRequestMedia, publishHostedMedia, publishPullRequestMedia, pullRequestSummaryForProgress } from '../../../../dist/github/pull-request-media.js';
 import { Publisher } from '../../../../dist/github/publisher.js';
 import { hostedMediaUrl } from '../../../../dist/github/hosted-pr-media.js';
-import { githubWrite } from '../../../../dist/github/write.js';
+import { githubWrite, githubWriteTool, scopedGithubWriteTool } from '../../../../dist/github/write.js';
 import { publishReviewDelivery, validateReviewDelivery } from '../../../../dist/tasks/github-write.js';
 import { harness } from '../../../fixtures/helpers.mjs';
 import { Store } from '../../../../dist/storage/database.js';
@@ -398,14 +398,23 @@ test('F1 caller isolation keeps task workspaces strictly repo-relative while ass
     ['workspace:~/shot.png', 'png'],
   ])), { code: 'pull_request_media_invalid' });
 
-  // 4. MP4/WebM magic-byte detection excludes ISOBMFF image brands (avif/heic).
+  // 4. MP4/WebM magic-byte detection allowlists MP4 video brands and excludes image/QuickTime/audio/3GP ISOBMFF brands.
   const mp4 = Buffer.from('00000018667479706d70343200000000', 'hex');
   const webm = Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x9f]), Buffer.from([0x42, 0x82, 0x84, 0x77, 0x65, 0x62, 0x6d]), Buffer.alloc(16)]);
   const avif = Buffer.from('00000018667479706176696600000000', 'hex');
   const heic = Buffer.from('00000018667479706865696300000000', 'hex');
+  const mov = Buffer.from('00000018667479707174202000000000', 'hex');
+  const m4a = Buffer.from('00000018667479704d34412000000000', 'hex');
+  const threeGp = Buffer.from('00000018667479703367703400000000', 'hex');
   assert.equal(detectHostedMediaFormat(mp4), 'mp4');
   assert.equal(detectHostedMediaFormat(webm), 'webm');
-  assert.equal(bytesMatch(avif, 'mp4'), false);
-  assert.equal(bytesMatch(heic, 'mp4'), false);
-  assert.equal(detectHostedMediaFormat(avif), null);
+  for (const rejected of [avif, heic, mov, m4a, threeGp]) {
+    assert.equal(bytesMatch(rejected, 'mp4'), false);
+    assert.equal(detectHostedMediaFormat(rejected), null);
+  }
+
+  // 5. Scoped assistant github_write tool advertises resource:/workspace: guidance while task github_write stays task-workspace only.
+  assert.match(scopedGithubWriteTool.function.description, /resource:<resource_id>/);
+  assert.match(scopedGithubWriteTool.function.description, /workspace:<path>/);
+  assert.doesNotMatch(githubWriteTool.function.description, /resource:/);
 });

@@ -20,6 +20,15 @@ const MAGIC_PROBE_BYTES = 256;
 
 const s3AssetHostPattern = /^github-production-(?:user|release)-asset-[a-z0-9-]+\.s3(?:[.-][a-z0-9-]+)?\.amazonaws\.com$/;
 const localHostPattern = /(?:^|\.)(?:localhost|local|internal|home\.arpa)$/i;
+const SIGNED_MEDIA_HOSTS = new Set([
+  'objects.githubusercontent.com',
+  'private-user-images.githubusercontent.com',
+  'release-assets.githubusercontent.com',
+]);
+
+function isSignedMediaHost(host: string): boolean {
+  return SIGNED_MEDIA_HOSTS.has(host) || s3AssetHostPattern.test(host);
+}
 
 export type DnsLookupFn = (hostname: string) => Promise<{ address: string; family: number }[]>;
 
@@ -263,11 +272,8 @@ function classifyRedirectTarget(url: URL, repoFullName: string, testOrigins?: st
     return { ok: true };
   }
   if (
-    host === 'objects.githubusercontent.com' ||
-    host === 'private-user-images.githubusercontent.com' ||
     host === 'user-images.githubusercontent.com' ||
-    host === 'release-assets.githubusercontent.com' ||
-    s3AssetHostPattern.test(host)
+    isSignedMediaHost(host)
   ) {
     return { ok: true };
   }
@@ -360,13 +366,17 @@ function validateSourcePath(raw: string): { path: string; kind: 'issue_or_pr' | 
   return null;
 }
 
-function decodeHtmlAttr(raw: string): string {
-  return raw
-    .replaceAll('&amp;', '&')
-    .replaceAll('&quot;', '"')
-    .replaceAll('&#39;', "'")
-    .replaceAll('&lt;', '<')
-    .replaceAll('&gt;', '>');
+const htmlEntities: Record<string, string> = {
+  '&amp;': '&',
+  '&quot;': '"',
+  '&#39;': "'",
+  '&apos;': "'",
+  '&lt;': '<',
+  '&gt;': '>',
+};
+
+export function decodeHtmlAttr(raw: string): string {
+  return raw.replace(/&(?:amp|quot|#39|apos|lt|gt);/g, entity => htmlEntities[entity] ?? entity);
 }
 
 function attachmentTokenFromUrl(url: URL): string | null {
@@ -386,12 +396,12 @@ function extractSignedUrlFromHtml(htmlBodies: string[], originalUrl: URL, repoFu
   const originalNormalized = originalUrl.toString();
   const candidates: URL[] = [];
   const seen = new Set<string>();
-  const addCandidate = (raw: string) => {
-    const decoded = decodeHtmlAttr(raw).trim();
-    if (!decoded || decoded === originalNormalized || seen.has(decoded)) return;
-    seen.add(decoded);
+  const addCandidate = (decoded: string) => {
+    const trimmed = decoded.trim();
+    if (!trimmed || trimmed === originalNormalized || seen.has(trimmed)) return;
+    seen.add(trimmed);
     let parsed: URL;
-    try { parsed = new URL(decoded); } catch { return; }
+    try { parsed = new URL(trimmed); } catch { return; }
     const checked = classifyRedirectTarget(parsed, repoFullName, testOrigins);
     if ('ok' in checked) candidates.push(parsed);
   };
@@ -403,7 +413,7 @@ function extractSignedUrlFromHtml(htmlBodies: string[], originalUrl: URL, repoFu
       const canonical = /(?:^|\s)data-canonical-src="([^"]+)"/i.exec(text)?.[1];
       if (canonical && decodeHtmlAttr(canonical) === originalNormalized) {
         const src = /(?:^|\s)(?:src|href)="([^"]+)"/i.exec(text)?.[1];
-        if (src) addCandidate(src);
+        if (src) addCandidate(decodeHtmlAttr(src));
       }
     }
     for (const attr of html.matchAll(/(?:^|\s)(?:src|href)="([^"]+)"/gi)) {
@@ -413,9 +423,9 @@ function extractSignedUrlFromHtml(htmlBodies: string[], originalUrl: URL, repoFu
       }
     }
   }
-  // Prefer signed URLs (with query params or on private-user-images / objects / s3) over bare URLs.
+  // Prefer signed URLs (with query params or on signed GitHub CDN / S3 asset hosts) over bare URLs.
   candidates.sort((a, b) => {
-    const score = (u: URL) => (u.search ? 2 : 0) + (u.hostname.toLowerCase().includes('private-user-images') || u.hostname.toLowerCase().includes('objects.githubusercontent.com') ? 1 : 0);
+    const score = (u: URL) => (u.search ? 2 : 0) + (isSignedMediaHost(u.hostname.toLowerCase()) ? 1 : 0);
     return score(b) - score(a);
   });
   return candidates[0] ?? null;

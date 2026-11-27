@@ -12,6 +12,7 @@ import { Workspace } from '../../../../dist/agent/workspace.js';
 import { registerHostedMedia } from '../../../../dist/github/hosted-pr-media.js';
 import {
   classifyGitHubMediaUrl,
+  decodeHtmlAttr,
   GITHUB_MEDIA_MAX_IMAGE_BYTES,
   GITHUB_MEDIA_MAX_VIDEO_BYTES,
   isPrivateIp,
@@ -143,6 +144,9 @@ test('fetch_github_media Path B enforces GitHub domain allowlist, SSRF/redirect/
   assert.equal(classifyGitHubMediaUrl('https://169.254.169.254/latest/meta-data', 'fixture/project-101').error, 'github_media_url_forbidden');
   assert.equal(classifyGitHubMediaUrl('https://raw.githubusercontent.com/other/repo/main/a.png', 'fixture/project-101').error, 'github_media_repository_mismatch');
   assert.equal(classifyGitHubMediaUrl('https://github.com/other/repo/assets/1/a', 'fixture/project-101').error, 'github_media_repository_mismatch');
+  // Single-pass HTML attribute entity decoding: must never double-unescape &amp;lt; / &amp;quot; / &amp;#39;.
+  assert.equal(decodeHtmlAttr('&amp;lt;&amp;quot;&amp;#39;&amp;gt;&amp;amp;'), '&lt;&quot;&#39;&gt;&amp;');
+  assert.equal(decodeHtmlAttr('&lt;&quot;&#39;&gt;&amp;'), '<"\'>&');
 
   // Mock GitHub API routes for private source_path HTML resolution and Contents raw API.
   const apiHits = [];
@@ -152,7 +156,7 @@ test('fetch_github_media Path B enforces GitHub domain allowlist, SSRF/redirect/
     if (path === '/repos/fixture/project-101/issues/12' && accept.includes('html+json')) {
       send({
         number: 12,
-        body_html: '<p><img src="https://private-user-images.githubusercontent.com/999/private-uuid-123.png?jwt=signed-token-xyz" data-canonical-src="https://github.com/user-attachments/assets/private-uuid-123"></p>',
+        body_html: '<p><img src="https://private-user-images.githubusercontent.com/999/private-uuid-123.png?jwt=signed-token-xyz&amp;tag=&amp;quot;&amp;lt;1" data-canonical-src="https://github.com/user-attachments/assets/private-uuid-123"></p>',
       });
       return true;
     }
@@ -179,7 +183,7 @@ test('fetch_github_media Path B enforces GitHub domain allowlist, SSRF/redirect/
     if (url === 'https://github.com/user-attachments/assets/private-uuid-123') {
       return new Response(null, { status: 302, headers: { Location: 'https://github.com/login?return_to=...' } });
     }
-    if (url === 'https://private-user-images.githubusercontent.com/999/private-uuid-123.png?jwt=signed-token-xyz') {
+    if (url === 'https://private-user-images.githubusercontent.com/999/private-uuid-123.png?jwt=signed-token-xyz&tag=&quot;&lt;1') {
       return new Response(png, { status: 200, headers: { 'Content-Type': 'image/png', 'Content-Length': String(png.length) } });
     }
     if (url === 'https://github.com/user-attachments/assets/bad-redirect') {
