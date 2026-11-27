@@ -18,8 +18,14 @@ export const rerunCheckInterval = 10 * 60_000, rerunLookback = 72 * 3600_000;
 type Window = { from: number; until: number; page: number };
 const timestamp = (seconds: number) => new Date(seconds * 1000).toISOString().replace('.000Z', 'Z');
 
-// A repository's connected client, kept across ticks (#1411). `scan.lease` is the current tick's lease, which its guard checks.
-type Connected = { github: GitHub; scan: { lease: string }; credentials: unknown };
+// A repository's connected client, kept across ticks (#1411). `scan.lease` is the current tick's lease, which its guard checks;
+// `installation` is the local revision of the repository's installation when it connected.
+type Connected = { github: GitHub; scan: { lease: string }; credentials: unknown; installation: unknown };
+// The installation sync and installation webhooks raise this revision when the installation's permissions, event
+// subscriptions, scope or target change, so a client connected before such a change is not reused.
+const installationRevision = (store: Store, repo: Row) => store.get(`SELECT i.revision FROM installed_repositories r
+  JOIN github_installations i ON i.account_id=r.account_id AND i.installation_id=r.installation_id
+  WHERE r.account_id=? AND r.repository_id=?`, repo.account_id, repo.id)?.revision ?? null;
 
 export class ActionsFailures {
   private timer?: ReturnType<typeof setInterval>;
@@ -59,16 +65,20 @@ export class ActionsFailures {
   }
   /**
    * The repository's client for this tick. A connected client is kept while its token has more than renewBeforeMs left and
-   * the repository row and its account's credentials are unchanged, so a tick sends neither `connect`'s requests (the JWT
-   * installation lookup and token, `GET /repositories/:id`) nor a revoke. Otherwise the old tokens are revoked and it connects again.
+   * the repository row, its account's credentials and its installation's local revision are unchanged, so a tick sends
+   * neither `connect`'s requests (the JWT installation lookup and token, `GET /repositories/:id`) nor a revoke. Otherwise
+   * the old tokens are revoked and it connects again. The default branch has no local source: a renamed one is read at the
+   * next connect, within the token's life.
    */
   private async client(repo: Row, lease: string): Promise<GitHub> {
     const account = this.store.get('SELECT type,credentials FROM accounts WHERE id=?', repo.account_id);
+    const installation = installationRevision(this.store, repo);
     const held = this.clients.get(repo.id);
     if (held) {
       const known = held.github.repository;
       if (known.account_id === repo.account_id && known.owner_id === repo.owner_id && known.full_name === repo.full_name &&
-        held.credentials === account?.credentials && Date.parse(held.github.expiresAt) - Date.now() > renewBeforeMs) {
+        held.credentials === account?.credentials && held.installation === installation &&
+        Date.parse(held.github.expiresAt) - Date.now() > renewBeforeMs) {
         held.scan.lease = lease;
         return held.github;
       }
@@ -82,7 +92,7 @@ export class ActionsFailures {
     };
     const github = new GitHub(this.store, repo, registeredRedactor(this.store), guard, this.apiUrl);
     // Kept before connecting, so the token of a connect that fails half-way is revoked with the rest.
-    this.clients.set(repo.id, { github, scan, credentials: account!.credentials });
+    this.clients.set(repo.id, { github, scan, credentials: account!.credentials, installation });
     await github.connect(false, undefined, { contents: 'read', actions: 'read' });
     return github;
   }

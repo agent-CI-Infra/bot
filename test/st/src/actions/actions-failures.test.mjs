@@ -404,6 +404,11 @@ test('a person can rerun an untracked run and discovery finds the attempt withou
 
 test('without webhooks a repository is scanned every 10 minutes on one connection, and a delivery is processed on the next tick (#1411)', async t => {
   const f = await fixture(t, { tokenLife: 3600_000, runs: [] });
+  // Installation 9 as the installation sync records it, so its local revision can move.
+  f.h.store.run("UPDATE installed_repositories SET installation_id='9' WHERE repository_id='101'");
+  f.h.store.run(`INSERT INTO github_installations(ref,github_host,app_id,installation_id,account_id,target_id,target_type,target_login,
+    repository_selection,status,completeness,revision,scope_pending,updated_at) VALUES('github.com/1/9','github.com','1','9',?,'10','Organization','fixture',
+    'selected','active','complete',1,0,?)`, f.a.id, new Date().toISOString());
   t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
   const sent = match => f.state.requests.filter(match).length;
   const connects = () => sent(r => r.path === '/repositories/101'), mints = () => sent(r => r.path.endsWith('/access_tokens'));
@@ -424,11 +429,35 @@ test('without webhooks a repository is scanned every 10 minutes on one connectio
   f.state.runs = [run()]; await f.hook(f.state.runs[0]); await f.poll();
   assert.equal(f.events().length, 1); assert.equal(f.events()[0].event_key, '101:actions.run_failed:800:1');
   assert.deepEqual([connects(), mints()], [1, 1]);
-  // With less than 15 minutes left the token is revoked and the repository connects again.
-  t.mock.timers.tick(35 * 60_000); await f.poll();
+  // The installation's permissions or event subscriptions changed (its local revision moved): the next tick connects again.
+  // The run stays pending while its analysis waits for the Manager, so every tick processes the repository.
+  f.h.store.run("UPDATE github_installations SET revision=revision+1 WHERE ref='github.com/1/9'"); await f.poll();
   assert.deepEqual([connects(), mints()], [2, 2]);
   assert.deepEqual(revoked(), ['Bearer fixture-actions-installation-token-1']);
+  // With less than 15 minutes left the token is revoked and the repository connects again.
+  t.mock.timers.tick(44 * 60_000); await f.poll();
+  assert.deepEqual([connects(), mints()], [2, 2]);
+  t.mock.timers.tick(2 * 60_000); await f.poll();
+  assert.deepEqual([connects(), mints()], [3, 3]);
+  assert.deepEqual(revoked(), ['Bearer fixture-actions-installation-token-1', 'Bearer fixture-actions-installation-token-2']);
   // Switching the feature off revokes the token on the next tick.
   await f.policy({ actions_failures_enabled: false }); await f.poll();
-  assert.deepEqual(revoked(), ['Bearer fixture-actions-installation-token-1', 'Bearer fixture-actions-installation-token-2']);
+  assert.deepEqual(revoked().at(-1), 'Bearer fixture-actions-installation-token-3');
+});
+
+test('a delivery to a repository whose last round failed is handled on the next tick, not after the pause (#1411)', async t => {
+  const f = await fixture(t, { runs: [] });
+  let broken = true;
+  f.state.custom = ({ path, send }) => { if (broken && path.endsWith('/actions/runs')) { send({}, 503); return true; } return false; };
+  await f.poll();
+  const failed = f.h.store.get('SELECT error,next_scan FROM actions_failure_scans');
+  assert.ok(failed.error); assert.ok(failed.next_scan > Date.now() + 9 * 60_000, 'a failed round waits the scan interval');
+  // Without a delivery the pause holds: a tick sends nothing.
+  const quiet = f.state.requests.length; await f.poll();
+  assert.equal(f.state.requests.length, quiet);
+  // A workflow_run delivery brings the retry forward to the next tick, which handles the run.
+  broken = false; f.state.runs = [run()];
+  await f.hook(f.state.runs[0]); await f.poll();
+  assert.equal(f.events().length, 1); assert.equal(f.events()[0].event_key, '101:actions.run_failed:800:1');
+  assert.equal(f.h.store.get('SELECT error FROM actions_failure_scans').error, null);
 });
