@@ -1,6 +1,6 @@
 import type { Store, Row } from '../storage/database.js';
 import { randomId } from '../core/security.js';
-import { GitHub, revokeInstallationToken } from '../github/client.js';
+import { GitHub, renewBeforeMs } from '../github/client.js';
 import { stop, TaskError } from '../agent/common.js';
 import { actionPages } from '../releases/actions.js';
 import { activateActions, recordActionsRun, actionsWorkflowOn } from './storage.js';
@@ -10,19 +10,25 @@ import { eventTaskActive } from '../tasks/event-adapters.js';
 import { actionsConfigurationError } from './safety.js';
 import { registeredRedactor } from '../core/redaction.js';
 
-export const scanInterval = 60_000, scanPageSize = 50;
+// The scan is the fallback for lost workflow_run deliveries (#1411): runs and attempts a delivery records are processed on the
+// next five-second tick, so discovery only needs to come round every ten minutes. A failed round waits as long.
+export const scanInterval = 10 * 60_000, scanPageSize = 50;
 // Reruns of earlier runs are looked for every 10 minutes among runs created in the last 72 hours.
 export const rerunCheckInterval = 10 * 60_000, rerunLookback = 72 * 3600_000;
 type Window = { from: number; until: number; page: number };
 const timestamp = (seconds: number) => new Date(seconds * 1000).toISOString().replace('.000Z', 'Z');
 
+// A repository's connected client, kept across ticks (#1411). `scan.lease` is the current tick's lease, which its guard checks.
+type Connected = { github: GitHub; scan: { lease: string }; credentials: unknown };
+
 export class ActionsFailures {
   private timer?: ReturnType<typeof setInterval>;
   private active?: Promise<void>;
   private closing = false;
+  private readonly clients = new Map<string, Connected>();
   constructor(readonly store: Store, readonly apiUrl = 'https://api.github.com') {}
   start() { this.timer = setInterval(() => { void this.tick(); }, 5000); this.timer.unref(); void this.tick(); }
-  async close() { this.closing = true; clearInterval(this.timer); await this.active; }
+  async close() { this.closing = true; clearInterval(this.timer); await this.active; await Promise.all([...this.clients.keys()].map(id => this.drop(id))); }
   async tick() {
     if (this.closing) return;
     if (this.active) return this.active;
@@ -30,7 +36,11 @@ export class ActionsFailures {
     return this.active;
   }
   private async work() {
-    for (const repo of this.store.all('SELECT r.* FROM repositories r JOIN policies p ON p.repository_id=r.id WHERE p.enabled=1 AND p.actions_failures_enabled=1').filter(repo => actionsWorkflowOn(this.store, repo.id))) {
+    const repos = this.store.all('SELECT r.* FROM repositories r JOIN policies p ON p.repository_id=r.id WHERE p.enabled=1 AND p.actions_failures_enabled=1').filter(repo => actionsWorkflowOn(this.store, repo.id));
+    // A repository that left Actions failure handling (switched off, project disabled or removed) gives up its token at once.
+    const handled = new Set(repos.map(repo => String(repo.id)));
+    for (const id of [...this.clients.keys()]) if (!handled.has(id)) await this.drop(id);
+    for (const repo of repos) {
       if (this.closing) break;
       if (!this.store.get('SELECT 1 FROM actions_failure_scans WHERE repository_id=?', repo.id)) activateActions(this.store, repo.id);
       const row = this.store.get('SELECT * FROM actions_failure_scans WHERE repository_id=?', repo.id)!;
@@ -40,38 +50,67 @@ export class ActionsFailures {
       if (!this.store.run('UPDATE actions_failure_scans SET lease=?,lease_until=? WHERE repository_id=? AND lease_until<=?', lease, Date.now() + 120_000, repo.id, Date.now()).changes) continue;
       try { await this.repository(repo, lease); }
       catch (error) {
+        // A failed round revokes its tokens; the next one connects again.
+        await this.drop(repo.id);
         // Stable codes only: HTTP messages and source logs can contain credentials.
         this.store.run('UPDATE actions_failure_scans SET error=?,next_scan=? WHERE repository_id=? AND lease=?', error instanceof TaskError ? error.code : 'actions_processing_failed', Date.now() + scanInterval, repo.id, lease);
       } finally { this.store.run('UPDATE actions_failure_scans SET lease=NULL,lease_until=0 WHERE repository_id=? AND lease=?', repo.id, lease); }
     }
   }
-  private async repository(repo: Row, lease: string) {
+  /**
+   * The repository's client for this tick. A connected client is kept while its token has more than renewBeforeMs left and
+   * the repository row and its account's credentials are unchanged, so a tick sends neither `connect`'s requests (the JWT
+   * installation lookup and token, `GET /repositories/:id`) nor a revoke. Otherwise the old tokens are revoked and it connects again.
+   */
+  private async client(repo: Row, lease: string): Promise<GitHub> {
+    const account = this.store.get('SELECT type,credentials FROM accounts WHERE id=?', repo.account_id);
+    const held = this.clients.get(repo.id);
+    if (held) {
+      const known = held.github.repository;
+      if (known.account_id === repo.account_id && known.owner_id === repo.owner_id && known.full_name === repo.full_name &&
+        held.credentials === account?.credentials && Date.parse(held.github.expiresAt) - Date.now() > renewBeforeMs) {
+        held.scan.lease = lease;
+        return held.github;
+      }
+      await this.drop(repo.id);
+    }
+    if (account?.type !== 'github_app') stop('actions_app_required');
+    const scan = { lease };
     const guard = async () => {
       if (this.closing || !actionsWorkflowOn(this.store, repo.id)) stop('actions_failures_disabled');
-      if (!this.store.run('UPDATE actions_failure_scans SET lease_until=? WHERE repository_id=? AND lease=? AND lease_until>?', Date.now() + 120_000, repo.id, lease, Date.now()).changes) stop('actions_lease_lost');
+      if (!this.store.run('UPDATE actions_failure_scans SET lease_until=? WHERE repository_id=? AND lease=? AND lease_until>?', Date.now() + 120_000, repo.id, scan.lease, Date.now()).changes) stop('actions_lease_lost');
     };
-    const redactor = registeredRedactor(this.store), github = new GitHub(this.store, repo, redactor, guard, this.apiUrl);
-    try {
-      if (this.store.get('SELECT type FROM accounts WHERE id=?', repo.account_id)?.type !== 'github_app') stop('actions_app_required');
-      await github.connect(false, undefined, { contents: 'read', actions: 'read' });
-      const configuration = actionsConfigurationError(github); if (configuration) stop(configuration);
-      this.store.run('UPDATE actions_failure_scans SET error=NULL,configured_at=? WHERE repository_id=? AND lease=?', new Date().toISOString(), repo.id, lease);
-      // Poll tracked runs even when discovery no longer returns their original creation window.
-      let pendingError: unknown;
-      for (const run of this.store.all(`SELECT * FROM actions_failure_runs WHERE repository_id=? AND
-        (tracking=1 OR EXISTS(SELECT 1 FROM actions_failure_attempts a WHERE a.repository_id=? AND a.run_id=actions_failure_runs.run_id AND a.state='pending'))`, repo.id, repo.id)) {
-        try { await this.processRun(github, run.run_id); }
-        catch (error) {
-          if (error instanceof TaskError && ['actions_failures_disabled', 'actions_lease_lost', 'github_rate_limited'].includes(error.code)) throw error;
-          pendingError ??= error;
-        }
+    const github = new GitHub(this.store, repo, registeredRedactor(this.store), guard, this.apiUrl);
+    // Kept before connecting, so the token of a connect that fails half-way is revoked with the rest.
+    this.clients.set(repo.id, { github, scan, credentials: account!.credentials });
+    await github.connect(false, undefined, { contents: 'read', actions: 'read' });
+    return github;
+  }
+  private async drop(id: string) {
+    const held = this.clients.get(id);
+    if (!held) return;
+    this.clients.delete(id);
+    await held.github.revokeTokens('actions_failures');
+  }
+  private async repository(repo: Row, lease: string) {
+    const github = await this.client(repo, lease);
+    const configuration = actionsConfigurationError(github); if (configuration) stop(configuration);
+    this.store.run('UPDATE actions_failure_scans SET error=NULL,configured_at=? WHERE repository_id=? AND lease=?', new Date().toISOString(), repo.id, lease);
+    // Poll tracked runs even when discovery no longer returns their original creation window.
+    let pendingError: unknown;
+    for (const run of this.store.all(`SELECT * FROM actions_failure_runs WHERE repository_id=? AND
+      (tracking=1 OR EXISTS(SELECT 1 FROM actions_failure_attempts a WHERE a.repository_id=? AND a.run_id=actions_failure_runs.run_id AND a.state='pending'))`, repo.id, repo.id)) {
+      try { await this.processRun(github, run.run_id); }
+      catch (error) {
+        if (error instanceof TaskError && ['actions_failures_disabled', 'actions_lease_lost', 'github_rate_limited'].includes(error.code)) throw error;
+        pendingError ??= error;
       }
-      // Keep this scan page in place while allowing other tracked runs to advance.
-      if (pendingError) throw pendingError;
-      await this.scan(github);
-      await this.reconcileReruns(github);
-      this.store.run('UPDATE actions_failure_scans SET next_scan=? WHERE repository_id=? AND lease=?', Date.now() + scanInterval, repo.id, lease);
-    } finally { if (github.token) await revokeInstallationToken(this.apiUrl, github.token).catch(() => false); }
+    }
+    // Keep this scan page in place while allowing other tracked runs to advance.
+    if (pendingError) throw pendingError;
+    await this.scan(github);
+    await this.reconcileReruns(github);
+    this.store.run('UPDATE actions_failure_scans SET next_scan=? WHERE repository_id=? AND lease=?', Date.now() + scanInterval, repo.id, lease);
   }
   private async scan(github: GitHub) {
     const id = github.repository.id, state = this.store.get('SELECT * FROM actions_failure_scans WHERE repository_id=?', id)!;

@@ -27,14 +27,17 @@
 ```mermaid
 flowchart LR
   Webhook["member / organization / installation Webhook"] --> Sync["Single-Flight Member Cache Sync (ETag 304)"]
-  Timer["10-min Periodic Sync"] --> Sync
+  Install["Installation Sync (changed only)"] --> Sync
+  Timer["8-hour Fallback Full Sync"] --> Sync
   Sync --> Cache["Local Repo Collaborator & Org Owner Cache"]
   Cache --> Grants["github_derived scoped_grants"]
   Manual["Admin Explicit / Project Delegation"] --> Grants
   Grants --> Actor["resolveActor -> ActorContext"]
 ```
 
-- **纯仓库权限下的成员发现**：在默认无组织 `Members` 权限时，同步器签发单轮只读安装令牌（结束前撤销），以 `/repos/{owner}/{repo}/assignees`（真实仓库成员，排除 Public 仓外部陌生人）合并 `/collaborators`，再按已绑定账号查询 `/collaborators/{username}/permission` 定档五级角色（`admin`/`maintain`/`write`/`triage`/`read`），全程利用 `ETag` / `304 Not Modified` 节省配额，并回读 `repository_id` 防止改名/转移串库。
+- **纯仓库权限下的成员发现**：在默认无组织 `Members` 权限时，同步器使用只读安装令牌，以 `/repos/{owner}/{repo}/assignees`（真实仓库成员，排除 Public 仓外部陌生人）合并 `/collaborators`，再按已绑定账号查询 `/collaborators/{username}/permission` 定档五级角色（`admin`/`maintain`/`write`/`triage`/`read`），全程利用 `ETag` / `304 Not Modified` 节省配额，并回读 `repository_id` 防止改名/转移串库。
+- **刷新节奏（#1411）**：Webhook、登录和 `scheduleRepositoryMemberSync` 按事件刷新相关安装；每次定时安装同步之后只刷新成员缓存需要刷新的安装（冷、脏、失败到期，或 revision/target/selection 变化），无变化时不发 GitHub 请求；`GitHubRefresh` 启动时和此后每 8 小时做一轮全量 `checkAll` 兜底。因此没有 Webhook 或登录触发时，GitHub 上被移除的协作者最长 8 小时后才失去派生授权。
+- **只读令牌复用（#1411）**：只读安装令牌按账号、安装和权限集缓存在控制面内存（`src/identity/read-tokens.ts`），跨轮复用到剩余不足 15 分钟；GitHub 的 ETag 与令牌绑定，令牌存活期内的条件请求才能得到 `304`。换新令牌或账号凭据变化时吊销旧令牌（仍有同步轮持有时等其释放后吊销），GitHub 返回 401 时丢弃，控制面关闭时全部吊销；提交前仍核对账号凭据未变，变化则整轮作废。
 - **秒级登录与容错**：OAuth 登录命中就绪缓存时直接派生授权并生效；冷启动尚未完成首次同步时登录不阻塞，后台单飞同步并通过 `/api/auth/me` 报告进度。遇到 429/5xx/网络故障时保留上一份已证实缓存并退避，不误撤有效权限。
 - **Webhook 联动撤权**：`github_app_authorization.revoked`、`member.removed`、`organization.member_removed` 立即挂起/撤销对应身份与派生授权并触发缓存刷新。
 

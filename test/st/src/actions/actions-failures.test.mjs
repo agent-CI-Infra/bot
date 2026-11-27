@@ -33,13 +33,18 @@ async function fixture(t, options = {}) {
   const server = createServer(async (req, res) => {
     let raw = ''; for await (const chunk of req) raw += chunk;
     const url = new URL(req.url, 'http://fixture'), path = url.pathname, body = raw ? JSON.parse(raw) : undefined;
-    state.requests.push({ method: req.method, path, query: url.search, body });
+    state.requests.push({ method: req.method, path, query: url.search, body, authorization: req.headers.authorization });
     const send = (value, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(value)); };
     if (state.custom && await state.custom({ req, res, url, path, body, send })) return;
     if (path === '/app') return send({ slug: 'actions-fixture' });
     if (path === '/users/actions-fixture%5Bbot%5D') return send({ login: 'actions-fixture[bot]', id: 97 });
     if (path === '/repos/fixture/project-101/installation') return send({ id: 9, account: { id: 10 }, events: state.events, permissions: state.permissions });
-    if (path.endsWith('/access_tokens')) { state.tokens.push(body); return send({ token: 'fixture-actions-installation-token' }); }
+    if (path.endsWith('/access_tokens')) {
+      state.tokens.push(body);
+      // state.tokenLife (ms): like GitHub, each token is new and says when it expires (#1411).
+      if (!state.tokenLife) return send({ token: 'fixture-actions-installation-token' });
+      return send({ token: 'fixture-actions-installation-token-' + state.tokens.length, expires_at: new Date(Date.now() + state.tokenLife).toISOString() });
+    }
     if (path === '/installation/token') return send({});
     if (path === '/repositories/101') return send({ id: 101, owner: { id: 10 }, full_name: 'fixture/project-101', default_branch: 'main' });
     if (path.endsWith('/actions/runs')) {
@@ -108,6 +113,8 @@ async function fixture(t, options = {}) {
   t.after(() => configureDispatch(ruleDecider));
   let service = new ActionsFailures(h.store, apiUrl);
   const scan = async () => { h.store.run('UPDATE actions_failure_scans SET next_scan=0'); await service.tick(); };
+  // One five-second tick as the timer runs it, without making the scan due.
+  const poll = () => service.tick();
   const dispatch = async decide => {
     for (const event of h.store.all("SELECT * FROM dispatch_events WHERE type='actions.run_failed' AND state='pending' ORDER BY rowid")) {
       applyDecision(h.store, event, await decide(h.store, event, apiUrl), null);
@@ -124,7 +131,7 @@ async function fixture(t, options = {}) {
   const events = () => h.store.all("SELECT * FROM dispatch_events WHERE type='actions.run_failed' ORDER BY rowid");
   const tasks = () => h.store.all("SELECT t.* FROM tasks t JOIN task_events l ON l.task_id=t.id JOIN dispatch_events e ON e.id=l.event_id WHERE e.type='actions.run_failed' ORDER BY t.rowid");
   const write = (task = tasks()[0]) => grantedTaskWrite(h.store, task, new Redactor(), async () => {}, apiUrl);
-  return { state, h, a, admin, policy, hook, tick, scan, restart, reruns, apiUrl, modelRequests, events, tasks, write };
+  return { state, h, a, admin, policy, hook, tick, scan, poll, restart, reruns, apiUrl, modelRequests, events, tasks, write };
 }
 
 
@@ -393,4 +400,35 @@ test('a person can rerun an untracked run and discovery finds the attempt withou
   f.h.store.run('UPDATE actions_failure_scans SET reconciled_at=0'); await f.tick();
   assert.equal(listings(), 2); assert.equal(f.events().length, 2);
   assert.equal(f.tasks().length, 2); assert.equal(f.reruns().length, 0);
+});
+
+test('without webhooks a repository is scanned every 10 minutes on one connection, and a delivery is processed on the next tick (#1411)', async t => {
+  const f = await fixture(t, { tokenLife: 3600_000, runs: [] });
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const sent = match => f.state.requests.filter(match).length;
+  const connects = () => sent(r => r.path === '/repositories/101'), mints = () => sent(r => r.path.endsWith('/access_tokens'));
+  const scans = () => sent(r => r.path.endsWith('/actions/runs') && r.query.includes(`per_page=${scanPageSize}`));
+  const revoked = () => f.state.requests.filter(r => r.path === '/installation/token').map(r => r.authorization);
+  await f.poll();
+  assert.deepEqual([connects(), mints(), scans()], [1, 1, 1]);
+  // Nothing is due for the next ten minutes: the five-second ticks send nothing.
+  const quiet = f.state.requests.length;
+  t.mock.timers.tick(10 * 60_000 - 1); await f.poll();
+  assert.equal(f.state.requests.length, quiet);
+  // The fallback scan reuses the connection: no installation lookup, token or GET /repositories/:id, and no revoke.
+  t.mock.timers.tick(1); await f.poll();
+  assert.deepEqual([connects(), mints(), scans(), revoked().length], [1, 1, 2, 0]);
+  assert.ok(f.state.requests.slice(quiet).every(r => r.authorization === 'Bearer fixture-actions-installation-token-1'));
+  // A workflow_run delivery is processed on the next tick, long before the next scan is due.
+  t.mock.timers.tick(60_000);
+  f.state.runs = [run()]; await f.hook(f.state.runs[0]); await f.poll();
+  assert.equal(f.events().length, 1); assert.equal(f.events()[0].event_key, '101:actions.run_failed:800:1');
+  assert.deepEqual([connects(), mints()], [1, 1]);
+  // With less than 15 minutes left the token is revoked and the repository connects again.
+  t.mock.timers.tick(35 * 60_000); await f.poll();
+  assert.deepEqual([connects(), mints()], [2, 2]);
+  assert.deepEqual(revoked(), ['Bearer fixture-actions-installation-token-1']);
+  // Switching the feature off revokes the token on the next tick.
+  await f.policy({ actions_failures_enabled: false }); await f.poll();
+  assert.deepEqual(revoked(), ['Bearer fixture-actions-installation-token-1', 'Bearer fixture-actions-installation-token-2']);
 });
