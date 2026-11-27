@@ -77,5 +77,5 @@ flowchart LR
   - 人工合并（`POST /api/tasks/:id/merge`）持久化合并意图，核验候选、QA 与远端检查并支持三路集成与 Merge Queue 入队；
   - Agent 经 `github_write PUT /pulls/{n}/merge` 或直接写默认分支时，统一经过 `auto_merge_policy` 策略校验与真实 `merge_request` 来源核实（协作者缓存或当前合法对话消息），并自动适配目标分支 Merge Queue。
 - **动作失败扫描与发版本**：
-  - `src/actions/` 结合 Webhook 与持久化固定时间窗分页扫描发现默认分支/版本标签失败运行，限制单 run 最多一次 `rerun_failed_run`。
+  - `src/actions/` 结合 Webhook 与持久化固定时间窗分页扫描发现默认分支/版本标签失败运行，限制单 run 最多一次 `rerun_failed_run`。Webhook 记下的待处理 attempt 在下一次 5 秒 tick 处理，时间窗扫描只作兜底，每 10 分钟一次；每个仓库的已连接客户端跨 tick 复用，令牌剩余不足 15 分钟时吊销并重新 `connect`，出错、关闭功能或服务关闭时吊销。
   - `src/releases/` 强校验 SemVer 递增与新增提交，创建注释标签跟踪 Release 工作流，基于提交区间事实生成草稿，最终发布权始终留给人。

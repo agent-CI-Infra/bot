@@ -19,6 +19,8 @@ function roleFlags(role) {
 
 // Real HTTP OAuth and GitHub endpoints, confined to this test's random loopback port. Supports both multi-user
 // `state.owners` / `state.collaborators` / `state.concealedMembers` lists and single-user `state.owner` / `state.permission` / `state.admin` shorthands.
+// `state.tokenLife` (ms) makes installation tokens behave like GitHub's (#1411): each mint is a new token with `expires_at`,
+// ETags are bound to the token, and a revoked token is refused with 401. `state.notModified` counts the 304 answers.
 export async function githubIdentityServer(t) {
   const state = { id: 42, login: 'administrator', owner: true, admin: false, type: 'Organization', selection: 'all', failure: 0,
     accessible: ['101'], codes: new Map(), exchanges: 0, requests: [], refreshed: 0 };
@@ -28,15 +30,13 @@ export async function githubIdentityServer(t) {
       res.writeHead(status, { 'Content-Type': 'application/json', ...extraHeaders });
       res.end(JSON.stringify(value));
     };
-    const computeEtag = (value, key) => `"${key}-${createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 16)}"`;
+    const bearer = String(req.headers.authorization || '').replace(/^Bearer /, '');
+    const computeEtag = (value, key) => `"${key}-${createHash('sha256').update(JSON.stringify(value) + (state.tokenLife ? bearer : '')).digest('hex').slice(0, 16)}"`;
+    const notModified = etag => { state.notModified = (state.notModified || 0) + 1; res.writeHead(304, { ETag: etag }); res.end(); };
     const sendWithEtag = (items, key) => {
       const page = Number(url.searchParams.get('page') || 1);
       const etag = computeEtag(items, key);
-      if (state.etag !== false && page === 1 && items.length < 100 && req.headers['if-none-match'] === etag) {
-        res.writeHead(304, { ETag: etag });
-        res.end();
-        return;
-      }
+      if (state.etag !== false && page === 1 && items.length < 100 && req.headers['if-none-match'] === etag) return notModified(etag);
       const slice = items.slice((page - 1) * 100, page * 100);
       send(slice, 200, items.length < 100 && page === 1 ? { ETag: etag } : {});
     };
@@ -85,8 +85,13 @@ export async function githubIdentityServer(t) {
       };
       return send({ id: 77, app_id: state.appId || 123, account: target, repository_selection: state.selection, permissions, suspended_at: state.suspended ? 'now' : null });
     }
-    if (path === '/app/installations/77/access_tokens') return send({ token: 'fixture-installation' });
-    if (path === '/installation/token' && req.method === 'DELETE') { res.writeHead(204); res.end(); return; }
+    if (path === '/app/installations/77/access_tokens') {
+      if (!state.tokenLife) return send({ token: 'fixture-installation' });
+      state.minted = (state.minted || 0) + 1;
+      return send({ token: 'fixture-installation-' + state.minted, expires_at: new Date(Date.now() + state.tokenLife).toISOString() });
+    }
+    if (state.tokenLife && (state.refused ??= new Set()).has(bearer)) return send({ message: 'Bad credentials' }, 401);
+    if (path === '/installation/token' && req.method === 'DELETE') { if (state.tokenLife) state.refused.add(bearer); res.writeHead(204); res.end(); return; }
     if (path === '/installation/repositories') {
       const publicSet = new Set((state.publicRepos || []).map(String));
       return send({
@@ -194,11 +199,7 @@ export async function githubIdentityServer(t) {
         payload = { permission: perm, role_name: perm, user: { id: state.permissionUserId || state.id, login, permissions: perm ? roleFlags(perm) : undefined } };
       }
       const etag = computeEtag(payload, `perm-${repoId}-${login}`);
-      if (state.etag !== false && req.headers['if-none-match'] === etag) {
-        res.writeHead(304, { ETag: etag });
-        res.end();
-        return;
-      }
+      if (state.etag !== false && req.headers['if-none-match'] === etag) return notModified(etag);
       return send(payload, 200, { ETag: etag });
     }
     send({}, 404);

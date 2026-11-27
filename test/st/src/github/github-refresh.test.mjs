@@ -6,7 +6,7 @@ import { identityFixture } from '../../../fixtures/identity-fixture.mjs';
 import { testPassword } from '../../../fixtures/helpers.mjs';
 import { session } from '../../../../dist/app/auth.js';
 import { listEffectiveScopes } from '../../../../dist/identity/authorization.js';
-import { GitHubRefresh } from '../../../../dist/identity/github-refresh.js';
+import { GitHubRefresh, fullRefreshInterval } from '../../../../dist/identity/github-refresh.js';
 
 const userReads = (f, id = 42) => f.state.requests.filter(r => r.path === '/user' && r.authorization === 'Bearer fixture-user-' + id).length;
 const installationReads = f => f.state.requests.filter(r => r.path.startsWith('/app/installations/') || r.path.startsWith('/installation/') || r.path.startsWith('/orgs/') || r.path.includes('/collaborators')).length;
@@ -206,4 +206,93 @@ test('webhook revocations still take effect at once, without asking GitHub', asy
   assert.equal((await hook('github_app_authorization', 'revoked-1', { action: 'revoked', sender: { id: 42 } })).status, 200);
   assert.equal((await write(f, credentials)).status, 401);
   assert.equal(identity(h, p).status, 'revoked');
+});
+
+// Rounds that read the installation (#1411): each starts with the App's JWT lookup of installation 77.
+const lookups = f => f.state.requests.filter(r => r.path === '/app/installations/77').length;
+const minted = f => f.state.requests.filter(r => r.path === '/app/installations/77/access_tokens').length;
+const revoked = f => f.state.requests.filter(r => r.path === '/installation/token' && r.method === 'DELETE').map(r => r.authorization);
+
+test('the full member-cache round is an eight-hour fallback, and an installation sync refreshes only what changed (#1411)', async t => {
+  const f = await identityFixture(t), { h, state } = f;
+  await f.login();
+  const refresh = new GitHubRefresh(h.store, () => f.identity, { stagger: 0 });
+  // The schedule alone, with the clock mocked: the rounds are counted, not sent, so no HTTP runs on mocked timers.
+  let rounds = 0;
+  const run = refresh.run;
+  refresh.run = async () => { rounds++; };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  // The first full round runs at once; `round` is the timer's round in flight.
+  refresh.start(); await refresh.round;
+  assert.equal(rounds, 1);
+  t.mock.timers.tick(fullRefreshInterval - 1); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(rounds, 1, 'no full round before eight hours have passed');
+  t.mock.timers.tick(1); await refresh.round;
+  assert.equal(rounds, 2, 'the next full round eight hours after the last one');
+  t.mock.timers.reset();
+  refresh.run = run;
+
+  // A full round reads the installation; after an installation sync that changed nothing, no member-cache request is sent.
+  const before = lookups(f);
+  await refresh.run();
+  assert.equal(lookups(f) - before, 1);
+  const sent = state.requests.length;
+  await refresh.runChanged();
+  assert.equal(state.requests.length, sent);
+  // A sync that changed the installation (its revision moved) refreshes it.
+  f.snapshot();
+  const revision = h.store.get("SELECT revision FROM github_installations WHERE ref='github.com/123/77'").revision;
+  await refresh.runChanged();
+  assert.equal(lookups(f) - before, 2);
+  assert.equal(h.store.get('SELECT installation_revision FROM github_installation_member_cache').installation_revision, revision);
+  await refresh.close();
+});
+
+test('member-cache rounds reuse the read-only installation token while it lives, so ETags answer 304 (#1411)', async t => {
+  const f = await identityFixture(t), { h, state } = f;
+  // GitHub-like tokens on a repository-only installation: /assignees, /collaborators and /permission all send ETags.
+  Object.assign(state, { tokenLife: 3600_000, membersPermission: false, issuesPermission: 'read', owner: false,
+    collaborators: [{ id: 42, login: 'administrator', role_name: 'write' }], concealedMembers: [{ id: 43, login: 'concealed', role_name: 'read' }] });
+  state.id = 43; state.login = 'concealed'; await f.login();
+  state.id = 42; state.login = 'administrator'; const p = (await f.login()).result.principal_id;
+  assert.ok(usable(h, p).length > 0);
+  assert.equal(minted(f), 1); assert.deepEqual(revoked(f), [], 'the token outlives the round');
+  const refresh = new GitHubRefresh(h.store, () => f.identity, { stagger: 0 });
+
+  // A full round within the token's life: no new token, no revoke, and every conditional request answers 304.
+  let sent = state.requests.length, hits = state.notModified ?? 0;
+  await refresh.run();
+  const round = state.requests.slice(sent), conditional = round.filter(r => r.ifNoneMatch).length;
+  assert.equal(minted(f), 1); assert.deepEqual(revoked(f), []);
+  assert.ok(conditional >= 3, `conditional requests: ${conditional}`);
+  assert.equal(state.notModified - hits, conditional);
+  assert.ok(round.filter(r => !r.path.startsWith('/app/')).every(r => r.authorization === 'Bearer fixture-installation-1'));
+
+  // 46 minutes on, 14 are left: the next round mints a new token and revokes the old one. Its ETags are the old token's.
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  t.mock.timers.tick(46 * 60_000);
+  hits = state.notModified;
+  await refresh.run();
+  assert.equal(minted(f), 2); assert.deepEqual(revoked(f), ['Bearer fixture-installation-1']);
+  assert.equal(state.notModified, hits);
+  assert.ok(usable(h, p).length > 0);
+
+  // GitHub refusing the cached token drops it: the round reads again with a new one and records no error.
+  state.refused.add('fixture-installation-2');
+  await refresh.run();
+  assert.equal(minted(f), 3); assert.equal(revoked(f).length, 1, 'a refused token is not revoked');
+  assert.equal(h.store.get('SELECT last_error FROM github_installation_member_cache').last_error, null);
+  assert.ok(usable(h, p).length > 0);
+
+  // New account credentials retire the cached token: it is revoked, and the round mints from the new credentials.
+  const account = h.store.get('SELECT id,credentials FROM accounts WHERE id=?', f.a.id), aad = `account:${account.id}`;
+  h.store.run('UPDATE accounts SET credentials=? WHERE id=?', h.store.secrets.seal(h.store.secrets.open(account.credentials, aad), aad), account.id);
+  sent = state.requests.length;
+  await refresh.run();
+  assert.equal(minted(f), 4); assert.deepEqual(revoked(f).slice(1), ['Bearer fixture-installation-3']);
+  assert.ok(state.requests.slice(sent).findIndex(r => r.method === 'DELETE') < state.requests.slice(sent).findIndex(r => r.path.endsWith('/access_tokens')));
+  // Closing the refresh revokes the token it keeps.
+  t.mock.timers.reset();
+  await refresh.close();
+  assert.deepEqual(revoked(f).slice(2), ['Bearer fixture-installation-4']);
 });

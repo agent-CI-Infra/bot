@@ -1,6 +1,7 @@
 import type { Store, Row } from '../storage/database.js';
 import { fail, HttpError, type Json } from '../core/security.js';
 import { appJwt, revokeInstallationToken } from '../github/client.js';
+import { acquireReadToken, refuseReadToken, type ReadTokenLease } from './read-tokens.js';
 import { appBucket, installationBucket, observe, refused, type Bucket } from '../github/rate-limits.js';
 import { installationRef, numericId, type InstallationRef } from '../installations/archive.js';
 
@@ -148,8 +149,8 @@ interface LiveRepo {
  * - Optional `Members: read` fast path (`sync_mode = 'collaborators'`): when an existing App already has `Members: read`
  *   (or on personal installations), caches owners from `/orgs/{org}/members?role=admin` and full collaborators from
  *   `/repos/{owner}/{repo}/collaborators` in one paginated call per repository.
- * - Reuses one read-only installation token per installation round, revokes it before committing, and retains the last
- *   confirmed snapshot on 5xx / network / 429 faults.
+ * - Reuses the cached read-only installation token across rounds until it nears expiry (#1411, `read-tokens.ts`), so
+ *   conditional requests can answer 304, and retains the last confirmed snapshot on 5xx / network / 429 faults.
  */
 export class GitHubPermissions {
   /** `limited` hears when GitHub refused a request for its rate limit, and until when. */
@@ -192,6 +193,8 @@ export class GitHubPermissions {
       return { status: 204, data: null, etag: response.headers.get('etag') || null };
     }
     if (response.status >= 500) return fail(502, 'github_verification_unavailable');
+    // A refused installation token leaves the token cache; the status tells a caller that may retry with a new one.
+    if (response.status === 401) { refuseReadToken(this.store, token); return fail(401, 'github_permission_pending'); }
     if (!response.ok) return fail(403, 'github_permission_pending');
     try {
       return { status: response.status, data: await response.json() as Json, etag: response.headers.get('etag') || null };
@@ -341,32 +344,30 @@ export class GitHubPermissions {
       metadata: 'read',
       ...(membershipReadable ? { members: 'read' } : assigneesScope ? { [assigneesScope]: 'read' } : {}),
     };
-    let token = '';
+    // The read-only installation token outlives this round (#1411): a later round within its life reuses it, and its ETags.
+    const acquire = () => acquireReadToken(this.store, this.apiUrl, account, String(snapshot.installation_id), permissions, async () =>
+      (await this.send(appJwt(String(snapshot.app_id), String(credentials.private_key || '')), jwtBucket,
+        `/app/installations/${snapshot.installation_id}/access_tokens`, { body: { permissions } })).data);
+    const instBucket = installationBucket(String(account.id), String(snapshot.installation_id), String(target.login));
+    let lease: ReadTokenLease | undefined, liveRepos: Map<string, LiveRepo>;
     try {
-      const access = (await this.send(appJwt(String(snapshot.app_id), String(credentials.private_key || '')), jwtBucket,
-        `/app/installations/${snapshot.installation_id}/access_tokens`, { body: { permissions } })).data;
-      if (typeof access?.token !== 'string' || !access.token) {
-        this.recordInstallationError(snapshot, instCache, instDirtyBefore, 'github_incomplete_evidence');
-        return;
+      lease = await acquire();
+      try {
+        liveRepos = await this.readInstallationRepositories(lease.token, instBucket, targetId);
+      } catch (error) {
+        if (!lease.reused || !(error instanceof HttpError && error.status === 401)) throw error;
+        // GitHub refused a token an earlier round minted, so the cache has dropped it: one new token reads again.
+        await lease.release();
+        lease = await acquire();
+        liveRepos = await this.readInstallationRepositories(lease.token, instBucket, targetId);
       }
-      token = access.token;
     } catch (error) {
+      await lease?.release();
       this.recordInstallationError(snapshot, instCache, instDirtyBefore, failureCode(error));
       return;
     }
-
-    const instBucket = installationBucket(String(account.id), String(snapshot.installation_id), String(target.login));
-    let revoked = false;
+    const token = lease.token;
     try {
-      let liveRepos: Map<string, LiveRepo>;
-      try {
-        liveRepos = await this.readInstallationRepositories(token, instBucket, targetId);
-      } catch (error) {
-        await revokeInstallationToken(this.apiUrl, token).catch(() => false); revoked = true;
-        this.recordInstallationError(snapshot, instCache, instDirtyBefore, failureCode(error));
-        return;
-      }
-
       type OwnersOutcome =
         | { kind: 'skipped' }
         | { kind: 'not_modified'; etag: string | null }
@@ -627,10 +628,12 @@ export class GitHubPermissions {
         for (const item of results) if (item) repoOutcomes.push(item);
       }
 
-      // Revoke the temporary read-only installation token BEFORE committing completed cache state.
-      await revokeInstallationToken(this.apiUrl, token).catch(() => false);
-      revoked = true;
-      if (this.store.get('SELECT credentials FROM accounts WHERE id=?', account.id)?.credentials !== account.credentials) {
+      // The reads are done. Releasing the token comes before the credential fence, so that a revoke it still needs (a token
+      // replaced meanwhile, or one minted without a usable expiry) happens inside the fence, and no await separates the
+      // check from the commit below. A round whose account credentials changed commits nothing and retires its token.
+      const rotated = () => this.store.get('SELECT credentials FROM accounts WHERE id=?', account.id)?.credentials !== account.credentials;
+      await lease.release(rotated());
+      if (rotated()) {
         this.recordInstallationError(snapshot, instCache, instDirtyBefore, 'authorization_changed');
         return;
       }
@@ -763,7 +766,7 @@ export class GitHubPermissions {
         }
       });
     } finally {
-      if (!revoked && token) await revokeInstallationToken(this.apiUrl, token).catch(() => false);
+      await lease.release();
     }
   }
 

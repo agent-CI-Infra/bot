@@ -58,7 +58,8 @@ const githubLogin = new GitHubLogin(store, {
 });
 // Validate deployment defaults at startup; a saved wizard configuration takes precedence.
 githubLogin.identity;
-// Repository collaborator and installation owner caches are refreshed every ten minutes (#1158), decoupled from user count.
+// Repository collaborator and installation owner caches (#1158): a full round on start and every eight hours as a fallback
+// (#1411); webhooks, sign-ins and the installation syncs below refresh what changed in between.
 const githubRefresh = new GitHubRefresh(store, () => githubLogin.identity, { apiUrl: process.env.BOT_GITHUB_API_URL }); githubRefresh.start();
 const tokenFile = process.env.BOT_MANAGER_TOKEN_FILE;
 if (!tokenFile) throw new Error('BOT_MANAGER_TOKEN_FILE is required');
@@ -102,7 +103,8 @@ void reclaimer.sweep().catch(error => console.error('[reclaim] first sweep faile
 const workspaces = new WorkspaceCleanup(store, manager, { skip: id => projects.isRemoving(id) }); workspaces.start();
 // Installed repositories are listed on start and every ten minutes; webhook events update them in between.
 const installations = new InstallationSync(store, process.env.BOT_GITHUB_API_URL || undefined);
-installations.onSynced = () => { void githubRefresh.run().catch(error => console.error('[github-refresh] post-sync failed:', error)); };
+// After each sync only installations whose member cache needs it are refreshed: an unchanged sync sends no member request.
+installations.onSynced = () => { void githubRefresh.runChanged().catch(error => console.error('[github-refresh] post-sync failed:', error)); };
 installations.start();
 const onboarding = new Onboarding(store, { tunnelFile: process.env.BOT_TUNNEL_TOKEN_FILE, tunnelMetrics: process.env.BOT_TUNNEL_METRICS_URL, githubUrl: process.env.BOT_GITHUB_API_URL });
 setTimeout(() => void installations.syncAll(), 5000).unref();

@@ -38,7 +38,7 @@ function writeActionsStatus(message, text, className) {
 // #1079: the policy sentence describes what the check does, not what this read found, so it does not live in the live
 // region: it is the muted note beside it, and the row only keeps a result. Keeping the two apart stops a reader from
 // taking "配置检查通过后…" for an answer, and drops the ASCII space that used to join them after a Chinese full stop.
-const actionsPolicySentence = '配置检查通过后每分钟扫描，发现符合条件的失败运行后交给 Manager。';
+const actionsPolicySentence = '配置检查通过后随 Webhook 处理，并每 10 分钟补扫一次，发现符合条件的失败运行后交给 Manager。';
 const actionsPolicyNote = message => message.parentElement?.querySelector('[data-actions-policy]') ?? null;
 function writeActionsPolicy(policy, text) {
   if (!policy) return;

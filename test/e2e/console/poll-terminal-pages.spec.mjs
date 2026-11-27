@@ -187,7 +187,7 @@ test('#1078 监听与触发页：状态行常驻 polite live region，失败与�
   } finally { await h.stop(); }
 });
 
-// #1079: the row used to carry two different kinds of sentence as one — what the check does ("配置检查通过后每分钟扫描…")
+// #1079: the row used to carry two different kinds of sentence as one — what the check does ("配置检查通过后随 Webhook 处理…")
 // and what this read found ("读取失败，…"). A reader takes the description of the check for the answer it just gave, the
 // ASCII space after the Chinese full stop strands at a line edge, and "可能已过期" is sewn into a parenthesis. The policy
 // sentence moves to its own muted note beside the row, the row keeps only this read's result, and the space is gone.
@@ -202,7 +202,7 @@ test('#1079 监听与触发页：策略句搬到同级的 note，状态行只讲
     await page.getByLabel('接收默认分支和版本标签的 Actions 失败事件', { exact: true }).check();
     await page.getByRole('button', { name: '保存事件开关', exact: true }).click();
     // Nothing has failed yet, so the policy sentence is the only thing to say and it stays in the row, word for word.
-    await expect(status).toContainText('配置检查通过后每分钟扫描', { timeout: 10000 });
+    await expect(status).toContainText('配置检查通过后随 Webhook 处理', { timeout: 10000 });
     await expect(policy).toBeHidden();
     await page.route('**/api/repositories/101', route => route.fulfill({ status: 500, json: { error: 'internal_error' } }));
     await page.clock.runFor(5500);
@@ -212,10 +212,10 @@ test('#1079 监听与触发页：策略句搬到同级的 note，状态行只讲
     // folded into a closed details, or removed from the layout — cannot pass this.
     await expect(status).toBeVisible();
     await expect(status).not.toContainText('配置检查通过后');
-    await expect(status).not.toContainText('每分钟扫描');
+    await expect(status).not.toContainText('每 10 分钟补扫');
     await expect(status).toContainText(/上次成功读取：\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/);
     await expect(policy).toBeVisible();
-    await expect(policy).toHaveText('配置检查通过后每分钟扫描，发现符合条件的失败运行后交给 Manager。');
+    await expect(policy).toHaveText('配置检查通过后随 Webhook 处理，并每 10 分钟补扫一次，发现符合条件的失败运行后交给 Manager。');
     // The note is a sibling of the row, never inside it: the row is a live region and would announce the policy as news.
     expect(await page.evaluate(() => !document.querySelector('[data-actions-status]').contains(document.querySelector('[data-actions-policy]'))), 'the policy note must not sit inside the live region').toBe(true);
     const [row, note] = [await status.boundingBox(), await policy.boundingBox()];
