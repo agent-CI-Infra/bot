@@ -22,7 +22,7 @@ flowchart TD
   - 根 Issue 及其关联的 bot PR 共用 `<repo>:issue:<issueNumber>`（使 Issue 检视、开发、bot PR 检查失败 `pull_request.checks_failed`、合并冲突 `pull_request.conflicted` 与内部巡检 `pull_request.patrol` 在同一上下文中闭环决策）；
   - 独立 PR 使用 `<repo>:pr:<prNumber>`；
   - Actions 失败、发版本与定时检查归入各自确定性线程。
-- **串行决策与常设规则**：同一 `thread_key` 严格串行处理并维护滚动摘要；例行事件优先命中无模型开销的 `standing_rules`（永不自动启动开发），需要判断的事件交由 Manager 使用内置六大场景或项目自定义提示词处理。
+- **串行决策与常设规则**：同一 `thread_key` 严格串行处理并维护滚动摘要；例行事件优先命中无模型开销的 `standing_rules`（永不自动启动开发），需要判断的事件交由 Manager 使用内置六大场景或项目自定义提示词处理。`continuations()` 为每个续接候选显式标记来源 `match: 'object' | 'subscription'`（并附带可选 `object_type` / `object_number`）：`standing_rules`（`continue` / `continue_active` / `continue_or_create`）与 `option.unless_continued` 严格仅匹配同对象任务（`match: 'object'`），避免仓库内其他 PR/Issue 的活跃 `event_subscriptions` 劫持当前对象事件或误抑制新检视。
 - **开发依据硬核验**：创建开发任务时，控制面在 `create_task` 入口强制校验 `basis`（`label` / `maintainer_request` / `project_rule`）并持久化记录，同时提供结构化认领事实（指派人、关联 PR、近期评论）供 Manager 判断，不依赖脆弱正则。
 - **Bot PR 防自循环、内部定期巡检与冲突防空烧**：通过 `bot_pull_requests` 归属表与真实发布记录/actor 身份识别 bot 自有 PR（不轻信公开可伪造注释），过滤自身打开与推送事件；`BotPrWakeScanner` 结合 Webhook 检测检查失败（按 `(pr, head_sha, run_or_suite_id, attempt)` 聚合）与合并冲突（按 `(pr, head_sha, base_sha)` 单次去重），运行中收到的晚到事件在任务收尾或失败时自动回交 Manager。同时，`bot_pr_states` 持久化每个未合入 open bot PR 的巡检元数据（`last_patrol_at`、`last_patrol_event_at`、`patrol_env_fingerprint`、`patrol_env_summary`、`patrol_head_sha`、`patrol_base_sha`、`patrol_status` 及冲突抑制字段 `conflict_suppressed_*`）：
   - **纯内部低频巡检（`pull_request.patrol`）**：复用扫描器的只读 GitHub 查询与限流保护，按配置周期（默认 `BOT_PR_PATROL_INTERVAL_MS` 6 小时、同 PR 冷却 `BOT_PR_PATROL_COOLDOWN_MS` 24 小时；环境/权限/能力指纹变化可绕过冷却及时复核）检查无活跃任务且无待决分派事件的非草稿 open bot PR；仅在命中明确变化信号（`environment_or_policy_changed`、`base_moved` + `checks_failed` / `conflicted`、`unresolved_changes_requested`、`stalled_task`）时向对象 Manager 线程投递 `source='control_plane'` 的 `pull_request.patrol` 事件（并附带 `changes_since_last_check` 与 `environment_changes`），对纯绿灯待人工合入 PR 仅刷新本地时间戳，零模型调用、零 GitHub 评论。全程严格停留在控制面内部，不写入 `schedule_events` / `notification_outbox` 且绝不触发飞书或任何外部通知渠道。
@@ -51,7 +51,7 @@ flowchart TD
 - **任务协作与拆解**：
   - **父子拆解**：Manager 按需通过 `create_task(as_child=true)` 与 `wait_for_children` 拆解复杂目标并释放槽位，子任务完成不自动代表父任务通过。任一已返回子任务仍立即唤醒父任务；若全部未返回子任务都停在 `waiting_environment` / `waiting_configuration`，父任务详情用 `childBlockSummary` 汇总各子任务的状态、原始错误码与恢复条件并提供子任务入口。聚合原因与恢复入口由每个子任务自身的 `failureCause` / `explainFailure`（状态 + 错误码）推导：所有子任务指向同一设置页时才给出对应入口，归因不一致或无设置页时回退为中性说明与子任务入口，不按等待状态猜测。父任务自身状态和事件契约（`task_children_pending`、`children_waiting`）保持不变，重复轮询不产生子任务返回事件。
   - **跨任务只读查询与显式依赖等待**：原独立 `Task Coordinator` 角色与顾问式请求/通知/签收流程已退役，Manager 直接使用 `list_project_tasks` / `read_project_task` 按需分页读取同项目任务记录，用 `relate_task` 记录任务关联（不挂起运行中任务），并在存在明确先后依赖时调用 `wait_for_tasks`（支持 `delivered` / `merged` 条件、环检测与释放执行槽位，依赖满足或阻塞后自动唤醒）。历史 `task_coordinations` / `coordination_notices` 表仅保留只读兼容，升级前滞留在 `waiting_coordination` 且无显式依赖的旧任务会在 tick 自动恢复到 Manager。
-  - **轻量事件订阅（`waiting_event`）**：任务可调用 `subscribe_event` 登记外部仓库事件并释放执行槽位，Webhook 到达直接唤醒或由 Manager 兜底关联，超时自动唤醒核查。
+  - **轻量事件订阅（`waiting_event`）**：任务可调用 `subscribe_event` 登记外部仓库事件并释放执行槽位，Webhook 到达直接唤醒或由 Manager 兜底关联，超时自动唤醒核查。跨对象订阅候选在 `work.continue` 中标记为 `match: 'subscription'`，仅允许 Object Manager 结合 `pending_subscriptions` 显式 `continue_task` 唤醒；续接时 `join()` 只执行订阅结算（`resolveSubscriptionsByManager`）与日志记录，不将来源事件的 `review_updates`、`move_to_sha`、`target.ref`、`revision`、`bot_pr_requests` 或线程 `active_task_id` 写入目标任务。
 
 ## 3. 交付候选、独立 QA 与幂等发布（`src/review/`、`src/github/`）
 

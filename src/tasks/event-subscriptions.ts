@@ -1133,9 +1133,23 @@ export function resolveSubscriptionsByManager(store: Store, taskId: string, disp
   try { eventFacts = JSON.parse(String(dispatchEvent.facts || '{}')); } catch { eventFacts = {}; }
 
   if (active.length) {
-    // Prefer subscriptions whose event type matches the webhook, else resolve the oldest active subscription on this task.
-    const webhookEvent = String((eventFacts as any)?.webhook_event ?? dispatchEvent.type ?? '').split('.')[0]!;
-    const matching = active.filter(s => s.events.includes('*') || s.events.includes(webhookEvent));
+    // Prefer subscriptions whose event type matches the real webhook event (or the dispatch event family for synthetic
+    // control-plane events like `pull_request.patrol` whose `facts.event` is `'bot_pr_patrol'`), else resolve the oldest active subscription.
+    const normalizedFamily = (raw: unknown): string | null => {
+      if (typeof raw !== 'string') return null;
+      const head = raw.trim().split('.')[0] ?? '';
+      return normalizeEventName(head);
+    };
+    const eventCandidates = [
+      normalizedFamily((eventFacts as any)?.webhook_event),
+      dispatchEvent.source === 'github' ? normalizedFamily((eventFacts as any)?.event) : null,
+      normalizedFamily(dispatchEvent.type),
+    ].filter((value, index, list): value is string => !!value && list.indexOf(value) === index);
+    let matching: EventSubscriptionView[] = [];
+    for (const candidate of eventCandidates) {
+      matching = active.filter(s => s.events.includes('*') || s.events.includes(candidate));
+      if (matching.length) break;
+    }
     const targets = matching.length ? matching : [active[0]!];
     for (const sub of targets) {
       store.run(
@@ -1155,7 +1169,8 @@ export function resolveSubscriptionsByManager(store: Store, taskId: string, disp
         nowIso,
         sub.id,
       );
-      wakeTaskFromSubscription(store, task, {
+      const currentTask = store.get('SELECT * FROM tasks WHERE id=?', taskId) ?? task;
+      wakeTaskFromSubscription(store, currentTask, {
         subscription_id: sub.id,
         wake_reason: 'manager_assigned',
         woken_at: nowIso,

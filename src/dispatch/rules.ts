@@ -1,6 +1,6 @@
 import type { Store } from '../storage/database.js';
 import { fail, type Json } from '../core/security.js';
-import type { Decision, DispatchContext } from './store.js';
+import { isObjectContinuation, type Decision, type DispatchContext } from './store.js';
 
 /**
  * Standing rules (#815, #1122). Routine events need no model call: the Manager (or a person in 角色 → Manager) registers
@@ -157,7 +157,7 @@ export function ruleDecision(
       return decided({ decision: 'create', option_ids: [], role, writes });
     };
     const continued = (active: boolean) => {
-      const target = context.continuations.find(task => !active || !['succeeded', 'completed', 'pr_opened'].includes(task.status));
+      const target = context.continuations.find(task => isObjectContinuation(task) && (!active || !['succeeded', 'completed', 'pr_opened'].includes(task.status)));
       return target ? decided({ decision: 'continue', option_ids: [target.id] }) : null;
     };
     const decision = rule.action === 'ignore' ? decided({ decision: 'ignore', option_ids: [] }) : rule.action === 'create' ? create()

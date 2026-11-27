@@ -7,6 +7,10 @@ import { harness, setup, account, repository } from '../../../fixtures/helpers.m
 import { configureDispatch, Dispatcher } from '../../../../dist/dispatch/worker.js';
 import { queueWebhook } from '../../../../dist/review/queue.js';
 import { builtinRules } from '../../../../dist/dispatch/rules.js';
+import { readDispatchThread } from '../../../../dist/dispatch/store.js';
+import { setGrant } from '../../../../dist/tasks/grants.js';
+import { captureTaskConfiguration } from '../../../../dist/tasks/configuration.js';
+import { executeTaskSubscriptionTool, taskEventSubscriptionsDetail } from '../../../../dist/tasks/event-subscriptions.js';
 import { scriptedRoles, scriptedHarnesses } from '../../../fixtures/scripted-roles.mjs';
 
 configureDispatch(null);
@@ -143,4 +147,154 @@ test('continue_or_create creates the work when nothing can be continued; labels_
   event = f.last(); assert.equal(event.rule, null); assert.equal(f.requests.length, 1);
   queueWebhook(f.h.store, '101', 'issues', { action: 'opened', issue: { ...issue, number: 12 }, sender: alice }, 'plain-issue'); await f.run();
   event = f.last(); assert.deepEqual([event.decision, JSON.parse(event.rule)], ['create', { id: 'issues', revision }]); assert.equal(f.requests.length, 1);
+});
+
+test('standing rules never hijack PR/Issue events into another object\'s active event_subscriptions task, while Manager can still wake it cleanly (#1409)', async t => {
+  const f = await fixture(t);
+  await f.admin('/api/repositories/101/policy', 'PATCH', { capability_ceiling: 'develop', development_enabled: true });
+  const now = '2026-11-27T06:00:00.000Z';
+  const sha1314 = '1'.repeat(40), sha1445 = '4'.repeat(40), sha1446 = '6'.repeat(40), sha1448 = '8'.repeat(40);
+
+  // Seed PR #1314 active waiting_event task holding an active event_subscriptions row (production repro #1409).
+  f.h.store.run(
+    `INSERT INTO tasks(id,repository_id,kind,status,phase,summary,input,object_number,head_sha,attempt,created_at,updated_at)
+     VALUES('t-1314','101','task.request','waiting_event','model','PR #1314 task waiting on event',?,1314,?,1,?,?)`,
+    JSON.stringify({ generic: true, target: { type: 'pr', number: 1314, ref: sha1314 }, round: 1 }),
+    sha1314,
+    now,
+    now,
+  );
+  setGrant(f.h.store, { id: 't-1314', repository_id: '101' }, ['pull_request'], 'role:manager', null);
+  captureTaskConfiguration(f.h.store, 't-1314');
+  const subRes = executeTaskSubscriptionTool(f.h.store, f.h.store.get("SELECT * FROM tasks WHERE id='t-1314'"), 'subscribe_event', {
+    events: ['workflow_run'],
+    workflow: 'ci.yml',
+    note: 'Waiting for CI workflow on PR #1314',
+    timeout_seconds: 1800,
+    release_slot: false,
+  });
+  assert.equal(subRes.subscribed, true);
+
+  // Seed PR #1445 with only a finished review (same condition as openJiuwen-ai/sciencediscovery#1445).
+  f.h.store.run(
+    `INSERT INTO tasks(id,repository_id,kind,status,phase,summary,input,object_number,head_sha,attempt,created_at,updated_at)
+     VALUES('rev-1445','101','task.request','succeeded','done','PR #1445 finished review',?,1445,?,1,?,?)`,
+    JSON.stringify({ generic: true, target: { type: 'pr', number: 1445, ref: sha1445 }, round: 1 }),
+    sha1445,
+    now,
+    now,
+  );
+  setGrant(f.h.store, { id: 'rev-1445', repository_id: '101' }, ['review'], 'role:manager', null);
+  captureTaskConfiguration(f.h.store, 'rev-1445');
+
+  // 1) PR #1445 receives pull_request_review (pull_request.updated): built-in pull-request-update (continue_active)
+  //    must NOT hijack t-1314; the event reaches PR #1445's Object Manager with explicit match/object tags in work.continue.
+  let managerSeenInput = null;
+  f.state.message = body => {
+    managerSeenInput = JSON.parse(body.messages[1].content);
+    return call('ignore_event', { reason: 'PR #1445 评论无需操作，且与 PR #1314 订阅无关' }, 'm-1445');
+  };
+  const pr1445 = { ...pull, number: 1445, title: 'PR #1445', head: { sha: sha1445, ref: 'feat/1445' } };
+  queueWebhook(f.h.store, '101', 'pull_request_review', {
+    action: 'submitted',
+    sender: { type: 'User', login: 'zhaozhaozz', id: 22 },
+    pull_request: pr1445,
+    review: { id: 8801, state: 'commented', body: '请核对边界条件', author_association: 'MEMBER', user: { id: 22, login: 'zhaozhaozz' } },
+  }, 'repro-1445-review');
+  await f.run();
+  let ev = f.last();
+  assert.equal(ev.rule, null, 'pull-request-update rule must not fire across PRs');
+  assert.equal(ev.decision, 'ignore');
+  assert.equal(f.requests.length, 1);
+  assert.deepEqual(
+    managerSeenInput.work.continue.map(c => ({ task_id: c.task_id, match: c.match, object_type: c.object_type, object_number: c.object_number })),
+    [
+      { task_id: 'rev-1445', match: 'object', object_type: 'pr', object_number: 1445 },
+      { task_id: 't-1314', match: 'subscription', object_type: 'pr', object_number: 1314 },
+    ],
+  );
+  assert.equal(managerSeenInput.pending_subscriptions?.length, 1);
+  assert.equal(f.h.store.get("SELECT status FROM tasks WHERE id='t-1314'").status, 'waiting_event');
+  assert.equal(f.h.store.get("SELECT count(*) AS n FROM review_updates WHERE task_id='t-1314'").n, 0);
+
+  // 2) PR #1446 (no tasks) receives pull_request.synchronize: built-in pull-request-push (continue_or_create)
+  //    must NOT hijack t-1314 and must create a fresh reviewer task for PR #1446 with zero model calls.
+  const pr1446 = { ...pull, number: 1446, title: 'PR #1446', head: { sha: sha1446, ref: 'feat/1446' } };
+  queueWebhook(f.h.store, '101', 'pull_request', {
+    action: 'synchronize',
+    before: head,
+    pull_request: pr1446,
+    sender: alice,
+  }, 'repro-1446-push');
+  await f.run();
+  ev = f.last();
+  assert.deepEqual([ev.decision, JSON.parse(ev.rule).id, f.requests.length], ['create', 'pull-request-push', 1]);
+  assert.ok(f.h.store.get("SELECT 1 FROM tasks WHERE object_number=1446 AND head_sha=?", sha1446));
+  assert.equal(f.h.store.get("SELECT status FROM tasks WHERE id='t-1314'").status, 'waiting_event');
+
+  // 3) Issue #1447 (no active tasks) receives issue.updated: built-in issue-update (continue_active)
+  //    must NOT hijack t-1314; the event reaches Issue #1447's Object Manager.
+  f.state.message = () => call('ignore_event', { reason: 'Issue #1447 评论无需处理' }, 'm-1447');
+  queueWebhook(f.h.store, '101', 'issue_comment', {
+    action: 'created',
+    sender: { type: 'User', login: 'zhaozhaozz', id: 22 },
+    issue: { ...issue, number: 1447, title: 'Issue #1447' },
+    comment: { id: 8802, body: '补充复现步骤', author_association: 'MEMBER', user: { id: 22, login: 'zhaozhaozz' } },
+  }, 'repro-1447-comment');
+  await f.run();
+  ev = f.last();
+  assert.equal(ev.rule, null);
+  assert.equal(ev.decision, 'ignore');
+  assert.equal(f.requests.length, 2);
+  assert.equal(f.h.store.get("SELECT status FROM tasks WHERE id='t-1314'").status, 'waiting_event');
+
+  // 4) Positive path: an ignore standing rule still defers to Object Manager while active subscriptions exist,
+  //    and Object Manager can explicitly continue_task('t-1314') from pending_subscriptions without contaminating t-1314.
+  const mgr = await f.manager();
+  const savedRules = await f.admin('/api/repositories/101/manager', 'PUT', {
+    expected_revision: mgr.prompt.revision,
+    standing_rules: [
+      ...builtinRules,
+      { id: 'ignore-labeled', event: 'pull_request.labeled', action: 'ignore', reason: '常设规则：默认忽略标签事件。' },
+    ],
+  });
+  assert.equal(savedRules.status, 200);
+  await f.admin('/api/repositories/101/manager', 'PUT', {
+    expected_revision: (await f.manager()).prompt.revision,
+    events: { 'pull_request.labels': ['ci-ready'] },
+  });
+
+  f.state.message = body => {
+    const payload = JSON.parse(body.messages[1].content);
+    const sub = payload.pending_subscriptions.find(s => s.task_id === 't-1314');
+    assert.ok(sub, 'Manager receives pending_subscriptions even when an ignore standing rule matched');
+    const cont = payload.work.continue.find(c => c.task_id === 't-1314');
+    assert.equal(cont?.match, 'subscription');
+    return call('continue_task', { task_id: 't-1314', reason: '标签信号命中 PR #1314 订阅，唤醒任务核查' }, 'm-wake-1314');
+  };
+  const pr1448 = { ...pull, number: 1448, title: 'PR #1448', head: { sha: sha1448, ref: 'feat/1448' }, labels: [{ name: 'ci-ready' }] };
+  queueWebhook(f.h.store, '101', 'pull_request', {
+    action: 'labeled',
+    label: { name: 'ci-ready' },
+    pull_request: pr1448,
+    sender: alice,
+  }, 'repro-1448-labeled');
+  await f.run();
+  ev = f.last();
+  assert.equal(ev.rule, null);
+  assert.equal(ev.decision, 'continue');
+  assert.equal(f.requests.length, 3);
+
+  const woken1314 = f.h.store.get("SELECT * FROM tasks WHERE id='t-1314'");
+  assert.equal(woken1314.status, 'queued');
+  assert.equal(woken1314.head_sha, sha1314);
+  const wokenInput = JSON.parse(woken1314.input);
+  assert.deepEqual(wokenInput.target, { type: 'pr', number: 1314, ref: sha1314 });
+  assert.equal(wokenInput.move_to_sha, undefined);
+  assert.equal(wokenInput.merged_updates, undefined);
+  assert.equal(wokenInput.event_wakeups?.length, 1);
+  assert.equal(wokenInput.event_wakeups[0].wake_reason, 'manager_assigned');
+  assert.equal(taskEventSubscriptionsDetail(f.h.store, 't-1314')[0].state, 'matched');
+  assert.equal(f.h.store.get("SELECT count(*) AS n FROM review_updates WHERE task_id='t-1314'").n, 0);
+  assert.equal(readDispatchThread(f.h.store, ev.thread_key, '101').active_task_id, null);
 });
