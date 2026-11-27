@@ -179,3 +179,17 @@ test('computer tools are built-in and always permitted while the retired browser
     assert.equal(permitsTool(p, 'browser'), false, 'retired browser tool must not be permitted');
   }
 });
+
+test('fetch_github_media is granted by any of issues, pull_requests or contents read scope and preserved by narrowPermissions', () => {
+  const none = updatePermissions(fullPermissions(), {
+    github_issues: 'none', github_pull_requests: 'none', github_contents: 'none',
+    github_actions: 'read', github_checks: 'read', github_statuses: 'read',
+  });
+  assert.equal(permitsTool(none, 'fetch_github_media'), false, 'actions/checks/statuses alone must not grant fetch_github_media');
+  for (const field of ['github_issues', 'github_pull_requests', 'github_contents']) {
+    const one = updatePermissions(none, { [field]: 'read' });
+    assert.equal(permitsTool(one, 'fetch_github_media'), true, `${field}:read grants fetch_github_media`);
+    const narrowed = narrowPermissions(one, ['fetch_github_media']);
+    assert.equal(permitsTool(narrowed, 'fetch_github_media'), true, `narrowPermissions retains fetch_github_media for ${field}`);
+  }
+});

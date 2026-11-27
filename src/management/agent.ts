@@ -22,6 +22,7 @@ import { checkoutRepositoryName, checkoutRepositoryTool, executeCheckoutReposito
 import { revision } from '../identity/authorization.js';
 import { permitsManagement, githubReadScopes, githubWriteAllowed, permitsTool, type RolePermissions } from '../roles/permissions.js';
 import { githubWrite, scopedGithubWriteTool } from '../github/write.js';
+import { collectAssistantMedia } from '../github/pull-request-media.js';
 import { projectMergeBoundary } from '../github/merge-policy.js';
 import { OwnTasks, ownTaskNames, ownTaskTools, type OwnTaskHost } from '../service-roles/own-tasks.js';
 import { computerMediaTools, mediaTools, type MediaComputer, type MediaTurn } from '../channels/media.js';
@@ -299,6 +300,7 @@ export class ManagementAgent {
     let modelImageInput=true;
     const media=this.mediaTurn?.(actor,conversation,input,computer,()=>{assertCurrent(actor);this.conversation(base,conversation);},()=>modelImageInput);
     const schedules=this.conversationSchedules?.(actor,conversation),groupTimers=this.groupSchedules?.(actor);
+    const redactor=new Redactor();
     const permissions=()=>JSON.parse(serviceRole(this.store,managementAssistant)?.permissions??'{}') as RolePermissions;
     // github_write (#381): the assistant's role permission, and the current user's authority to write tasks in a started project.
     const write=async(args:any)=>{
@@ -309,11 +311,20 @@ export class ManagementAgent {
         fail(404,'repository_not_found');
       }
       const repository=this.service.scope(actor,project!.id,'tasks.write');
-      return {repository:project!.full_name,result:await githubWrite({store:this.store,repository,redactor:new Redactor(),guard,apiUrl:this.service.githubUrl,scope:`management:${conversation}:${input.source_message}`,
+      return {repository:project!.full_name,result:await githubWrite({store:this.store,repository,redactor,guard,apiUrl:this.service.githubUrl,scope:`management:${conversation}:${input.source_message}`,
         actor:{kind:'management',service_role_id:managementAssistant,conversation_id:conversation,source_message:String(input.source_message),principal_id:actor.principal_id},
-        allowed:(resource,operation)=>githubWriteAllowed(permissions(),resource,operation),speaker:()=>actor.principal_id},rest)};
+        allowed:(resource,operation)=>githubWriteAllowed(permissions(),resource,operation),speaker:()=>actor.principal_id,
+        mediaMode:'assistant',
+        collectMedia:sources=>collectAssistantMedia({
+          store:this.store,
+          repositoryId:String(repository.id),
+          redactor,
+          guard,
+          media,
+          computer,
+          canReadComputer:()=>computerOffered&&permitsTool(permissions(),'read_file'),
+        },sources)},rest)};
     };
-    const redactor=new Redactor();
     const replyTarget=timer?undefined:this.replyTarget?.(actor,conversation,input);
     const cardTurn=this.feishuCard?.(actor,conversation,input,value=>publicText(redactor.text(value),configuredRedactor(this.store)),replyTarget);
     const roleRowForSkills=serviceRole(this.store,managementAssistant);
@@ -501,6 +512,7 @@ export class ManagementAgent {
           // #1360: the source is a fact of each message; without it the model guessed and named a bound group as the current chat.
           +' The request context\'s message_source says where the current message came from, and each history round\'s source where that one did: web_console (the user typed it in the launchpad web console), feishu_private_chat (the user\'s Feishu private chat with you; chat_name is the Feishu name of the person in it, and message_id plus any parent_id / reply_to_message_id, root_id, thread_id identify that Feishu message and its reply/thread relation; prior Feishu history rounds carry those fields on request) or timer (one of the user\'s timers, timer_name; its result goes to their Feishu private chat chat_name). One conversation can mix console and private-chat messages. When you mention where a message came from, take it from these fields only: never say a console message came from Feishu. You never receive Feishu group messages, because each bound group has its own group assistant: never say that this conversation or a message comes from a group.'
           +' An explicit request in this conversation is sufficient to change another author\'s Issue or PR title, labels, assignees or open/closed state when the current user has the corresponding repository write permission. Cite this conversation as the source when reporting what changed.'
+          +(permitsTool(permissions(),'github_write')?' When using github_write on Markdown routes (Issues, PRs, comments, reviews), you may attach authorized Feishu attachments ("resource:<resource_id>" from list_message_resources, works without an assistant computer) and/or assistant computer files ("workspace:<path>" under /workspace, /tmp or ~/) via media, referencing images (PNG/JPEG/GIF/WebP, up to 5 MiB) with ![Description](...) and videos (MP4/WebM, up to 20 MiB; 30 MiB total, up to 8 files) with [Description](...). When a video or oversized/non-standard file benefits from keyframe screenshots, compression or format conversion, import it with import_message_resource and process it on your assistant computer with ffmpeg, Python Pillow or ImageMagick before attaching workspace:<path> files; extracting keyframes is optional and at your discretion. Creating a project task (task.create) does not bundle Feishu attachments directly—attach visual media to the Issue or PR via github_write first (when permitted) so project roles can fetch it on demand.':'')
           +(timer?credentialSafetyInstructions:stageMessageInstructions)
           +(computerOffered?computerInstructions('belongs to the current user alone: their Feishu private chat and console conversations share it'):'')
           +(incoming?privateTurnMessageInstructions:'')

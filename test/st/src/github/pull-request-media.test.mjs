@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { blobSha, Redactor, sha } from '../../../../dist/agent/common.js';
-import { assertMediaOutsideCode, collectPullRequestMedia, planMarkdownMedia, planPullRequestMedia, publishHostedMedia, publishPullRequestMedia, pullRequestSummaryForProgress } from '../../../../dist/github/pull-request-media.js';
+import { assertMediaOutsideCode, bytesMatch, collectPullRequestMedia, detectHostedMediaFormat, normalizeAssistantMediaPath, planMarkdownMedia, planPullRequestMedia, publishHostedMedia, publishPullRequestMedia, pullRequestSummaryForProgress } from '../../../../dist/github/pull-request-media.js';
 import { Publisher } from '../../../../dist/github/publisher.js';
 import { hostedMediaUrl } from '../../../../dist/github/hosted-pr-media.js';
 import { githubWrite } from '../../../../dist/github/write.js';
@@ -325,4 +325,87 @@ test('github_write and post_review attach hosted workspace media to Issue/PR com
   store.run("UPDATE settings SET value=? WHERE key='onboarding.public'", JSON.stringify({ origin: 'https://files.example.test' }));
   const hostedByIssuesOnly = publishHostedMedia({ store, repository: { id: 'r' }, redactor: new Redactor(), installationPermissions: { issues: 'write' }, permissions: { issues: 'write' } }, reviewMedia);
   assert.ok(hostedMediaUrl(hostedByIssuesOnly, reviewMedia[0].path));
+});
+
+test('F1 caller isolation keeps task workspaces strictly repo-relative while assistant mode supports resource: and assistant paths', async t => {
+  const store = database(t);
+  store.run("INSERT INTO policies(repository_id,enabled,review_enabled,development_enabled,capability_ceiling) VALUES('r',1,1,0,'comment')");
+  store.run("INSERT INTO settings VALUES('onboarding.public',?)", JSON.stringify({ origin: 'https://files.example.test' }));
+  const repository = store.get("SELECT * FROM repositories WHERE id='r'");
+
+  // 1. Task workspace mode strictly refuses resource:, /tmp, ~/, ../, and workspace: prefixes.
+  for (const [text, media] of [
+    ['![Shot](resource:res_1234)', ['resource:res_1234']],
+    ['![Shot](workspace:/tmp/shot.png)', ['/tmp/shot.png']],
+    ['![Shot](workspace:~/shot.png)', ['~/shot.png']],
+    ['![Shot](workspace:../shot.png)', ['../shot.png']],
+    ['![Shot](workspace:.tmp/shot.png)', ['workspace:.tmp/shot.png']],
+  ]) {
+    assert.throws(() => planMarkdownMedia([text], media), { code: 'pull_request_media_invalid' }, JSON.stringify(media));
+  }
+
+  // 2. githubWrite structurally locks task/manager actors to task_workspace mode even if mediaMode:'assistant' is passed.
+  for (const kind of ['task', 'manager']) {
+    for (const [body, media] of [
+      ['![Shot](resource:res_1234)', ['resource:res_1234']],
+      ['![Shot](workspace:/tmp/shot.png)', ['workspace:/tmp/shot.png']],
+      ['![Shot](workspace:~/shot.png)', ['workspace:~/shot.png']],
+    ]) {
+      const res = await githubWrite({
+        store, repository, redactor: new Redactor(), guard: async () => {},
+        scope: `iso:${kind}`, actor: { kind, role: 'dev', task_id: 't-iso' },
+        allowed: () => true,
+        mediaMode: 'assistant',
+        collectMedia: async () => { throw new Error('must not collect out-of-scope media'); },
+      }, { method: 'POST', path: '/issues/12/comments', key: `iso-${kind}-${media[0]}`, body: { body }, media });
+      assert.equal(res.error, 'pull_request_media_invalid', `${kind} must reject ${media[0]}`);
+    }
+  }
+
+  // 3. Assistant mode accepts resource:<id> and normalized /workspace, /tmp, ~/ paths, and enforces format via assertFormats.
+  assert.equal(normalizeAssistantMediaPath('frames/key.png'), '/workspace/frames/key.png');
+  assert.equal(normalizeAssistantMediaPath('/workspace/frames/key.png'), '/workspace/frames/key.png');
+  assert.equal(normalizeAssistantMediaPath('/tmp/frame.png'), '/tmp/frame.png');
+  assert.equal(normalizeAssistantMediaPath('/home/assistant/shots/a.png'), '~/shots/a.png');
+  assert.equal(normalizeAssistantMediaPath('~/shots/a.png'), '~/shots/a.png');
+  for (const bad of ['/etc/passwd', '../escape.png', '/tmp/../etc/passwd', '/workspace/.runner-journal/a.png', '~', '~/', 'http://example.test/a.png']) {
+    assert.throws(() => normalizeAssistantMediaPath(bad), { code: 'pull_request_media_invalid' }, bad);
+  }
+
+  const plan = planMarkdownMedia(
+    ['![Feishu](resource:res_img_1)\n[Clip](resource:res_vid_2)\n![Frame](workspace:/tmp/key.png)\n![Home](workspace:/home/assistant/shot.png)'],
+    ['resource:res_img_1', 'resource:res_vid_2', '/tmp/key.png', 'workspace:~/shot.png'],
+    { mode: 'assistant' },
+  );
+  assert.deepEqual(plan.paths, ['resource:res_img_1', 'resource:res_vid_2', 'workspace:/tmp/key.png', 'workspace:~/shot.png']);
+  assert.doesNotThrow(() => plan.assertFormats(new Map([
+    ['resource:res_img_1', 'png'],
+    ['resource:res_vid_2', 'mp4'],
+    ['workspace:/tmp/key.png', 'png'],
+    ['workspace:~/shot.png', 'png'],
+  ])));
+  // Image syntax on an MP4 resource_id or link syntax on a PNG resource_id must be refused by assertFormats.
+  assert.throws(() => plan.assertFormats(new Map([
+    ['resource:res_img_1', 'mp4'],
+    ['resource:res_vid_2', 'mp4'],
+    ['workspace:/tmp/key.png', 'png'],
+    ['workspace:~/shot.png', 'png'],
+  ])), { code: 'pull_request_media_invalid' });
+  assert.throws(() => plan.assertFormats(new Map([
+    ['resource:res_img_1', 'png'],
+    ['resource:res_vid_2', 'png'],
+    ['workspace:/tmp/key.png', 'png'],
+    ['workspace:~/shot.png', 'png'],
+  ])), { code: 'pull_request_media_invalid' });
+
+  // 4. MP4/WebM magic-byte detection excludes ISOBMFF image brands (avif/heic).
+  const mp4 = Buffer.from('00000018667479706d70343200000000', 'hex');
+  const webm = Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x9f]), Buffer.from([0x42, 0x82, 0x84, 0x77, 0x65, 0x62, 0x6d]), Buffer.alloc(16)]);
+  const avif = Buffer.from('00000018667479706176696600000000', 'hex');
+  const heic = Buffer.from('00000018667479706865696300000000', 'hex');
+  assert.equal(detectHostedMediaFormat(mp4), 'mp4');
+  assert.equal(detectHostedMediaFormat(webm), 'webm');
+  assert.equal(bytesMatch(avif, 'mp4'), false);
+  assert.equal(bytesMatch(heic, 'mp4'), false);
+  assert.equal(detectHostedMediaFormat(avif), null);
 });

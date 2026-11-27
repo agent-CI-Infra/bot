@@ -343,10 +343,17 @@ export async function runRequest(
   const githubWrite = taskGithubWrite(store, task, redactor, guard, githubUrl, () => spaces.current);
   const grantedWrite = grantedTaskWrite(store, task, redactor, guard, githubUrl, () => spaces.current);
   const readScopes = () => taskReadScopes(store, task).filter(scope => scope !== 'metadata');
-  const canWriteCheckout = () => covers(projectCeiling(store, task.repository_id), 'develop') && (!ownRole || ownRole === 'dev' || ownRole === 'manager');
+  const canWriteCheckout = () => {
+    const activeRole = spaces.role || ownRole;
+    return covers(projectCeiling(store, task.repository_id), 'develop') && (!activeRole || activeRole === 'dev' || activeRole === 'manager');
+  };
   const readTokens = new ReadTokens(store, repo, redactor, guard, githubUrl, readScopes(), readScopes);
   const explorer = new RepositoryExplorer(readTokens, redactor, guard, {
     extract: (artifactId, data, targetPath) => spaces.current.extractArtifact(artifactId, data, targetPath),
+    canWriteCheckout,
+  }, {
+    writeChunk: (targetPath, data, offset, final) => spaces.current.writeMediaChunk(targetPath, data, offset, final),
+    truncate: targetPath => spaces.current.truncateMedia(targetPath),
     canWriteCheckout,
   });
   const readTools = workspaceRepositoryTools.map(t => ({ ...t, function: { ...t.function, description: t.function.description.replace(/\s*Call github_read_token first\./g, '') } }));
@@ -1172,7 +1179,7 @@ export async function runRequest(
               : software()
                 ? "This contract explicitly ends in a reviewable pull request. Submit the code through submit_delivery with change_title, any labels the repository rules ask for, and verification evidence."
                 : 'Your result is delivered through submit_delivery, not published to GitHub.'
-          } ${writable ? 'You may implement in this task checkout.' : 'Do not modify tracked source files.'} Read ../context/*.json and ../notes if present. Keep conclusions concise and cite actual verification.${eventSubscriptionInstructions} ${taskRecordInstructions}${repoSkillIndex.length ? skillBoundary : ''}`,
+          } ${writable ? 'You may implement in this task checkout.' : 'Do not modify tracked source files.'} Read ../context/*.json and ../notes if present. Use fetch_github_media (into ../context/media/ or /tmp/) for Issue/PR screenshots/videos (/pr-media/ or GitHub URLs) instead of shell fetch; use ffmpeg for video keyframes if needed. Keep conclusions concise and cite actual verification.${eventSubscriptionInstructions} ${taskRecordInstructions}${repoSkillIndex.length ? skillBoundary : ''}`,
           prompt: JSON.stringify({
             delivery_context: buildDeliveryContext(store, task),
             ...((generic ? effective().includes('pull_request') : software()) ? { ci_changes: ciChanges } : {}),
@@ -1356,6 +1363,7 @@ export async function runRequest(
           execute: async (name, args) => {
             if (versionTools.some(t => t.function.name === name)) return versionTool(store, task, spaces.current, name, args, async () => github);
             if (readTools.some(t => t.function.name === name)) {
+              if (name === 'fetch_github_media') return explorer.execute(name, args);
               const connected = await explorer.execute('github_read_token', {});
               return connected.error ? connected : explorer.execute(name, args);
             }

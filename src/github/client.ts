@@ -149,7 +149,7 @@ export class GitHub {
   }
   // replaced: the token a first 401 replaced. GitHub answers 401 for a token that expired or was revoked; an installation
   // token this client minted is then minted again and the request sent once more. Only a second 401 stops the task.
-  async request(method: string, path: string, body?: unknown, allow404 = false, token = this.token, allowEmptyRepository = false, snapshotBlob = false, jobLogs = false, replaced?: string, artifactMaxBytes?: number): Promise<any> {
+  async request(method: string, path: string, body?: unknown, allow404 = false, token = this.token, allowEmptyRepository = false, snapshotBlob = false, jobLogs = false, replaced?: string, artifactMaxBytes?: number, accept = 'application/vnd.github+json'): Promise<any> {
     await this.guard();
     this.store?.checkAuthorization();
     if (this.store && installationExecutionDenied(this.store, String(this.repository.account_id), String(this.repository.id)))
@@ -167,7 +167,7 @@ export class GitHub {
     // A publication may need the exact credentials that were issued during this guard or refresh.
     const outgoing = typeof body === 'function' ? body() : body;
     try { response = await fetch(this.apiUrl.replace(/\/$/, '') + path, { method, redirect: redirectedDownload ? 'manual' : 'error', signal: AbortSignal.timeout(30000),
-      headers: { Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json' },
+      headers: { Authorization: 'Bearer ' + token, Accept: accept, 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json' },
       ...(outgoing === undefined ? {} : { body: JSON.stringify(outgoing) }) }); }
     catch (error) { return stop(method === 'GET' ? 'github_unavailable' : 'github_response_unknown', 'retry_wait',
       this.redactor.text(`GitHub 请求 ${method} ${path} 失败：${networkReason(error,30000)}${method==='GET'?'':'，写入结果尚未确认'}。`)); }
@@ -194,7 +194,7 @@ export class GitHub {
       await response.body?.cancel();
       // Another request of this client may already have replaced the refused token.
       if (this.token === token) await this.renew('after_401'); else await this.renewing;
-      return this.request(method, path, body, allow404, this.token, allowEmptyRepository, snapshotBlob, jobLogs, token, artifactMaxBytes);
+      return this.request(method, path, body, allow404, this.token, allowEmptyRepository, snapshotBlob, jobLogs, token, artifactMaxBytes, accept);
     }
     if (response.status === 404 && allow404) return null;
     if (!response.ok) {
@@ -258,6 +258,48 @@ export class GitHub {
   async artifactArchive(artifactId: number, maxBytes = 32 * 1024 * 1024): Promise<Buffer> {
     if (!Number.isSafeInteger(artifactId) || artifactId < 1) return stop('github_artifact_invalid', undefined, 'Actions artifact ID 无效。');
     return this.request('GET', this.path(`/actions/artifacts/${artifactId}/zip`), undefined, false, this.token, false, false, false, undefined, maxBytes);
+  }
+  /** GET with rendered HTML (`body_html`) so the control plane can resolve signed attachment URLs for private repos. */
+  async requestHtml(path: string, allow404 = true): Promise<any> {
+    return this.request('GET', path, undefined, allow404, this.token, false, false, false, undefined, undefined, 'application/vnd.github.html+json');
+  }
+  /**
+   * Opens a raw file stream from the current repository via the Contents API (`Accept: application/vnd.github.raw+json`)
+   * with manual redirects so callers strip Authorization before following external storage redirects.
+   */
+  async openRawContent(filePath: string, ref?: string, replaced?: string): Promise<Response> {
+    await this.guard();
+    this.store?.checkAuthorization();
+    if (this.store && installationExecutionDenied(this.store, String(this.repository.account_id), String(this.repository.id)))
+      stop('github_installation_access_revoked', 'waiting_permission', 'GitHub App 安装已暂停、卸载或正在核实范围，等待安装同步确认。');
+    let token = this.token;
+    const renewable = !!token && !!this.installationId && !!this.tokenRequest;
+    if (renewable) { await this.fresh(); token = this.token; }
+    const window = this.tokenWindow;
+    const blocked = window ? blockedUntil(this.store, window, Date.now(), 'core') : null;
+    if (blocked) stop('github_rate_limited', 'retry_wait', `GitHub 流控：${bucketName(window!)}本小时的请求额度已用完，${utcTime(blocked)} 重置后继续。`, blocked - Date.now(), window!.key);
+    const encodedPath = filePath.split('/').map(encodeURIComponent).join('/');
+    const query = ref ? `?ref=${encodeURIComponent(ref)}` : '';
+    const apiPath = this.path(`/contents/${encodedPath}${query}`);
+    let response: Response;
+    try {
+      response = await fetch(this.apiUrl.replace(/\/$/, '') + apiPath, {
+        method: 'GET',
+        redirect: 'manual',
+        signal: AbortSignal.timeout(30000),
+        headers: { Authorization: 'Bearer ' + token, Accept: 'application/vnd.github.raw+json', 'X-GitHub-Api-Version': '2022-11-28' },
+      });
+    } catch (error) {
+      return stop('github_unavailable', 'retry_wait', this.redactor.text(`GitHub 请求 GET ${apiPath} 失败：${networkReason(error, 30000)}。`));
+    }
+    this.status = response.status;
+    if (window) observe(this.store, window, response.headers, response.status);
+    if (response.status === 401 && renewable && !replaced) {
+      await response.body?.cancel();
+      if (this.token === token) await this.renew('after_401'); else await this.renewing;
+      return this.openRawContent(filePath, ref, token);
+    }
+    return response;
   }
   get isAppInstallation(): boolean { return !!this.installationId; }
   // A short-lived token of the App installation with permissions the task token was not given, for one control-plane write

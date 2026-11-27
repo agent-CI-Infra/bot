@@ -5,7 +5,10 @@ import { existsSync, mkdirSync, readFileSync, statSync, symlinkSync, utimesSync,
 import { dirname, join } from 'node:path';
 import { channelFixture, envelope, post, until, finished, privateChat, boundGroup, inGroup, shareAssistantModel } from '../../../fixtures/channel-fixture.mjs';
 import { feishuMarkdown, markdownPosts, postText } from '../../../../dist/channels/format.js';
-import { MediaTurn, artifactBytes, channelResourcePath, incomingFiles, inboundBytes, mediaPermission, safeFilename, sweepOrphanChannelResources } from '../../../../dist/channels/media.js';
+import { MediaTurn, artifactBytes, channelResourcePath, detectedMime, incomingFiles, inboundBytes, mediaPermission, safeFilename, sweepOrphanChannelResources } from '../../../../dist/channels/media.js';
+import { createServer } from 'node:http';
+import { once } from 'node:events';
+import { serviceTools } from '../../../../dist/channels/service-session.js';
 import { saveModelMetadata } from '../../../../dist/models/catalog.js';
 import { requestLimit } from '../../../../dist/agent/tool-context.js';
 import { ChannelService } from '../../../../dist/channels/service.js';
@@ -650,4 +653,207 @@ test('import_message_resource -> computer processing -> view_workspace_image clo
   await assert.rejects(secTurn.execute('view_workspace_image', { path: '~/ok.png' }), /access_revoked/);
   await computer.close();
   await assistants.close();
+});
+
+test('detectedMime identifies MP4/WebM (excluding AVIF/HEIC) and Feishu group & private assistants attach resource: and workspace: media via github_write', async t => {
+  const mp4 = Buffer.from('00000018667479706d703432000000006d70343269736f6d', 'hex');
+  const webm = Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x9f]), Buffer.from([0x42, 0x82, 0x84, 0x77, 0x65, 0x62, 0x6d]), Buffer.alloc(16)]);
+  const avif = Buffer.from('00000018667479706176696600000000', 'hex');
+  assert.equal(detectedMime(mp4, 'application/octet-stream', 'clip.mp4'), 'video/mp4');
+  assert.equal(detectedMime(webm, 'application/octet-stream', 'clip.webm'), 'video/webm');
+  assert.equal(detectedMime(avif, 'application/octet-stream', 'photo.avif'), 'application/octet-stream');
+
+  // Verify create_project_task schema never bundles Feishu attachments.
+  const createTaskTool = serviceTools.find(tool => tool.function.name === 'create_project_task');
+  assert.ok(createTaskTool);
+  assert.equal(createTaskTool.function.parameters.properties.media, undefined);
+  assert.equal(createTaskTool.function.parameters.properties.resource_ids, undefined);
+
+  // Mock GitHub REST server for github_write calls.
+  const ghRequests = [];
+  const ghServer = createServer(async (req, res) => {
+    let raw = ''; for await (const c of req) raw += c;
+    const url = new URL(req.url, 'http://fixture');
+    const body = raw ? JSON.parse(raw) : null;
+    ghRequests.push({ method: req.method, path: url.pathname, body });
+    const send = (value, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(value)); };
+    if (url.pathname === '/user') return send({ id: 99, login: 'fixture-bot' });
+    if (url.pathname === '/repositories/101') return send({ id: '101', owner: { id: '10' }, full_name: 'agent-test-zone/admin-fixture-101', default_branch: 'main' });
+    if (url.pathname === '/repos/agent-test-zone/admin-fixture-101/issues' && req.method === 'POST') return send({ id: 501, number: 88, html_url: 'https://github.com/agent-test-zone/admin-fixture-101/issues/88', title: body.title, body: body.body }, 201);
+    if (url.pathname === '/repos/agent-test-zone/admin-fixture-101/issues/88') return send({ id: 501, number: 88, title: 'Bug', body: 'Body' });
+    if (url.pathname === '/repos/agent-test-zone/admin-fixture-101/issues/88/comments' && req.method === 'POST') return send({ id: 601, html_url: 'https://github.com/agent-test-zone/admin-fixture-101/issues/88#issuecomment-601', body: body.body }, 201);
+    send({ message: 'Not Found' }, 404);
+  });
+  ghServer.listen(0, '127.0.0.1'); await once(ghServer, 'listening');
+  t.after(() => new Promise(resolve => { ghServer.close(resolve); ghServer.closeAllConnections(); }));
+  const ghApiUrl = 'http://127.0.0.1:' + ghServer.address().port;
+
+  const f = await channelFixture(t);
+  f.h.store.run("UPDATE accounts SET credentials=? WHERE id=(SELECT account_id FROM repositories WHERE id='101')",
+    f.h.store.secrets.seal({ token: 'fixture-github-token' }, 'account:' + f.h.store.get("SELECT account_id FROM repositories WHERE id='101'").account_id));
+  f.h.store.run("UPDATE policies SET capability_ceiling='comment' WHERE repository_id='101'");
+  f.h.store.run("INSERT OR REPLACE INTO settings VALUES('onboarding.public',?)", JSON.stringify({ origin: 'https://files.example.test' }));
+  f.service.serviceSessions.githubUrl = ghApiUrl;
+  f.service.management.service.githubUrl = ghApiUrl;
+
+  // Part 1: Feishu Group Assistant attaches resource:<id> PNG + MP4 WITHOUT an assistant computer,
+  // and rejects wrong Markdown syntax, cross-chat/unknown resource_id, and secret-bearing images.
+  const chat = await group(f);
+  const binding = f.h.store.get('SELECT * FROM channel_service_bindings WHERE chat_id=?', chat.id);
+  f.h.store.run('UPDATE channel_service_bindings SET permissions=?,revision=revision+1 WHERE id=?',
+    JSON.stringify({ ...JSON.parse(binding.permissions), github_issues: 'write', github_pull_requests: 'write' }), binding.id);
+
+  const secretPng = Buffer.concat([png, Buffer.from('sk-' + 'testOnlyCredential0123456789')]);
+  f.wire.state.resources.set('img_bug_shot', { data: png, mime: 'image/png' });
+  f.wire.state.resources.set('file_bug_video', { data: mp4, mime: 'application/octet-stream' });
+  f.wire.state.resources.set('img_secret_shot', { data: secretPng, mime: 'image/png' });
+
+  let groupWriteResult, wrongSyntaxResult, foreignResourceResult, secretResult;
+  f.modelState.respond = async (body, res) => {
+    const obs = results(body);
+    if (!obs.length) return call(res, 'list_message_resources', {});
+    const resources = obs[0].resources;
+    const shotId = resources.find(r => r.name.includes('image')).resource_id;
+    const vidId = resources.find(r => r.name.endsWith('.mp4')).resource_id;
+    const secretId = resources.find(r => r.name.includes('secret')).resource_id;
+    if (obs.length === 1) {
+      // Valid: PNG via ![...](resource:...) and MP4 via [...](resource:...) without assistant computer.
+      return call(res, 'github_write', {
+        repository: 'agent-test-zone/admin-fixture-101', method: 'POST', path: '/issues', key: 'file-bug-with-media',
+        body: { title: 'UI Bug', body: `Screenshot:\n![Bug](resource:${shotId})\n\nRecording:\n[Repro](resource:${vidId})` },
+        media: [`resource:${shotId}`, `resource:${vidId}`],
+      });
+    }
+    if (obs.length === 2) {
+      groupWriteResult = obs[1];
+      // Invalid: using image syntax ![...]() for an MP4 attachment must be refused before publishing.
+      return call(res, 'github_write', {
+        repository: 'agent-test-zone/admin-fixture-101', method: 'POST', path: '/issues/88/comments', key: 'wrong-syntax',
+        body: { body: `![Wrong](resource:${vidId})` },
+        media: [`resource:${vidId}`],
+      });
+    }
+    if (obs.length === 3) {
+      wrongSyntaxResult = obs[2];
+      // Invalid: unknown/unauthorized resource_id.
+      return call(res, 'github_write', {
+        repository: 'agent-test-zone/admin-fixture-101', method: 'POST', path: '/issues/88/comments', key: 'foreign-res',
+        body: { body: '![Other](resource:nonexistent_res_99)' },
+        media: ['resource:nonexistent_res_99'],
+      });
+    }
+    if (obs.length === 4) {
+      foreignResourceResult = obs[3];
+      // Invalid: image containing a secret is blocked by assertMediaRedacted.
+      return call(res, 'github_write', {
+        repository: 'agent-test-zone/admin-fixture-101', method: 'POST', path: '/issues/88/comments', key: 'secret-img',
+        body: { body: `![Secret](resource:${secretId})` },
+        media: [`resource:${secretId}`],
+      });
+    }
+    secretResult = obs[4];
+    return say(res, '已创建带截图和视频的 Issue #88。');
+  };
+
+  const groupPost = inGroup('');
+  Object.assign(groupPost.event.message, {
+    message_type: 'post',
+    content: JSON.stringify({
+      zh_cn: {
+        title: '提个 Issue',
+        content: [
+          [{ tag: 'img', image_key: 'img_bug_shot' }],
+          [{ tag: 'media', file_key: 'file_bug_video', file_name: 'repro.mp4' }],
+          [{ tag: 'media', file_key: 'img_secret_shot', file_name: 'secret.png' }],
+        ],
+      },
+    }),
+  });
+  const groupReceipt = await post(f.h, f.id, groupPost);
+  assert.equal((await finished(f.h, groupReceipt.value.operation_id)).state, 'completed');
+  assert.equal(groupWriteResult?.result?.status, 201);
+  assert.equal(wrongSyntaxResult?.result?.error, 'pull_request_media_invalid');
+  assert.equal(foreignResourceResult?.result?.error, 'pull_request_media_invalid');
+  assert.equal(secretResult?.result?.error, 'pull_request_media_invalid');
+
+  const issueCreate = ghRequests.find(r => r.method === 'POST' && r.path === '/repos/agent-test-zone/admin-fixture-101/issues');
+  assert.ok(issueCreate, 'group assistant created GitHub Issue');
+  assert.doesNotMatch(issueCreate.body.body, /resource:/);
+  const hostedLinks = [...issueCreate.body.body.matchAll(/https:\/\/files\.example\.test(\/pr-media\/[a-f0-9]{64})/g)].map(m => m[1]);
+  assert.equal(hostedLinks.length, 2);
+  const servedImg = await fetch(f.h.admin + hostedLinks[0]);
+  assert.equal(servedImg.status, 200);
+  assert.equal(servedImg.headers.get('content-type'), 'image/png');
+  assert.deepEqual(Buffer.from(await servedImg.arrayBuffer()), png);
+  const servedVid = await fetch(f.h.admin + hostedLinks[1]);
+  assert.equal(servedVid.status, 200);
+  assert.equal(servedVid.headers.get('content-type'), 'video/mp4');
+  assert.deepEqual(Buffer.from(await servedVid.arrayBuffer()), mp4);
+
+  // Part 2: Enable assistant computer and verify Private Management Assistant attaches BOTH resource:<id>
+  // and assistant computer processed workspace:/tmp/keyframe.png (while refusing symlink & /etc/passwd).
+  const m = await assistantManager(t);
+  const assistants = new AssistantComputerService(f.h.store, m.manager, m.homes);
+  lendSessionWorkspaces(assistants);
+  f.service.management.service.assistants = assistants;
+  t.after(() => assistants.close());
+
+  f.wire.state.resources.set('file_dm_video', { data: mp4, mime: 'video/mp4' });
+  let dmWriteResult, dmSymlinkResult, dmHostPathResult;
+  f.modelState.respond = async (body, res) => {
+    const obs = results(body);
+    if (!obs.length) return call(res, 'list_message_resources', {});
+    const vidId = obs[0].resources[0].resource_id;
+    if (obs.length === 1) return call(res, 'import_message_resource', { resource_id: vidId, path: 'dm.mp4' });
+    if (obs.length === 2) {
+      // Simulate extracting PNG keyframes into /tmp, /workspace, and ~/ plus a symlink trap.
+      return call(res, 'run_command', {
+        command: `node -e "const fs=require('fs'),p=require('path'); if(fs.readFileSync('dm.mp4').subarray(4,8).toString('latin1')!=='ftyp') process.exit(2); const buf=Buffer.from('${png.toString('base64')}','base64'); fs.writeFileSync('../tmp/keyframe.png',buf); fs.mkdirSync('frames',{recursive:true}); fs.writeFileSync('frames/crop.png',buf); fs.writeFileSync(p.join(process.env.HOME,'saved.png'),buf); fs.symlinkSync('keyframe.png','../tmp/link.png')"`,
+      });
+    }
+    if (obs.length === 3) {
+      return call(res, 'github_write', {
+        repository: 'agent-test-zone/admin-fixture-101', method: 'POST', path: '/issues/88/comments', key: 'dm-media-comment',
+        body: { body: `Keyframe:\n![Keyframe](workspace:/tmp/keyframe.png)\n![Crop](workspace:frames/crop.png)\n![Saved](workspace:~/saved.png)\n\nOriginal:\n[Video](resource:${vidId})` },
+        media: ['workspace:/tmp/keyframe.png', 'workspace:frames/crop.png', 'workspace:~/saved.png', `resource:${vidId}`],
+      });
+    }
+    if (obs.length === 4) {
+      dmWriteResult = obs[3];
+      return call(res, 'github_write', {
+        repository: 'agent-test-zone/admin-fixture-101', method: 'POST', path: '/issues/88/comments', key: 'dm-symlink',
+        body: { body: '![Link](workspace:/tmp/link.png)' },
+        media: ['workspace:/tmp/link.png'],
+      });
+    }
+    if (obs.length === 5) {
+      dmSymlinkResult = obs[4];
+      return call(res, 'github_write', {
+        repository: 'agent-test-zone/admin-fixture-101', method: 'POST', path: '/issues/88/comments', key: 'dm-etc',
+        body: { body: '![Etc](workspace:/etc/passwd)' },
+        media: ['workspace:/etc/passwd'],
+      });
+    }
+    dmHostPathResult = obs[5];
+    return say(res, '已将关键帧和视频附到 Issue #88 评论。');
+  };
+
+  const dmEvent = fileEvent('file_dm_video', 'oc_private', 'dm-repro.mp4');
+  const dmReceipt = await post(f.h, f.id, dmEvent);
+  assert.equal((await finished(f.h, dmReceipt.value.operation_id)).state, 'completed');
+  assert.equal(dmWriteResult?.result?.status, 201, JSON.stringify(dmWriteResult));
+  assert.equal(dmSymlinkResult?.result?.error, 'pull_request_media_invalid');
+  assert.equal(dmHostPathResult?.result?.error, 'pull_request_media_invalid');
+
+  const dmComment = ghRequests.find(r => r.method === 'POST' && r.path === '/repos/agent-test-zone/admin-fixture-101/issues/88/comments');
+  assert.ok(dmComment, 'private management assistant posted comment with keyframe + video');
+  assert.doesNotMatch(dmComment.body.body, /workspace:|resource:/);
+  const dmLinks = [...dmComment.body.body.matchAll(/https:\/\/files\.example\.test(\/pr-media\/[a-f0-9]{64})/g)].map(m => m[1]);
+  assert.equal(dmLinks.length, 4);
+  const servedKeyframe = await fetch(f.h.admin + dmLinks[0]);
+  assert.equal(servedKeyframe.status, 200);
+  assert.deepEqual(Buffer.from(await servedKeyframe.arrayBuffer()), png);
+  const servedDmVid = await fetch(f.h.admin + dmLinks[3]);
+  assert.equal(servedDmVid.status, 200);
+  assert.deepEqual(Buffer.from(await servedDmVid.arrayBuffer()), mp4);
 });

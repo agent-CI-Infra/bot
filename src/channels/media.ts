@@ -293,10 +293,14 @@ export class ChannelMedia {
     }
     guard();
     if (hash(data) !== payload.sha256) return fail(409, 'channel_resource_integrity');
-    const mime = String(payload.mime), name = String(payload.name);
+    const storedMime = String(payload.mime || ''), name = String(payload.name);
+    const mime = !storedMime || storedMime === 'application/octet-stream' ? detectedMime(data, storedMime, name) : storedMime;
     return { data, mime, name, image: /^image\/(png|jpeg|gif|webp|bmp|tiff|x-icon)$/.test(mime) && data.length <= 10 * 1024 * 1024 };
   }
 }
+
+const isobmffImageBrands = new Set(['avif', 'avis', 'heic', 'heix', 'hevc', 'hevx', 'mif1', 'msf1']);
+const webmDocType = Buffer.from([0x42, 0x82, 0x84, 0x77, 0x65, 0x62, 0x6d]);
 
 /** Prefer magic bytes over extension/server MIME, especially before handing an image to a model or Feishu. */
 export function detectedMime(data: Buffer, claimed = '', name = ''): string {
@@ -307,6 +311,8 @@ export function detectedMime(data: Buffer, claimed = '', name = ''): string {
   if (data.subarray(0, 2).toString() === 'BM') return 'image/bmp';
   if (data.subarray(0, 4).equals(Buffer.from([73,73,42,0])) || data.subarray(0,4).equals(Buffer.from([77,77,0,42]))) return 'image/tiff';
   if (data.subarray(0, 4).equals(Buffer.from([0,0,1,0]))) return 'image/x-icon';
+  if (data.length >= 16 && data.subarray(4, 8).toString('latin1') === 'ftyp' && !isobmffImageBrands.has(data.subarray(8, 12).toString('latin1').toLowerCase())) return 'video/mp4';
+  if (data.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3])) && data.subarray(4, 256).includes(webmDocType)) return 'video/webm';
   if (data.subarray(0, 5).toString() === '%PDF-') return 'application/pdf';
   if (!data.includes(0) && Buffer.from(data.toString('utf8')).equals(data) && (claimed.startsWith('text/') || /\.(txt|md|csv|json|xml|ya?ml|log|py|js|ts|html|css)$/i.test(name))) return 'text/plain';
   return 'application/octet-stream';

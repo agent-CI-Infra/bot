@@ -16,7 +16,7 @@ export function toolCapabilityError(config, name, args = {}) {
   if (name === 'create_pull_request' && github.publication !== 'pull_request') return 'publication_not_allowed';
   if (Object.hasOwn(platformWrites, name) && platformWrites[name] && !(config.capabilities?.writes || []).includes(platformWrites[name])) return 'write_not_allowed';
   if (name === 'start_agent' && config.capabilities?.agents !== true) return 'agents_not_allowed';
-  if (['github_read_token','github_read','github_search','read_job_log','download_artifact'].includes(name) && (!github.permissions || !Object.keys(github.permissions).length || Object.values(github.permissions).some(value => value !== 'read'))) return 'github_read_token_not_allowed';
+  if (['github_read_token','github_read','github_search','read_job_log','download_artifact','fetch_github_media'].includes(name) && (!github.permissions || !Object.keys(github.permissions).length || Object.values(github.permissions).some(value => value !== 'read'))) return 'github_read_token_not_allowed';
   return null;
 }
 // A sub-agent's capabilities: the parent's, narrowed by what the parent asked for. A requested true never adds what the

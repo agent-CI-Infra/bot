@@ -19,7 +19,7 @@ const legacyItems: PermissionItem[] = [
   access('role_memory', '角色知识', ['search_role_memory', 'read_role_memory'], ['remember_role_memory'], '查询或记录当前角色的知识。'),
   access('skills', '技能包', ['read_skill'], [], '读取绑定在当前角色上的技能文件。'),
   access('related_artifacts', '关联交付物', ['read_related_artifact'], [], '读取任务提供的关联交付物。'),
-  access('github', 'GitHub 内容', ['github_read_token', 'github_read', 'github_search', 'read_job_log', 'download_artifact'], [], '读取本次任务授权的仓库；不授予 GitHub 写入凭据。'),
+  access('github', 'GitHub 内容', ['github_read_token', 'github_read', 'github_search', 'read_job_log', 'download_artifact', 'fetch_github_media'], [], '读取本次任务授权的仓库；不授予 GitHub 写入凭据。'),
   // 「访问其他角色的任务」：拒绝 / 只读 / 读写。读写的工具只在提供它的入口出现（服务角色的任务操作），工作角色现有的值和快照不变。
   access('project_tasks', '其他角色的任务', ['list_project_tasks', 'read_project_task'], ['manage_project_task'], '只读查询范围内其他角色任务的进展；读写还可以追加指令、暂停、继续或取消这些任务，仍走管理服务的版本检查和幂等。角色自己的独立任务不受这一项限制。'),
   access('coordination', '跨任务协调记录', ['read_coordination'], ['acknowledge_coordination', 'decide_coordination', 'request_task_coordination', 'wait_for_tasks', 'submit_coordination'], '读取协调通知，或提出请求、等待依赖、登记采纳、提交建议；请求方 Manager 还可决定重试或撤回协调建议。'),
@@ -67,10 +67,10 @@ export const permissionItems: PermissionItem[] = [
   platform(access('project_memory','项目共享知识',['search_project_memory','read_project_memory'],['remember_project_memory'],'读写项目共享笔记（../notes/），与同项目角色和控制台共享；自己的私有记忆默认可用。')),
   platform(access('project_configuration','项目设置与角色配置',['management_query'],['management_command'],'按操作核对项目配置、角色和共享规则的读取或修改权限；不会增加操作者授权。')),
   platform(access('schedules','项目定时与通知',['management_query'],['management_command'],'管理仓库的项目级定时任务和事件通知订阅，目标与收件人仍受项目范围限制；不影响飞书群或私聊自己的会话定时任务。')),
-  github(access('github_issues','Issue',githubReads,['github_write'],'只读：查看 Issue、评论和标签。读写：还可以用 github_write 新建、修改和关闭 Issue，评论，加删标签、指派人和里程碑。')),
-  github(access('github_pull_requests','Pull Request',githubReads,['github_write'],'只读：查看 PR、diff 和检视。读写：还可以用 github_write 开 PR、修改 PR，评论，发检视（包括批准和要求修改）、请求检视人。合并 PR 需要 Contents 和 Pull Request 都是读写，并按项目的自动合并策略。')),
+  github(access('github_issues','Issue',[...githubReads,'fetch_github_media'],['github_write'],'只读：查看 Issue、评论、标签及引用的图片/视频媒体。读写：还可以用 github_write 新建、修改和关闭 Issue，评论，加删标签、指派人和里程碑。')),
+  github(access('github_pull_requests','Pull Request',[...githubReads,'fetch_github_media'],['github_write'],'只读：查看 PR、diff、检视及引用的图片/视频媒体。读写：还可以用 github_write 开 PR、修改 PR，评论，发检视（包括批准和要求修改）、请求检视人。合并 PR 需要 Contents 和 Pull Request 都是读写，并按项目的自动合并策略。')),
   github(access('github_actions','Actions',[...githubReads,'read_job_log','download_artifact'],['github_write'],'只读：查看工作流运行、job、日志并下载构建产物到任务工作区。读写：还可以用 github_write 触发 workflow_dispatch、重跑或取消运行与 job。失败处理的重跑不需要这项。')),
-  github(access('github_contents','Contents',githubReads,['github_write'],'只读：读取代码和提交。读写：还可以用 github_write 提交文件、创建 Git 对象、分支和引用，可以直接推送到分支；合并 PR 另需 Pull Request 读写，并按项目的自动合并策略。')),
+  github(access('github_contents','Contents',[...githubReads,'fetch_github_media'],['github_write'],'只读：读取代码、提交及仓库媒体文件。读写：还可以用 github_write 提交文件、创建 Git 对象、分支和引用，可以直接推送到分支；合并 PR 另需 Pull Request 读写，并按项目的自动合并策略。')),
   github(access('github_checks','Checks',githubReads,[],'读取检查运行和结论；尚未提供写入检查结果的角色工具。')),
   github(access('github_statuses','Commit Status',githubReads,[],'读取提交状态；尚未提供发布状态的角色工具。')),
 ];
@@ -223,6 +223,7 @@ export function permissionTools(value: RolePermissions): string[] {
   const scopes=githubReadScopes(p);
   if (scopes.length) ['github_read_token','github_read'].forEach(name => tools.add(name));
   if (scopes.includes('issues')||scopes.includes('pull_requests')) tools.add('github_search');
+  if (scopes.includes('issues')||scopes.includes('pull_requests')||scopes.includes('contents')) tools.add('fetch_github_media');
   if (resourceAllowed(p,'actions')) ['read_job_log','download_artifact'].forEach(name => tools.add(name));
   if (githubWrites(p)) tools.add('github_write');
   return [...tools];
@@ -241,7 +242,8 @@ export function narrowPermissions(value: RolePermissions, tools: readonly string
     p[keyOf(resource)] = 'custom';
     for (const operation of resourceOperations) {
       // Deliveries (publish, report) need no role permission; every direct write goes through github_write.
-      const tool = operation === 'read' ? resource === 'actions' && (allowed.has('read_job_log') || allowed.has('download_artifact')) || githubReads.some(name => allowed.has(name))
+      const mediaRead = ['issues','pull_requests','contents'].includes(resource) && allowed.has('fetch_github_media');
+      const tool = operation === 'read' ? resource === 'actions' && (allowed.has('read_job_log') || allowed.has('download_artifact')) || mediaRead || githubReads.some(name => allowed.has(name))
         : ['publish','report'].includes(operation) || allowed.has('github_write');
       p[mask(resource,operation)] = tool && resourceAllowed(original,resource,operation) ? 'allow' : 'deny';
     }

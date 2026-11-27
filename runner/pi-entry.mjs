@@ -157,7 +157,7 @@ try{
       if(denied) result={error:denied};
       // The control plane decides the result; only its explicit finish ends this session with the validated submission.
       else if(controlTools.has(name)&&!agent){const reply=await controlTool(name,args,signal);const extracted=Array.isArray(reply.images)?extractToolContentBlocks(reply):extractToolContentBlocks(reply.result);result=extracted.observation;toolImages=extracted.images;if(reply.finish===true){finished=result;submitted=true;}}
-      else if(['github_read','github_search','read_job_log','download_artifact','read_task_history','record_progress','search_project_memory','read_project_memory','remember_project_memory'].includes(name)||Object.hasOwn(platformWrites,name)&&!agent){const reply=await repositoryTool(name,args,signal);const extracted=extractToolContentBlocks(reply);result=extracted.observation;toolImages=extracted.images;}
+      else if(['github_read','github_search','read_job_log','download_artifact','fetch_github_media','read_task_history','record_progress','search_project_memory','read_project_memory','remember_project_memory'].includes(name)||Object.hasOwn(platformWrites,name)&&!agent){const reply=await repositoryTool(name,args,signal);const extracted=extractToolContentBlocks(reply);result=extracted.observation;toolImages=extracted.images;}
       else if(finishTools.has(name)&&!agent){finished=args;result={finished:true};}
       else if(name==='create_pull_request'&&!agent){
         result=await createPullRequest(args,signal);
