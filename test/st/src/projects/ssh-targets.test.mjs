@@ -18,11 +18,22 @@ test('SSH inventory seals credentials, scopes global bindings, pins updates, and
   const created = await admin(pool,'POST',spec);
   assert.equal(created.status,201);
   const id = created.value.id, binding = project+'/'+id+'/binding';
+  const poolBefore = (await admin(pool)).value.targets;
+  assert.equal(poolBefore.length,1);
+  assert.deepEqual(poolBefore[0].bound_projects,[]);
   assert.deepEqual((await admin(project)).value.targets,[]);
   assert.equal((await admin(binding,'PUT',{})).status,200);
+  assert.deepEqual((await admin(pool)).value.targets[0].bound_projects,[{id:'101',full_name:'fixture/project-101'}]);
+  assert.equal((await admin('/api/repositories/202/ssh-targets/'+id+'/binding','PUT',{})).status,200);
+  assert.deepEqual((await admin(pool)).value.targets[0].bound_projects,[
+    {id:'101',full_name:'fixture/project-101'},
+    {id:'202',full_name:'fixture/project-202'},
+  ]);
+  assert.equal((await admin('/api/repositories/202/ssh-targets/'+id+'/binding','DELETE',{})).status,200);
+  assert.deepEqual((await admin(pool)).value.targets[0].bound_projects,[{id:'101',full_name:'fixture/project-101'}]);
   const dump = (await admin(project)).value.targets;
   assert.deepEqual(dump.map(row=>[row.alias,row.allow_untrusted_pr]),[['board',false]]);
-  for (const field of ['password','private_key','sealed']) assert.ok(!Object.hasOwn(dump[0],field));
+  for (const field of ['password','private_key','sealed','bound_projects']) assert.ok(!Object.hasOwn(dump[0],field));
   assert.deepEqual((await admin('/api/repositories/202/ssh-targets')).value.targets,[]);
   const sealed = h.store.get('SELECT sealed FROM ssh_targets WHERE id=?',id).sealed;
   assert.deepEqual(h.store.secrets.open(sealed,'ssh-target:'+id),{password:spec.password});
@@ -37,6 +48,7 @@ test('SSH inventory seals credentials, scopes global bindings, pins updates, and
   await admin('/api/users','POST',{username:'padmin',password:'project-admin-password-123',role:'project_admin',repository_ids:['101']});
   await projectUser('/api/auth/login','POST',{username:'padmin',password:'project-admin-password-123'});
   assert.equal((await projectUser(project)).status,200);
+  assert.equal((await projectUser(pool)).status,403);
   assert.equal((await projectUser('/api/repositories/202/ssh-targets')).status,403);
   assert.equal((await projectUser(binding,'DELETE',{})).status,403);
   assert.equal(configuredRedactor(h.store,'101').text('got p!4z'),'got [REDACTED]');
@@ -54,6 +66,7 @@ test('SSH inventory seals credentials, scopes global bindings, pins updates, and
   assert.equal((await session.read({file:ref.file})).content,ref.output);
   assert.equal((await admin(project+'/'+jump.value.id,'DELETE',{})).status,200);
   assert.equal((await admin(binding,'DELETE',{})).status,200);
+  assert.deepEqual((await admin(pool)).value.targets[0].bound_projects,[]);
   assert.deepEqual((await admin(project)).value.targets,[]);
   assert.equal((await admin(pool+'/'+id,'DELETE',{})).status,200);
   assert.ok(!JSON.stringify(h.store.all("SELECT * FROM audit WHERE action LIKE 'ssh_target.%'")).includes(spec.password));

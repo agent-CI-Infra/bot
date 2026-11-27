@@ -8,6 +8,7 @@
  * settings/projects.js
  * settings/resources.js
  * settings/compute-nodes.js
+ * settings/ssh-targets.js
  * settings/assistant-computers.js
  * settings/rate-limits.js
  * settings/lists.js

@@ -251,6 +251,15 @@ function nodeBindingCard(isSuper) {
   const target = current, id = target.id, token = typeof renderToken === 'number' ? renderToken : 0;
   const section = card('计算节点绑定');
   section.dataset.testid = 'machine-node-binding';
+  if (isSuper) {
+    const heading = section.querySelector('h3');
+    const toolbar = element('div', '', 'heading');
+    const nodesLink = element('a', '管理计算节点 →', 'button-link quiet');
+    nodesLink.href = '#/settings/compute-nodes';
+    nodesLink.dataset.testid = 'machine-compute-nodes-link';
+    heading.replaceWith(toolbar);
+    toolbar.append(heading, nodesLink);
+  }
   const body = element('div', '', 'machine-node-binding-body');
   body.append(note('正在读取计算节点绑定状态…'));
   const feedback = element('p', '', 'view-error');
@@ -300,9 +309,13 @@ function nodeBindingCard(isSuper) {
       submit.disabled = data.nodes.length <= 1;
       const formActions = element('div', '', 'actions form-actions');
       formActions.append(submit);
+      const rebindNote = note('切换前会先将项目笔记经同步引擎写回控制面，停止并回收旧节点工作区与容器，再在目标节点重建项目电脑（不跨节点拷贝工作卷）。如需接入或管理远端节点，请前往 ');
+      const inlineNodesLink = element('a', '全局设置 → 计算节点', 'ssh-inline-link');
+      inlineNodesLink.href = '#/settings/compute-nodes';
+      rebindNote.append(inlineNodesLink, '。');
       form.append(
         field('切换目标节点', select),
-        note('切换前会先将项目笔记经同步引擎写回控制面，停止并回收旧节点工作区与容器，再在目标节点重建项目电脑（不跨节点拷贝工作卷）。如需接入新节点，请前往「全局设置 → 计算节点」。'),
+        rebindNote,
         formActions,
       );
       form.addEventListener('submit', async event => {

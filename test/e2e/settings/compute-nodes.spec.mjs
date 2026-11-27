@@ -89,11 +89,19 @@ test('compute nodes settings manages pairing, labels, drain/undrain, revoke, and
     await page.goto(h.admin + '/#/projects/101/machine');
     const bindingCard = page.getByTestId('machine-node-binding');
     await expect(bindingCard).toBeVisible();
+    await expect(bindingCard.getByTestId('machine-compute-nodes-link')).toHaveAttribute('href', '#/settings/compute-nodes');
     await expect(bindingCard).toContainText('本机节点 (local)');
     await bindingCard.getByLabel('目标计算节点', { exact: true }).selectOption('worker-online');
     await bindingCard.getByRole('button', { name: '切换绑定节点', exact: true }).click();
     await page.getByRole('dialog').getByRole('button', { name: '确认切换节点', exact: true }).click();
     await expect(bindingCard).toContainText('在线远端节点');
+
+    // Direct jump link from project machine page reaches #/settings/compute-nodes
+    await bindingCard.getByTestId('machine-compute-nodes-link').click();
+    await expect(page).toHaveURL(/#\/settings\/compute-nodes$/);
+    await expect(page.getByTestId('compute-nodes-overview')).toBeVisible();
+    await page.goto(h.admin + '/#/projects/101/machine');
+    await expect(bindingCard).toBeVisible();
 
     // Mobile 390px overflow check on project machine page
     await page.setViewportSize({ width: 390, height: 844 });
@@ -112,6 +120,7 @@ test('compute nodes settings manages pairing, labels, drain/undrain, revoke, and
     await expect(bindingCard).toBeVisible();
     await expect(bindingCard).toContainText('在线远端节点');
     await expect(bindingCard).toContainText('由超级管理员统一维护');
+    await expect(bindingCard.getByTestId('machine-compute-nodes-link')).toHaveCount(0);
     await expect(bindingCard.getByRole('button', { name: '切换绑定节点' })).toHaveCount(0);
     expect(errors).toEqual([]);
   } finally {

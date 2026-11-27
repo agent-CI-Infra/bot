@@ -1,6 +1,7 @@
 const settingsCards = {
   async projects(request, id) { return globalProjectSettings(request, id); },
   async 'compute-nodes'(request) { return computeNodesSettingsPage(request); },
+  async 'ssh-targets'(request) { return sshTargetsSettingsPage(request); },
   async 'memory-consolidation'(request) { return memoryConsolidationSettingsPage(request); },
   async feedback(request, id) { return feedbackSettingsPage(request, id); },
   // Group assistants' and the management assistant's computers (#457): their timers and limits, each computer's resources
