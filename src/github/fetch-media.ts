@@ -8,7 +8,7 @@ import type { Row, Store } from '../storage/database.js';
 import { RUNNER_TRANSFER_CHUNK_BYTES } from '../../runner/command-policy.mjs';
 import type { GitHub } from './client.js';
 import { hostedMediaType, parseHostedMediaUrl, readHostedMediaForRepository } from './hosted-pr-media.js';
-import { bytesMatch, detectHostedMediaFormat, isVideoFormat, type HostedMediaFormat } from './pull-request-media.js';
+import { bytesMatch, detectHostedMediaFormat, isVideoFormat, type HostedMediaFormat } from './media-format.js';
 
 export const GITHUB_MEDIA_MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 export const GITHUB_MEDIA_MAX_VIDEO_BYTES = 100 * 1024 * 1024;
