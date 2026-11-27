@@ -108,15 +108,41 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:var(--fo
 .rule-sync{display:flex;align-items:center;gap:8px 16px;flex-wrap:wrap}.rule-sync>.muted{flex:1;min-width:0;margin:0;font-size:var(--font-size-1)}.rule-sync>[role=status]{flex-basis:100%;margin:0}.rule-sync>[role=status]:empty{display:none}
 .project-inline-detail{border-top:1px solid #d7e3e8;padding-top:16px;margin-top:16px;min-width:0}.project-inline-detail>.heading{margin-bottom:12px}.project-inline-detail>.heading h3{margin:0}.project-inline-detail>.side-card{margin:0}.project-inline-detail>.flash{margin-bottom:12px}
 .other-rule-rows{border-top:2px solid #d7e3e8}
-/* SSH hosts (static/project/ssh-targets.js): actions wrap; below 650px each host is one block, actions on their own line. */
-.ssh-target-actions{display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-width:0}.ssh-target-actions>p{flex-basis:100%;margin:0}
-@media(max-width:650px){.ssh-target-table thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
-.ssh-target-table,.ssh-target-table tbody{display:block}.ssh-target-table tr{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 8px;padding:10px 0;border-bottom:1px solid #edf1f4}
-.ssh-target-table tr:last-child{border-bottom:0}.ssh-target-table td{display:block;padding:0;border:0;min-width:0}
-.ssh-target-table td[data-label="连接方式"]{grid-column:2;grid-row:1;color:var(--color-text-muted);font-size:var(--font-size-1)}
-.ssh-target-table td[data-label="地址"]{grid-column:1/-1}.ssh-target-table td[data-label="操作"]{grid-column:1/-1;margin-top:6px}}
 @media(max-width:650px){.project-table th,.project-table td{padding:10px 4px}.project-table button{padding:6px;min-height:36px;font-size:var(--font-size-1)}.task-model-editor{grid-template-columns:minmax(0,1fr)}.task-model-editor>.actions{grid-column:1;justify-content:flex-start}.task-model-editor select{font-size:var(--font-size-label)}.project-table[aria-label="工作流模型"] th:first-child{width:28%}
 .common-rule summary>.muted{margin-left:0}.rule-sync{align-items:flex-start}.rule-sync>.muted{flex-basis:100%}}
+/* SSH hosts (static/project/ssh-targets.js, static/settings/ssh-targets.js): flat global pool & project binding sections. */
+.ssh-targets-guidance{margin:var(--space-3) 0;padding:var(--space-4);border:1px solid var(--color-info-border);border-radius:var(--radius-3);background:var(--color-info-bg);color:var(--color-text);font-size:var(--font-size-label);line-height:var(--line-height-relaxed);overflow-wrap:anywhere}
+.ssh-targets-guidance a{color:var(--color-info);font-weight:600;text-underline-offset:3px}
+.ssh-inline-link{color:var(--color-brand);font-weight:600;text-underline-offset:3px}
+.ssh-targets-toolbar{margin:var(--space-3) 0}
+.ssh-target-status:empty{display:none}
+.ssh-targets-section{margin-top:var(--space-4);padding-top:var(--space-4);border-top:1px solid var(--color-border);min-width:0}
+.ssh-targets-section:first-child{margin-top:var(--space-3);padding-top:0;border-top:0}
+.ssh-targets-subhead{margin-bottom:var(--space-2)}
+.ssh-targets-subhead h4,.ssh-targets-subhead h3{margin:0}
+.ssh-target-editor{margin:var(--space-3) 0;padding:var(--space-4);border:1px solid var(--color-border);border-radius:var(--radius-3);background:var(--color-surface-alt);min-width:0}
+.ssh-target-editor>h3,.ssh-target-editor>h4{margin:0}
+.ssh-alias-cell{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2);min-width:0}
+.ssh-address-cell{min-width:0}
+.ssh-address-cell>code{display:block;font-size:var(--font-size-1);color:var(--color-text);overflow-wrap:anywhere}
+.ssh-target-meta{margin:var(--space-1) 0 0;font-size:var(--font-size-1);overflow-wrap:anywhere}
+.ssh-bound-projects{display:flex;flex-wrap:wrap;gap:var(--space-1) var(--space-2);align-items:center;min-width:0}
+.ssh-bound-project-link{color:var(--color-brand);text-decoration:none;text-underline-offset:3px;font-size:var(--font-size-1);overflow-wrap:anywhere}
+.ssh-bound-project-link:hover{text-decoration:underline}
+.ssh-target-actions{display:flex;flex-wrap:wrap;gap:var(--space-2);align-items:center;min-width:0}.ssh-target-actions>p{flex-basis:100%;margin:0}
+.ssh-target-table-global th:nth-child(1){width:15%}.ssh-target-table-global th:nth-child(2){width:25%}.ssh-target-table-global th:nth-child(3){width:13%}.ssh-target-table-global th:nth-child(4){width:21%}.ssh-target-table-global th:nth-child(5){width:26%}
+.ssh-target-table-bind th:nth-child(1){width:22%}.ssh-target-table-bind th:nth-child(2){width:40%}.ssh-target-table-bind th:nth-child(3){width:14%}.ssh-target-table-bind th:nth-child(4){width:24%}
+.ssh-target-table-project th:nth-child(1){width:18%}.ssh-target-table-project th:nth-child(2){width:34%}.ssh-target-table-project th:nth-child(3){width:12%}.ssh-target-table-project th:nth-child(4){width:36%}
+.ssh-target-table-readonly th:nth-child(1){width:24%}.ssh-target-table-readonly th:nth-child(2){width:58%}.ssh-target-table-readonly th:nth-child(3){width:18%}
+@media(max-width:900px){.ssh-target-table thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+.ssh-target-table,.ssh-target-table tbody{display:block}.ssh-target-table tr{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:var(--space-1) var(--space-3);padding:var(--space-3) 0;border-bottom:1px solid var(--color-border)}
+.ssh-target-table tr:last-child{border-bottom:0}.ssh-target-table td{display:block;padding:0;border:0;min-width:0}
+.ssh-target-table td[data-label="连接方式"]{grid-column:2;grid-row:1;color:var(--color-text-muted);font-size:var(--font-size-1)}
+.ssh-target-table td[data-label="地址"]{grid-column:1/-1}
+.ssh-target-table td[data-label="已绑定项目"]{grid-column:1/-1;margin-top:var(--space-1)}
+.ssh-target-table td[data-label="已绑定项目"]::before{content:"已绑定项目：";display:block;color:var(--color-text-muted);font-size:var(--font-size-1);margin-bottom:2px}
+.ssh-target-table td[data-label="操作"]{grid-column:1/-1;margin-top:var(--space-2)}
+.ssh-target-table button{min-height:var(--control-min)}}
 .add-model{margin-top:8px}.add-model>summary{font-weight:600;color:var(--color-brand)}.add-model .side-card{border:0;padding:8px 0 0}
 .member-add{margin-top:8px}.member-add select{width:auto;min-width:220px}
 @media(max-width:760px){

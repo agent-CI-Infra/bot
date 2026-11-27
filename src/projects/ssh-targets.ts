@@ -22,6 +22,25 @@ function targets(store: Store, project: string | null): Row[] {
   return rows.map(row => ({...row, allowed_roles: JSON.parse(row.allowed_roles), allow_untrusted_pr: !!row.allow_untrusted_pr}));
 }
 
+function globalTargetBindings(store: Store): Map<string, Array<{ id: string; full_name: string }>> {
+  const rows = store.all(`SELECT b.target_id, b.repository_id AS id,
+      COALESCE(r.full_name,
+        (SELECT ir.full_name FROM installed_repositories ir WHERE ir.repository_id=b.repository_id ORDER BY ir.installed DESC, ir.synced_at DESC LIMIT 1),
+        b.repository_id) AS full_name
+    FROM ssh_target_projects b
+    JOIN ssh_targets t ON t.id=b.target_id
+    LEFT JOIN repositories r ON r.id=b.repository_id
+    WHERE t.owner_project IS NULL
+    ORDER BY full_name COLLATE NOCASE, b.repository_id`);
+  const map = new Map<string, Array<{ id: string; full_name: string }>>();
+  for (const row of rows) {
+    let list = map.get(row.target_id);
+    if (!list) { list = []; map.set(row.target_id, list); }
+    list.push({ id: String(row.id), full_name: String(row.full_name) });
+  }
+  return map;
+}
+
 /** Host and network policy are managed by platform administrators, as for the project egress setting. */
 export function sshTargetsApi(store: Store, user: Actor, method: string, url: URL, input: Json): Json | Promise<Json> | undefined {
   const match = /^\/api\/(?:repositories\/([1-9]\d{0,19})\/)?ssh-targets(?:\/([a-f0-9]{48}))?(?:\/(binding|test))?$/.exec(url.pathname);
@@ -32,7 +51,12 @@ export function sshTargetsApi(store: Store, user: Actor, method: string, url: UR
     requireProjectConfigWrite(user,project);
   }
   if (!project || method !== 'GET') superAdmin(user);
-  if (!id && method === 'GET') return {targets: targets(store,project)};
+  if (!id && method === 'GET') {
+    const list = targets(store,project);
+    if (project) return {targets: list};
+    const bindings = globalTargetBindings(store);
+    return {targets: list.map(row => ({...row, bound_projects: bindings.get(row.id) ?? []}))};
+  }
   if (action === 'test' && id && method === 'POST') {
     fields(input,[]);
     return testSshTarget(store,user.id,id,project);

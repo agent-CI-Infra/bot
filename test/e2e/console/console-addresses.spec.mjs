@@ -45,8 +45,8 @@ test('每个页面都有地址，旧看板与任务地址原地重定向；全�
     // Global settings: one category at a time, each with its own address; a reload keeps it.
     await tab('全局设置').click(); await expect(page).toHaveURL(/#\/settings\/work-computers$/);
     const nav = page.locator('.project-nav'), cards = () => page.locator('#settings-panel .side-card > :is(h2,h3):visible').allInnerTexts();
-    await expect(nav.getByRole('link')).toHaveText(['工作电脑', '计算节点', '模型', '管理助手设置', '夜间记忆整理', '助手电脑', 'Agent CLI 工具卷', '存储', '意见箱', '系统初始化', '公网接入', '外部执行', '机器人账号', '安装档案', '飞书连接', '项目管理', '用户']);
-    for (const [caption, key, shown] of [['工作电脑', 'work-computers', ['同时运行的任务', '项目工具卷默认配额', '默认资源', '当前运行版本']], ['计算节点', 'compute-nodes', ['计算节点总览', '接入远端 Linux Docker 节点', '已注册计算节点']], ['夜间记忆整理', 'memory-consolidation', ['夜间自动记忆整理', '全平台最近整理记录']], ['意见箱', 'feedback', ['角色意见箱']], ['飞书连接', 'feishu', ['飞书应用连接']], ['公网接入', 'access', ['公网 HTTPS 地址', 'Cloudflare Tunnel', 'GitHub 登录（只读）']],
+    await expect(nav.getByRole('link')).toHaveText(['工作电脑', '计算节点', 'SSH 远程主机', '模型', '管理助手设置', '夜间记忆整理', '助手电脑', 'Agent CLI 工具卷', '存储', '意见箱', '系统初始化', '公网接入', '外部执行', '机器人账号', '安装档案', '飞书连接', '项目管理', '用户']);
+    for (const [caption, key, shown] of [['工作电脑', 'work-computers', ['同时运行的任务', '项目工具卷默认配额', '默认资源', '当前运行版本']], ['计算节点', 'compute-nodes', ['计算节点总览', '接入远端 Linux Docker 节点', '已注册计算节点']], ['SSH 远程主机', 'ssh-targets', ['全局 SSH 远程主机池']], ['夜间记忆整理', 'memory-consolidation', ['夜间自动记忆整理', '全平台最近整理记录']], ['意见箱', 'feedback', ['角色意见箱']], ['飞书连接', 'feishu', ['飞书应用连接']], ['公网接入', 'access', ['公网 HTTPS 地址', 'Cloudflare Tunnel', 'GitHub 登录（只读）']],
       ['机器人账号', 'accounts', ['系统初始化使用的 GitHub App', '已登记的账号', 'GitHub 请求额度']], ['安装档案', 'installations', ['GitHub App 安装档案']],
       ['模型', 'models', ['默认共享模型', '部署共享模型']], ['存储', 'storage', ['整机磁盘', 'Launchpad 用量', '项目空间占比', '空间回收', '预编译镜像缓存']], ['用户', 'users', ['用户']]]) {
       await expect(nav.getByRole('link', { name: caption, exact: true })).toHaveAttribute('href', `#/settings/${key}`);
