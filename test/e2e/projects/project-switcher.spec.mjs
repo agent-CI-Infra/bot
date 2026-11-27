@@ -88,9 +88,20 @@ test('searchable scope list, long names, disabled state, keyboard and focus acro
 
 test('switching scope preserves each page type and keeps global and personal settings reachable', async ({ page }) => {
   const { h, password } = await fixture();
+  const accounts = Promise.withResolvers();
   try {
     await page.setViewportSize({ width: 1440, height: 1000 });
-    await login(page, h, password);
+    await page.route('**/api/accounts', async route => { await accounts.promise; await route.continue(); }, { times: 1 });
+    await login(page, h, password, '#/management');
+    // The signed-in shell is interactive while the initial account read is still pending.
+    // Hold a single press across the redraw that replaces the project count inside the button.
+    await trigger(page).hover();
+    await page.mouse.down();
+    accounts.resolve();
+    await expect(trigger(page)).toContainText('3 个项目');
+    await page.mouse.up();
+    await page.getByRole('option', { name: '项目：alpha/charlie', exact: true }).click();
+    await expect(page).toHaveURL(h.admin + '/#/projects/303/management');
     h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,phase) VALUES('switch-task','101','review.issue','failed','scope task','model')");
     for (const [from, expected] of [
       ['#/projects/101/inbox', '#/projects/202/inbox'], ['#/projects/101/new-task', '#/projects/202/new-task'],
@@ -115,7 +126,7 @@ test('switching scope preserves each page type and keeps global and personal set
       await expect(page).toHaveURL(h.admin + '/' + expected);
       await expect(trigger(page)).toHaveAttribute('data-project-id', '');
     }
-  } finally { await h.stop(); }
+  } finally { accounts.resolve(); await h.stop(); }
 });
 
 test('recent projects survive refresh, cap at five, filter revoked grants and isolate accounts', async ({ page }) => {
