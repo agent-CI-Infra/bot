@@ -204,16 +204,19 @@ test('the bot\'s own pull request and its own pushes are not reviewed again; a p
   assert.deepEqual(events(f.h).map(e => [e.state, JSON.parse(e.result).filtered]), [['filtered', 'bot_own_pull_request'], ['filtered', 'bot_own_pull_request'], ['filtered', 'bot_own_pull_request']]);
   assert.match(events(f.h)[0].reason, /独立检视、测试和 QA/);
   // A copied marker is not the bot's pull request: a person's, or one from another branch, is reviewed as usual (#1104 review).
-  assert.equal(queueWebhook(f.h.store, '101', 'pull_request', { action: 'opened', pull_request: { ...marked, number: 15, user: { id: 5, login: 'alice', type: 'User' } }, sender: alice }, 'copied-by-person'), 1);
-  assert.equal(queueWebhook(f.h.store, '101', 'pull_request', { action: 'opened', pull_request: { ...marked, number: 16, head: { ...marked.head, ref: 'feature/x' } }, sender: bot }, 'copied-other-branch'), 1);
+  // Because `marked.body` links `Fixes #6.` while `dev-13` is actively publishing Issue #6, each non-bot PR also emits an
+  // `issue.linked_pull_request` convergence event on Issue #6's Manager thread alongside its own `pull_request.opened` event.
+  assert.equal(queueWebhook(f.h.store, '101', 'pull_request', { action: 'opened', pull_request: { ...marked, number: 15, user: { id: 5, login: 'alice', type: 'User' } }, sender: alice }, 'copied-by-person'), 2);
+  assert.equal(queueWebhook(f.h.store, '101', 'pull_request', { action: 'opened', pull_request: { ...marked, number: 16, head: { ...marked.head, ref: 'feature/x' } }, sender: bot }, 'copied-other-branch'), 2);
   const otherApp = { id: 1234, login: 'other-app[bot]', type: 'Bot' };
-  assert.equal(queueWebhook(f.h.store, '101', 'pull_request', { action: 'opened', pull_request: { ...marked, number: 17, user: otherApp }, sender: otherApp }, 'copied-by-app'), 1);
+  assert.equal(queueWebhook(f.h.store, '101', 'pull_request', { action: 'opened', pull_request: { ...marked, number: 17, user: otherApp }, sender: otherApp }, 'copied-by-app'), 2);
   // Someone else's push to the bot's branch, and a person's own pull request, still reach the Manager.
   assert.equal(queueWebhook(f.h.store, '101', 'pull_request', { action: 'synchronize', pull_request: { ...pr, head: { sha: 'c'.repeat(40) } }, sender: alice }, 'person-push'), 1);
   assert.equal(queueWebhook(f.h.store, '101', 'pull_request', { action: 'opened', pull_request: { ...pr, number: 14, body: 'Mine.', user: { id: 5 } }, sender: alice }, 'person-open'), 1);
-  // The dispatcher claims at most four events at a time.
-  await f.run(); await f.run();
-  assert.equal(f.requests.length, 5);
+  // The dispatcher claims at most four events at a time and serializes events on `101:issue:6`.
+  for (let i = 0; i < 4; i++) await f.run();
+  assert.equal(f.requests.length, 8);
+  assert.equal(events(f.h).filter(e => e.type === 'issue.linked_pull_request' && e.thread_key === '101:issue:6').length, 3);
 });
 
 test('a member\'s comment on the bot\'s pull request reaches the Manager as a revision it can start, once per comment (#1104)', async t => {

@@ -38,7 +38,7 @@ const attentionStates = new Set([
   'waiting_publication', 'needs_replan', 'needs_help',
 ]);
 const doneStates = new Set(['succeeded', 'completed', 'pr_opened']);
-const autoStopCodes = new Set(['object_closed_or_draft', 'obsolete_closed', 'obsolete_superseded', 'obsolete_expired', 'user_cancel']);
+const autoStopCodes = new Set(['object_closed_or_draft', 'obsolete_closed', 'obsolete_superseded', 'obsolete_expired', 'user_cancel', 'manager_cancel', 'bot_pr_closed']);
 const ceilingNames: Record<Ceiling, string> = { read: '只读问答', comment: '可评论和打标签', develop: '可开发并开 PR' };
 const devStateNames: Record<string, string> = {
   queued: '排队中', running: '执行中', preparing: '准备环境', implementing: '修改代码',
@@ -146,7 +146,11 @@ function deriveIssueRow(
     status = 'skipped';
     reason = String(dev.error_code ?? '') === 'user_cancel'
       ? '开发已由人工取消'
-      : '开发已自动停止（Issue 已关闭或被新任务替代）';
+      : String(dev.error_code ?? '') === 'manager_cancel'
+        ? '开发已由项目 Manager 取消'
+        : String(dev.error_code ?? '') === 'bot_pr_closed'
+          ? '关联 bot PR 已关闭，开发已自动取消'
+          : '开发已自动停止（Issue 已关闭或被新任务替代）';
   } else if (review && doneStates.has(reviewStatus)) {
     const conclusion = review.conclusion ? String(review.conclusion) : '';
     const humanAction = review.human_action ? clip(review.human_action, 220) : '';

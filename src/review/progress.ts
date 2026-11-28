@@ -152,7 +152,7 @@ export function startProgress(store: Store, task: Row, issue: any, options?: { b
 // Stopped: the development is not working and waits for a person or has ended without a pull request. Ended: it is over.
 const stoppedStates = new Set(['failed', 'cancelled', 'superseded', 'waiting_permission', 'waiting_configuration', 'waiting_environment', 'waiting_publication', 'needs_replan', 'needs_help', 'paused']);
 const endedStates = new Set(['completed', 'succeeded', 'pr_opened', 'failed', 'cancelled', 'superseded']);
-const silentStopCodes = new Set(['object_closed_or_draft', 'obsolete_closed', 'obsolete_superseded', 'obsolete_expired', 'user_cancel']);
+const silentStopCodes = new Set(['object_closed_or_draft', 'obsolete_closed', 'obsolete_superseded', 'obsolete_expired', 'user_cancel', 'manager_cancel', 'bot_pr_closed']);
 function needsHumanWhenStopped(task: Row, now: ReturnType<typeof state>): boolean {
   if (!now.stopped) return false;
   if (now.status === 'superseded' || silentStopCodes.has(String(task.error_code ?? ''))) return false;
@@ -189,10 +189,15 @@ const words = {
 function controlStop(language: Language, status: string, code: string): { reason: string; action?: string } {
   const zh = language === 'zh';
   if (status === 'completed' || status === 'succeeded') return zh ? { reason: words.zh.endedNoPrReason } : { reason: words.en.endedNoPrReason };
-  if (status === 'paused') return zh ? { reason: '有人在控制台暂停了这次开发。', action: '在控制台的任务里点「重试」继续。' } : { reason: 'Someone paused this development in the console.', action: 'Press Retry on the task in the console to continue.' };
+  if (status === 'paused') {
+    if (code === 'manager_pause') return zh ? { reason: '项目 Manager 暂停了这次开发。', action: '在控制台查看任务或点击「重试」继续。' } : { reason: 'The project Manager paused this development.', action: 'Inspect the task in the console or press Retry to continue.' };
+    return zh ? { reason: '有人在控制台暂停了这次开发。', action: '在控制台的任务里点「重试」继续。' } : { reason: 'Someone paused this development in the console.', action: 'Press Retry on the task in the console to continue.' };
+  }
   if (code === 'development_not_approved') return zh ? { reason: '开发标签被移除，开发停下。', action: '重新加上开发标签，开发会接着做。' } : { reason: 'The development label was removed, so the development stopped.', action: 'Add the development label again to continue it.' };
   if (code === 'object_closed_or_draft') return zh ? { reason: 'Issue 已关闭，开发取消。' } : { reason: 'The Issue was closed, so the development was cancelled.' };
   if (code === 'user_cancel') return zh ? { reason: '有人在控制台取消了这次开发。' } : { reason: 'Someone cancelled this development in the console.' };
+  if (code === 'manager_cancel') return zh ? { reason: '项目 Manager 取消了这次开发（例如已有覆盖该问题的 PR 或不再需要继续）。' } : { reason: 'The project Manager cancelled this development (for example, a covering PR already exists or the work is no longer needed).' };
+  if (code === 'bot_pr_closed') return zh ? { reason: '关联的 bot PR 已关闭，开发任务已自动取消。' } : { reason: 'The linked bot pull request was closed, so this development task was cancelled.' };
   if (status === 'superseded' || code === 'obsolete_superseded') return zh ? { reason: '同一 Issue 上更新的开发接手了这项工作。' } : { reason: 'A newer development of this Issue took the work over.' };
   if (status === 'needs_help') return zh ? { reason: `开发遇到需要人帮忙的问题（${code}）。`, action: '在控制台查看这个任务的说明并处理。' } : { reason: `The development needs a person's help (${code}).`, action: 'Read the task in the console and resolve what it names.' };
   if (status === 'waiting_permission') return zh ? { reason: `bot 缺少继续开发所需的权限（${code}）。`, action: '检查 GitHub App 的安装和权限，然后在控制台点「重试」。' } : { reason: `The bot lacks a permission it needs to go on (${code}).`, action: 'Check the GitHub App installation and its permissions, then press Retry in the console.' };

@@ -55,3 +55,25 @@ test('issue-development prompt respects onboarding size and content invariants',
   assert.doesNotMatch(issueDevPrompt, /modify the working tree/i);
   assert.doesNotMatch(issueDevPrompt, /PPMA|ScienceDiscovery|agent-CI-Infra/);
 });
+
+test('human-first duplicate PR convergence and Event Dispatch Manager task tools are reflected in prompts', () => {
+  const flat = text => text.replace(/\s+/g, ' ');
+  const prReviewPrompt = readFileSync(new URL('../../../../docs/prompts/pr-review.md', import.meta.url), 'utf8');
+  for (const [label, content] of [
+    ['docs/prompts/manager-dispatch.md', managerDispatchPrompt],
+    ['pool.manager', rolePrompts.manager],
+  ]) {
+    const normalized = flat(content);
+    assert.match(normalized, /issue\.linked_pull_request/, `${label}: must document issue.linked_pull_request handling`);
+    assert.match(normalized, /manage_task/, `${label}: must document Event Dispatch Manager manage_task tool`);
+    assert.match(normalized, /PATCH \/pulls\/<bot_pr>/, `${label}: must instruct closing duplicate bot PR once verified no net-new changes remain`);
+  }
+  for (const [label, content] of [
+    ['docs/prompts/pr-review.md', prReviewPrompt],
+    ['pool.reviewer', rolePrompts.reviewer],
+  ]) {
+    const normalized = flat(content);
+    assert.match(normalized, /repository_active_work/, `${label}: must document repository_active_work awareness`);
+    assert.match(normalized, /overlapping_work/, `${label}: must document post_review.overlapping_work handoff`);
+  }
+});

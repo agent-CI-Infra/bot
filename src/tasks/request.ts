@@ -62,6 +62,7 @@ import { claimWorktree, heldBy, releaseWorktrees, taskWorktree, worktreeMoved } 
 import { pendingReviewUpdates } from '../review/sessions.js';
 import { carryRevisionRequests } from '../review/development.js';
 import { carryUnconsumedTaskUpdates, syncBotPullRequestState } from '../review/bot-pr-wake.js';
+import { hasRepositoryActiveWork, queryRepositoryActiveWork } from '../review/pr-overlap.js';
 
 const ciChanges =
   'If the task goal requires editing files under .github/workflows/, include those changes in the pull request as usual; github_write never merges workflow PRs (even under allow_all), so a human maintainer must review and merge them on GitHub (publishing workflow changes requires the GitHub App installation to grant Workflows: Read and write).';
@@ -615,6 +616,15 @@ export async function runRequest(
         targetContextFiles['reviews.json'] = JSON.stringify(reviews, null, 2);
         targetContextFiles['review_comments.json'] = JSON.stringify(reviewComments, null, 2);
         targetContextFiles['repository_labels.json'] = JSON.stringify(repositoryLabels(labels), null, 2);
+        if (!owned && !software()) {
+          const activeWork = queryRepositoryActiveWork(store, String(task.repository_id), targetSpec.number!);
+          if (hasRepositoryActiveWork(activeWork)) {
+            targetContextFiles['repository_active_work.json'] = JSON.stringify(activeWork, null, 2);
+            input.repository_active_work = activeWork;
+          } else {
+            delete input.repository_active_work;
+          }
+        }
         targetSummaryMeta = {
           type: 'pr',
           number: pr.number,
@@ -1233,6 +1243,7 @@ export async function runRequest(
             delivery_context: buildDeliveryContext(store, task),
             ...((generic ? effective().includes('pull_request') : software()) ? { ci_changes: ciChanges } : {}),
             ...(input.target_meta ? { target: input.target_meta } : targetSpec ? { target: targetSpec } : {}),
+            ...(input.repository_active_work ? { repository_active_work: input.repository_active_work } : {}),
             ...(input.behavior_changes?.length ? { behavior_changes: input.behavior_changes } : {}),
             ...(repoSkillIndex.length ? { skills: repoSkillIndex } : {}),
             ...(input.manager ? { manager: input.manager } : {}),
@@ -1332,6 +1343,7 @@ export async function runRequest(
                   review_delivery: reviewDelivery,
                   ...(reviewDelivery.conclusion ? { conclusion: reviewDelivery.conclusion } : {}),
                   ...(reviewDelivery.recommendation ? { recommendation: reviewDelivery.recommendation } : {}),
+                  ...(reviewDelivery.overlapping_work?.length ? { overlapping_work: reviewDelivery.overlapping_work } : {}),
                   findings: reviewDelivery.findings,
                 });
               }
