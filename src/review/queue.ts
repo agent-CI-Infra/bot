@@ -8,6 +8,7 @@ import { actionsDevelopmentAllowed } from '../actions/safety.js';
 import { findActiveObjectDevelopment, recordEvent, recordFiltered, type CreateOption, type EventInput } from '../dispatch/store.js';
 import { eventFilters, labelDispatched, type EventFilters } from '../dispatch/settings.js';
 import { botPrWakeEvents, syncBotPullRequestState, type BotWakePreflight } from './bot-pr-wake.js';
+import { hasRepositoryActiveWork, linkedIssuePullRequestEvents, queryRepositoryActiveWork } from './pr-overlap.js';
 
 export const sameLabel = (name: unknown, label: string) => String(name ?? '').toLowerCase() === label.toLowerCase();
 // A person's go-ahead for development: the development label is on the Issue. Whether the Issue should be developed
@@ -368,7 +369,12 @@ function webhookEvent(store: Store, repositoryId: string, event: string, payload
       // A push joins the review already working on the pull request, which moves to the new head (#770). A new review of
       // the head is offered only when no review can take it, so two reviews never cover the same push.
       const trigger = { event, action, reason: 'pushed', actor, before: sha(p.before), after: head };
-      return { ...base(type, `${type}:${number}:${head}`, 'pr', number, `${opened ? 'PR 打开' : 'PR 推送新提交'}：${clip(pr.title, 120)} #${number}`, { object: objectFacts(pr), ...(pushed ? { push: trigger } : {}) }),
+      const activeWork = opened ? queryRepositoryActiveWork(store, repositoryId, number) : null;
+      return { ...base(type, `${type}:${number}:${head}`, 'pr', number, `${opened ? 'PR 打开' : 'PR 推送新提交'}：${clip(pr.title, 120)} #${number}`, {
+        object: objectFacts(pr),
+        ...(pushed ? { push: trigger } : {}),
+        ...(activeWork && hasRepositoryActiveWork(activeWork) ? { repository_active_work: activeWork } : {}),
+      }),
         options: [{ id: 'review', work: 'review.pr', title: `检视 PR #${number}（${head.slice(0, 7)}）`, default: true, ...(pushed ? { unless_continued: true } : {}),
           spec: { type: 'object', kind: 'review.pr', number, head, input: payload, delivery } },
           replyOption('pr', number, head, { ...payload, pull_request: pr }, head, delivery)],
@@ -484,12 +490,22 @@ export function queueWebhook(
   const wakeInputs = botPrWakeEvents(store, repositoryId, event, payload, delivery, botWakePreflight);
   let wakeCreated = 0;
   for (const w of wakeInputs) wakeCreated += recordEvent(store, w);
+  const linkedInputs = linkedIssuePullRequestEvents(
+    store,
+    repositoryId,
+    event,
+    payload,
+    delivery,
+    pr => Boolean(botPullRequest(store, repositoryId, pr, ['opened', 'ready_for_review'].includes(String(action))) || rolePublicationEcho(store, repositoryId, pr?.body)),
+  );
+  let linkedCreated = 0;
+  for (const l of linkedInputs) linkedCreated += recordEvent(store, l);
   const input = webhookEvent(store, repositoryId, event, payload, delivery, currentPullRequest, eventFilters(store, repositoryId, policy));
   if (isStopped(input)) {
-    if (!wakeCreated) filtered(input.stopped.code, input.stopped.reason);
-    return wakeCreated;
+    if (!wakeCreated && !linkedCreated) filtered(input.stopped.code, input.stopped.reason);
+    return wakeCreated + linkedCreated;
   }
-  return wakeCreated + (input ? recordEvent(store, input) : 0);
+  return wakeCreated + linkedCreated + (input ? recordEvent(store, input) : 0);
 }
 
 /** The record of a filtered event: only what a person did on an Issue or pull request (#815). */

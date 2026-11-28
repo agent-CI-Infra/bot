@@ -34,7 +34,7 @@ const attentionStates = new Set([
   'waiting_publication', 'needs_replan', 'needs_help',
 ]);
 const doneStates = new Set(['succeeded', 'completed', 'pr_opened']);
-const autoStopCodes = new Set(['object_closed_or_draft', 'obsolete_closed', 'obsolete_superseded', 'obsolete_expired', 'user_cancel']);
+const autoStopCodes = new Set(['object_closed_or_draft', 'obsolete_closed', 'obsolete_superseded', 'obsolete_expired', 'user_cancel', 'manager_cancel', 'bot_pr_closed']);
 const devStateNames: Record<string, string> = {
   queued: '排队中', running: '执行中', preparing: '准备环境', implementing: '修改代码',
   validating: '运行验证', publishing: '准备推送更新', retry_wait: '等待自动重试',
@@ -162,7 +162,13 @@ function derivePrRow(
     reason = '草稿 PR，bot 默认不触发自动检视';
   } else if (dev && devStatus === 'cancelled' && autoStopCodes.has(String(dev.error_code ?? ''))) {
     status = 'pending';
-    reason = String(dev.error_code ?? '') === 'user_cancel' ? '跟进任务已由人工取消' : '跟进任务已自动停止';
+    reason = String(dev.error_code ?? '') === 'user_cancel'
+      ? '跟进任务已由人工取消'
+      : String(dev.error_code ?? '') === 'manager_cancel'
+        ? '跟进任务已由项目 Manager 取消'
+        : String(dev.error_code ?? '') === 'bot_pr_closed'
+          ? 'bot PR 已关闭，跟进任务已自动取消'
+          : '跟进任务已自动停止';
   } else if (intakeDispatch && String(intakeDispatch.state) === 'filtered') {
     status = 'pending';
     reason = clip(intakeDispatch.reason, 220) || '事件被项目过滤，未启动检视';

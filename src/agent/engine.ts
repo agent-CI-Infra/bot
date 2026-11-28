@@ -44,6 +44,7 @@ import { taskBasis } from '../dispatch/basis.js';
 import { actionableFinding, developmentGoal, developmentApproved, carryRevisionRequests,
   ownedPullRequest, developmentLabelForTask, developmentStopped, queueDevelopment, type DevelopmentOffer, type GoAhead } from '../review/development.js';
 import { BotPrWakeScanner, carryUnconsumedTaskUpdates } from '../review/bot-pr-wake.js';
+import { emitReviewOverlapEvents } from '../review/pr-overlap.js';
 import { actionsConfigurationError, actionsDevelopmentAllowed, actionsSourceIssue } from '../actions/safety.js';
 import { taskGithubWrite } from '../tasks/github-write.js';
 import { classificationLabels, hasLabelName, needsHumanIssueLabel, repositoryLabels, reviewNeedsHuman } from '../review/labels.js';
@@ -348,6 +349,12 @@ export class TaskEngine {
           rules:this.rules,
           onReviewPublished:async(gh,publishedTask,publishedInput,publishedResult)=>{
             const number=Number(publishedInput?.target?.number??publishedTask.object_number??0);
+            if(publishedInput?.target?.type==='pr'){
+              if(Array.isArray(publishedResult?.overlapping_work)&&publishedResult.overlapping_work.length){
+                emitReviewOverlapEvents(this.store,publishedTask,publishedInput,publishedResult.overlapping_work);
+              }
+              return;
+            }
             if(publishedInput?.target?.type!=='issue'||!Number.isSafeInteger(number)||number<1)return;
             const policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',publishedTask.repository_id);
             if(!covers(projectCeiling(this.store,publishedTask.repository_id,policy),'develop'))return;

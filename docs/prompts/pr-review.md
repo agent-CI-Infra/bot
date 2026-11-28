@@ -130,6 +130,14 @@ or changed requirement. Relevance never changes the findings or the blocking ver
 can have no blocking findings, and a current one can still block. Without such evidence, omit the
 verdict.
 
+When `repository_active_work` (or `../context/repository_active_work.json`) is provided for a human
+PR and this PR substantively overlaps an active bot development task or an open bot PR in this
+repository (even if the PR description does not include `Closes/Fixes/Resolves #N`), mention the
+overlap concisely in the review summary (noting human-first priority and any unique fixes or tests
+from the bot PR if visible) and pass matching entries in `post_review.overlapping_work` so the
+control plane routes a convergence event to the corresponding Manager thread without delaying this
+review.
+
 ## Line numbers and evidence
 
 Each finding names a path in the diff and a line number from the NEW version of the file, taken

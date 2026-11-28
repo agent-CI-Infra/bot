@@ -57,7 +57,7 @@ export interface EventFilters {
   'pull_request.opened': boolean; 'pull_request.synchronize': boolean; 'pull_request.updated': boolean; 'pull_request.mention': boolean; 'pull_request.labels': string[];
   'review.published.issue': boolean; 'review.published.pr': boolean; 'actions.run_failed': boolean;
 }
-export const dispatchEventTypes = ['issue.opened', 'issue.updated', 'issue.mention', 'issue.labeled', 'pull_request.opened', 'pull_request.synchronize', 'pull_request.updated',
+export const dispatchEventTypes = ['issue.opened', 'issue.updated', 'issue.mention', 'issue.labeled', 'issue.linked_pull_request', 'pull_request.opened', 'pull_request.synchronize', 'pull_request.updated',
   'pull_request.mention', 'pull_request.labeled', 'pull_request.checks_failed', 'pull_request.conflicted', 'pull_request.patrol', 'review.published', 'development.stopped', 'release.manual', 'actions.run_failed', 'schedule.due'];
 export const filterColumns: Record<string, string> = { 'issue.opened': 'review_issues', 'issue.updated': 'review_issue_updates', 'pull_request.opened': 'review_pull_requests',
   'pull_request.synchronize': 'review_pr_updates', 'pull_request.updated': 'review_pr_discussion', 'actions.run_failed': 'actions_failures_enabled' };

@@ -702,7 +702,98 @@ function syncBotPullRequestAfterWrite(store: Store, repository: Row, actor: Writ
       number: prNumber,
       ...(headSha ? {} : owned.sha ? { head: { ...(value.head ?? {}), ref: owned.branch, sha: owned.sha } } : {}),
     });
+    if (String(value.state || '').toLowerCase() === 'closed') {
+      cancelResidualTasksOnBotPrClosed(store, repositoryId, prNumber, owned, actor);
+    }
   }
+}
+
+const TERMINAL_STATUSES_SQL = "'succeeded','pr_opened','completed','cancelled','superseded'";
+
+function cancelResidualTasksOnBotPrClosed(
+  store: Store,
+  repositoryId: string,
+  prNumber: number,
+  owned: Row,
+  actor: WriteActor,
+): void {
+  const now = new Date().toISOString();
+  const skipTaskId = actor.kind === 'task' && actor.task_id ? String(actor.task_id) : null;
+  const skipEventId = actor.event_id ? String(actor.event_id) : null;
+  store.transaction(() => {
+    if (store.hasTable('review_objects')) {
+      store.run(
+        "UPDATE review_objects SET closed_at=COALESCE(closed_at,?) WHERE repository_id=? AND kind='review.pr' AND object_number=?",
+        now,
+        repositoryId,
+        prNumber,
+      );
+    }
+    if (store.hasTable('tasks')) {
+      const targetRows = store.all(
+        `SELECT id,status FROM tasks
+         WHERE repository_id=?
+           AND status NOT IN (${TERMINAL_STATUSES_SQL})
+           AND (
+             (object_number=? AND (kind LIKE '%.pr' OR (kind='task.request' AND json_extract(input,'$.target.type')='pr')))
+             OR (?<>'' AND id=?)
+           )`,
+        repositoryId,
+        prNumber,
+        String(owned.source_task_id ?? ''),
+        String(owned.source_task_id ?? ''),
+      );
+      for (const row of targetRows) {
+        const taskId = String(row.id);
+        if (skipTaskId && taskId === skipTaskId) continue;
+        if (store.hasTable('task_claims')) store.run('DELETE FROM task_claims WHERE task_id=?', taskId);
+        store.run(
+          "UPDATE tasks SET status='cancelled',claim_token=NULL,error_code='bot_pr_closed',retry_cycle_started_at=NULL,retry_error_code=NULL,retry_count=0,updated_at=? WHERE id=?",
+          now,
+          taskId,
+        );
+        if (store.hasTable('task_runs')) {
+          store.run("UPDATE task_runs SET status='interrupted',ended_at=?,stop_reason='bot_pr_closed' WHERE task_id=? AND status='running'", now, taskId);
+        }
+        if (store.hasTable('task_logs')) {
+          store.run(
+            'INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)',
+            randomId(),
+            taskId,
+            JSON.stringify({
+              type: 'cancelled',
+              error_code: 'bot_pr_closed',
+              pr_number: prNumber,
+              actor_kind: actor.kind,
+              ...(actor.event_id ? { event_id: actor.event_id } : {}),
+              detail: `bot PR #${prNumber} 已通过 github_write 关闭，关联残留任务已自动取消。`,
+            }),
+            now,
+          );
+        }
+      }
+    }
+    if (store.hasTable('dispatch_events')) {
+      if (skipEventId) {
+        store.run(
+          "UPDATE dispatch_events SET state='decided',decision='ignore',reason=?,lease=NULL,lease_until=NULL,decided_at=? WHERE repository_id=? AND object_type='pr' AND object_number=? AND state IN ('pending','failed') AND id<>?",
+          `bot PR #${prNumber} 已关闭，待分派事件已自动取消。`,
+          now,
+          repositoryId,
+          prNumber,
+          skipEventId,
+        );
+      } else {
+        store.run(
+          "UPDATE dispatch_events SET state='decided',decision='ignore',reason=?,lease=NULL,lease_until=NULL,decided_at=? WHERE repository_id=? AND object_type='pr' AND object_number=? AND state IN ('pending','failed')",
+          `bot PR #${prNumber} 已关闭，待分派事件已自动取消。`,
+          now,
+          repositoryId,
+          prNumber,
+        );
+      }
+    }
+  });
 }
 
 /** The writes a scope already made, for an agent that resumes it (a retried dispatch). */

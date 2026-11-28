@@ -16,6 +16,7 @@ import { classificationLabels, hasLabelName, needsHumanIssueLabel, repositoryLab
 import { behaviorPath, projectLabels } from '../rules/service.js';
 import { reviewLanguage } from '../github/text.js';
 import { covers, projectCeiling, ceilingMessage } from '../projects/ceiling.js';
+import type { ReviewOverlapReport } from '../review/pr-overlap.js';
 
 export function taskWriteAllowed(store: Store, task: Row, resource: WriteResource, operation?: WriteOperation): boolean {
   const scheduled = scheduledIssueOperationAllowed(task, resource, operation);
@@ -124,6 +125,22 @@ export const postReviewTool = fn(
     media: commentMediaSchema,
     recommendation: { type: 'string' },
     conclusion: { type: 'string', enum: [...reviewConclusions] },
+    overlapping_work: {
+      type: 'array',
+      maxItems: 10,
+      description: 'Optional. Only on human PR reviews when repository_active_work is provided and this PR substantively overlaps an active bot development task or open bot PR in this repository: report each overlapping item so the control plane routes a convergence event to its Manager thread.',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['reason'],
+        properties: {
+          issue_number: { type: 'integer', minimum: 1 },
+          bot_pr_number: { type: 'integer', minimum: 1 },
+          task_id: { type: 'string', maxLength: 120 },
+          reason: { type: 'string', maxLength: 500 },
+        },
+      },
+    },
     key: { type: 'string', maxLength: 120 },
   },
   [],
@@ -177,6 +194,7 @@ export interface NormalizedReviewDelivery {
   media?: StoredMedia[];
   recommendation?: string;
   conclusion?: string;
+  overlapping_work?: ReviewOverlapReport[];
 }
 
 const allowedReviewKeys = new Set([
@@ -192,6 +210,7 @@ const allowedReviewKeys = new Set([
   'media',
   'recommendation',
   'conclusion',
+  'overlapping_work',
   'key',
 ]);
 
@@ -325,6 +344,44 @@ export function validateReviewDelivery(
     }
   }
 
+  let overlappingWork: ReviewOverlapReport[] = [];
+  if (args.overlapping_work !== undefined) {
+    if (!Array.isArray(args.overlapping_work) || args.overlapping_work.length > 10) {
+      return { ok: false, error: { error: 'invalid_arguments', detail: 'overlapping_work must be an array of at most 10 overlap entries. Nothing was sent.' } };
+    }
+    const allowedOverlapKeys = new Set(['issue_number', 'bot_pr_number', 'task_id', 'reason']);
+    for (const rawItem of args.overlapping_work) {
+      if (!rawItem || typeof rawItem !== 'object' || Array.isArray(rawItem) || Object.keys(rawItem).some(k => !allowedOverlapKeys.has(k))) {
+        return { ok: false, error: { error: 'invalid_arguments', detail: 'Each overlapping_work entry may only include issue_number, bot_pr_number, task_id, and reason. Nothing was sent.' } };
+      }
+      const itemReason = typeof rawItem.reason === 'string' ? rawItem.reason.trim() : '';
+      if (!itemReason || itemReason.length > 500) {
+        return { ok: false, error: { error: 'invalid_arguments', detail: 'Each overlapping_work entry requires a non-empty reason (<= 500 chars). Nothing was sent.' } };
+      }
+      const issueNum = rawItem.issue_number !== undefined ? Number(rawItem.issue_number) : undefined;
+      const botPrNum = rawItem.bot_pr_number !== undefined ? Number(rawItem.bot_pr_number) : undefined;
+      const taskId = rawItem.task_id !== undefined ? (typeof rawItem.task_id === 'string' ? rawItem.task_id.trim() : '') : undefined;
+      if (issueNum !== undefined && (!Number.isSafeInteger(issueNum) || issueNum < 1)) {
+        return { ok: false, error: { error: 'invalid_arguments', detail: 'overlapping_work.issue_number must be a positive integer. Nothing was sent.' } };
+      }
+      if (botPrNum !== undefined && (!Number.isSafeInteger(botPrNum) || botPrNum < 1)) {
+        return { ok: false, error: { error: 'invalid_arguments', detail: 'overlapping_work.bot_pr_number must be a positive integer. Nothing was sent.' } };
+      }
+      if (taskId !== undefined && (!taskId || taskId.length > 120)) {
+        return { ok: false, error: { error: 'invalid_arguments', detail: 'overlapping_work.task_id must be a non-empty string (<= 120 chars). Nothing was sent.' } };
+      }
+      if (issueNum === undefined && botPrNum === undefined && taskId === undefined) {
+        return { ok: false, error: { error: 'invalid_arguments', detail: 'Each overlapping_work entry must specify at least one of issue_number, bot_pr_number, or task_id. Nothing was sent.' } };
+      }
+      overlappingWork.push({
+        ...(issueNum !== undefined ? { issue_number: issueNum } : {}),
+        ...(botPrNum !== undefined ? { bot_pr_number: botPrNum } : {}),
+        ...(taskId !== undefined ? { task_id: taskId } : {}),
+        reason: itemReason,
+      });
+    }
+  }
+
   return {
     ok: true,
     value: {
@@ -337,6 +394,7 @@ export function validateReviewDelivery(
       ...(mediaPaths.length ? { media_paths: mediaPaths } : {}),
       ...(typeof args.recommendation === 'string' && args.recommendation.trim() ? { recommendation: args.recommendation.trim() } : {}),
       ...(typeof args.conclusion === 'string' && args.conclusion.trim() ? { conclusion: args.conclusion.trim() } : {}),
+      ...(overlappingWork.length ? { overlapping_work: overlappingWork } : {}),
     },
   };
 }
@@ -469,6 +527,7 @@ export async function publishReviewDelivery(
       summary_url: summaryCommentOut?.html_url ?? null,
       resolved_threads: summaryCommentOut?.resolved_threads ?? [],
       labels_applied: appliedLabels,
+      ...(normalized.overlapping_work?.length ? { overlapping_work: normalized.overlapping_work } : {}),
       outputs,
     };
   } finally {

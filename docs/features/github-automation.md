@@ -52,6 +52,10 @@
   3. **未收尾的检视与停滞任务**：当前 `head_sha` 存在未解决的 `CHANGES_REQUESTED` 评审，或关联任务长期滞留在等待重试/环境/权限状态；
   4. **纯绿灯零打扰与严格不外发**：对无冲突、检查全绿、无未解意见的待人工合入 PR，巡检仅更新本地时间戳，不调用模型、不发事件、不发评论；全部巡检记录仅停留在控制面内部（分派记录与对象 Manager 线程），**严禁**触发飞书群聊、私聊或任何外部通知订阅，也不绕过 `auto_merge_policy` 自动合入或私自关闭 PR（若确认原问题消失或目标代码已退役，仅在 PR 上一次性说明背景与建议关闭理由）。
 - **不改他人分支**：对于别人提交的 PR，bot 只检视和评论，不向作者分支推送提交或强推。
+- **人类 PR 优先与重复 bot PR 自动收敛**：
+  - 当仓库内当前既无活跃开发任务也无开放 bot PR 时，新打开的人类 PR 直接沿用常设规则检视，零额外 Manager 调用。
+  - 当人类打开新 PR（或从草稿转为 Ready、或编辑正文补充 `Closes/Fixes/Resolves #N`）且对应 Issue 存在 bot 在研开发任务或已开放 bot PR 时，新 PR 检视照常立即执行，同时控制面将 `issue.linked_pull_request` 事件同步到原 Issue 的 Manager 线程；即使人类 PR 未写 `Closes #N`，PR 检视阶段也会看到仓库当前活跃开发任务与开放 bot PR 的精简索引，发现实质重叠后在总结中说明并交由控制面转交对应 Manager 线程。
+  - **默认人类优先**：若 bot 正在开发该 Issue，Manager 可通过任务调整工具（`list_project_tasks` / `read_project_task` / `manage_task`）取消或暂停在研任务，或下发补充指令让其核实无新增价值后干净停止；若 bot 已开出 PR，Manager 对比人类 PR 与 bot PR 差异（可直接 `github_read` 对比或派只读 `reviewer` 核对），确认 bot PR 不含人类 PR 缺失的有效修复或测试后，主动评论说明对应人类 PR 且无额外改动并关闭自有 bot PR（同步清理残留任务）；若 bot PR 包含人类 PR 遗漏的有效修复或测试，则在人类 PR 留言供作者参考。
 
 ## 4. Actions 失败排查与提报
 

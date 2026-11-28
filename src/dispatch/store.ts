@@ -95,13 +95,17 @@ export interface DispatchThread {
 export function rootIssueOfBotPr(store: Store, repositoryId: string, prNumber: number): number | null {
   if (!store.hasTable('bot_pull_requests') || !Number.isSafeInteger(prNumber) || prNumber < 1) return null;
   const root = store.get(
-    `SELECT t.object_number FROM bot_pull_requests p JOIN tasks t ON t.id=p.source_task_id
-     WHERE p.repository_id=? AND p.number=? AND t.object_number IS NOT NULL
-     AND (t.kind='development.issue' OR json_extract(t.input,'$.target.type')='issue') LIMIT 1`,
+    `SELECT COALESCE(t.object_number, json_extract(t.input,'$.target.number')) AS issue_number
+     FROM bot_pull_requests p JOIN tasks t ON t.id=p.source_task_id
+     WHERE p.repository_id=? AND p.number=?
+       AND COALESCE(t.object_number, json_extract(t.input,'$.target.number')) IS NOT NULL
+       AND (t.kind='development.issue' OR json_extract(t.input,'$.target.type')='issue')
+     LIMIT 1`,
     repositoryId,
     prNumber,
   );
-  return root?.object_number ? Number(root.object_number) : null;
+  const num = root?.issue_number != null ? Number(root.issue_number) : NaN;
+  return Number.isSafeInteger(num) && num >= 1 ? num : null;
 }
 
 /** Resolves bot PR numbers opened from an Issue development task on `issueNumber`. */
@@ -109,8 +113,10 @@ export function botPullRequestsOfIssue(store: Store, repositoryId: string, issue
   if (!store.hasTable('bot_pull_requests') || !Number.isSafeInteger(issueNumber) || issueNumber < 1) return [];
   return store.all(
     `SELECT p.number FROM bot_pull_requests p JOIN tasks t ON t.id=p.source_task_id
-     WHERE p.repository_id=? AND t.object_number=?
-     AND (t.kind='development.issue' OR json_extract(t.input,'$.target.type')='issue') ORDER BY p.number DESC`,
+     WHERE p.repository_id=?
+       AND COALESCE(t.object_number, json_extract(t.input,'$.target.number'))=?
+       AND (t.kind='development.issue' OR json_extract(t.input,'$.target.type')='issue')
+     ORDER BY p.number DESC`,
     repositoryId,
     issueNumber,
   ).map(r => Number(r.number));
