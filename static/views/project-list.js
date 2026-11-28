@@ -291,10 +291,11 @@ const permissionNames = { contents: 'Contents', issues: 'Issues', pull_requests:
 const eventPermissionNotes = {
   workflow_run: '这是事件订阅，不是 Workflows 权限：GitHub 只要求 App 至少有 Actions「Read-only」，不需要 Workflows；App 没有 Actions 权限时这个选项不会出现，先补 Actions。',
   check_run: 'GitHub 要求 App 至少有 Checks「Read-only」权限。',
+  check_suite: 'GitHub 要求 App 至少有 Checks「Read-only」权限。',
   status: 'GitHub 要求 App 至少有 Commit statuses「Read-only」权限。',
 };
 // GitHub's names for the webhook events under Permissions & events → Subscribe to events.
-const eventNames = { issues: 'Issues', pull_request: 'Pull request', issue_comment: 'Issue comment', pull_request_review: 'Pull request review', pull_request_review_comment: 'Pull request review comment', check_run: 'Check run', status: 'Status', workflow_run: 'Workflow run' };
+const eventNames = { issues: 'Issues', pull_request: 'Pull request', issue_comment: 'Issue comment', pull_request_review: 'Pull request review', pull_request_review_comment: 'Pull request review comment', check_run: 'Check run', check_suite: 'Check suite', status: 'Status', workflow_run: 'Workflow run' };
 const accessNames = { read: 'Read-only', write: 'Read and write', admin: 'Admin' }, roleNames = { read: 'Read', triage: 'Triage', write: 'Write' };
 // Access gaps (access_gaps) name the features they stop; src/app/access.ts holds what each feature needs.
 // The values are dictionary keys so the visible chip and its title read in the console's language (#527).
@@ -312,7 +313,8 @@ const eventImpact = {
   issues: '新 Issue 不检视，编辑后不重新检视，加开发标签不会开始开发，关闭后相关任务不会自动取消',
   issue_comment: 'Issue 和 PR 下的评论不会触发检视跟进', pull_request: 'PR 打开、转为可检视、推送新提交或编辑后不检视，关闭后相关任务不会自动取消',
   pull_request_review: '提交 PR 检视意见后不会触发跟进', pull_request_review_comment: 'PR 行内评论和回复不会触发跟进',
-  check_run: '控制台任务列表与详情收不到实时的 GitHub Actions 作业检查推送',
+  check_run: '控制台任务列表与详情收不到实时的 GitHub Actions 作业检查推送，PR 作业级检查失败也无法实时唤醒',
+  check_suite: '控制台与 PR 检查失败分析收不到套组级检查推送（如 startup_failure 或无作业检查的失败）',
   status: '控制台任务列表与详情收不到实时的提交状态检查推送',
   workflow_run: '默认分支和版本标签上的失败运行不会生成排查事件',
 };

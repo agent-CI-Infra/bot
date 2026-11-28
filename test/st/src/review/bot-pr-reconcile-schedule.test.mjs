@@ -61,6 +61,7 @@ async function fixture(t, { count = 30, patrolIntervalMs = 0 } = {}) {
     if ((m = /^\/commits\/([a-f0-9]{40})\/check-runs$/.exec(sub))) {
       return send({ check_runs: (state.checkSuites.get(m[1]) ?? []).map(s => ({ id: s.id + 1, name: 'ci', status: s.status, conclusion: s.conclusion, check_suite: { id: s.id } })) });
     }
+    if (sub === '/actions/runs') return send({ workflow_runs: [] });
     if ((m = /^\/git\/ref\/heads\/(.+)$/.exec(sub))) return state.refs[m[1]] ? send({ ref: `refs/heads/${m[1]}`, object: { sha: state.refs[m[1]] } }) : send({ message: 'Not Found' }, 404);
     return send({ message: `Unhandled ${req.method} ${path}` }, 404);
   });
@@ -242,9 +243,10 @@ test('request count per hour for 41 unchanged open bot PRs', async t => {
     hours.push(counts);
   }
   t.diagnostic(`per hour (installation REST core / GraphQL queries / REST PR reads): ${hours.map(c => `${c.rest}/${c.graphql}/${c.pullReads}`).join(' ')}`);
-  // Hour 1: 41 first reads with their patrol (PR, check runs, check suites and reviews each), in the first of four passes
-  // (at minutes 0, 5, 15 and 35) that each also take a repository check and a token revocation.
-  assert.ok(hours[0].rest <= 41 * 4 + 4 * 2 && hours[0].graphql === 4, JSON.stringify(hours[0]));
+  // Hour 1: 41 first reads with their patrol (PR, check runs, check suites and reviews each) plus 1 lazy repo-wide
+  // `GET /actions/runs?event=merge_group` read (#1427), in the first of four passes (at minutes 0, 5, 15 and 35) that
+  // each also take a repository check and a token revocation.
+  assert.ok(hours[0].rest <= 41 * 4 + 4 * 2 + 1 && hours[0].graphql === 4, JSON.stringify(hours[0]));
   // Hours 3 to 6: at most one or two shared passes an hour, each a token, a repository check and one query.
   for (const c of hours.slice(2, 6)) assert.ok(c.rest <= 4 && c.graphql <= 2 && c.pullReads === 0, JSON.stringify(c));
   // Hour 7: the patrol is due once for every PR (6 hours after the first), the only REST PR reads after hour 1.

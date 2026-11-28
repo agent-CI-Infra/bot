@@ -5,6 +5,7 @@ import { sha as digest } from '../agent/common.js';
 import { publicContent, registeredRedactor } from '../core/redaction.js';
 import { covers, projectCeiling } from '../projects/ceiling.js';
 import { botPullRequestsOfIssue, recordEvent, rootIssueOfBotPr, threadKey, type CreateOption, type Decision, type EventInput } from '../dispatch/store.js';
+import { eventFilters } from '../dispatch/settings.js';
 import { roleConfiguration } from '../roles/definition.js';
 import { taskPermissions } from '../tasks/configuration.js';
 import {
@@ -23,6 +24,52 @@ const ZERO_SHA = /^0{40}$/;
 const BOT_MARKER = /<!-- dept-bot[:-]/;
 const FAILED_CONCLUSIONS = new Set(['failure', 'timed_out', 'startup_failure']);
 const ACTIONS_RUN_URL = /\/actions\/runs\/(\d+)(?:\/|$|\?)/;
+const MERGE_QUEUE_BRANCH = /^gh-readonly-queue\/(.+)\/pr-(\d+)-([0-9a-f]{7,40})$/i;
+const DEQUEUED_IGNORED_REASONS = new Set([
+  'MERGE',
+  'MERGED',
+  'ALREADY_MERGED',
+  'MANUAL',
+  'PR_CLOSED',
+  'CLOSED',
+  'BRANCH_DELETED',
+  'PR_CONVERTED_TO_DRAFT',
+  'DRAFT',
+  'MERGE_CONFLICT',
+  'CONFLICT',
+]);
+const RECENT_DEQUEUED_DEDUP_MS = 10 * 60_000;
+const NON_BOT_RERUN_COOLDOWN_MS = 10 * 60_000;
+
+export interface ParsedMergeQueueBranch {
+  branch: string;
+  baseRef: string;
+  prNumber: number;
+  baseShaPrefix: string;
+}
+
+/** Parses GitHub Merge Queue synthetic branches (`gh-readonly-queue/<base>/pr-<N>-<sha>`, including slashed base refs). */
+export function parseMergeQueueBranch(headBranch: unknown): ParsedMergeQueueBranch | null {
+  if (typeof headBranch !== 'string') return null;
+  const trimmed = headBranch.trim();
+  const m = MERGE_QUEUE_BRANCH.exec(trimmed);
+  if (!m) return null;
+  const baseRef = m[1]!;
+  const prNumber = Number(m[2]);
+  const baseShaPrefix = m[3]!.toLowerCase();
+  if (!baseRef || baseRef.startsWith('/') || baseRef.endsWith('/') || baseRef.includes('//') || /\s/.test(baseRef)) return null;
+  if (!Number.isSafeInteger(prNumber) || prNumber < 1) return null;
+  return { branch: trimmed, baseRef, prNumber, baseShaPrefix };
+}
+
+/** Classifies `pull_request.dequeued` reasons caused by CI/check failure or timeout (excluding merge, manual, closed, conflict). */
+export function isDequeuedCheckFailureReason(reason: unknown): boolean {
+  const norm = String(reason ?? '').trim().toUpperCase();
+  if (!norm || DEQUEUED_IGNORED_REASONS.has(norm)) return false;
+  if (/CONFLICT|DIRTY|MANUAL|CLOSED|DRAFT|DELETED/.test(norm)) return false;
+  if (norm === 'MERGE' || norm === 'MERGED' || norm === 'ALREADY_MERGED') return false;
+  return /CI_FAILURE|CHECK|STATUS_CHECK|TIMEOUT|TIMED_OUT|BUILD_FAIL/i.test(norm);
+}
 
 export const DEFAULT_BOT_PR_PATROL_INTERVAL_MS = 6 * 60 * 60 * 1000;
 export const DEFAULT_BOT_PR_PATROL_COOLDOWN_MS = 24 * 60 * 60 * 1000;
@@ -70,7 +117,21 @@ export interface BotPatrolConfig {
 let recheckDelaysMs = [1500, 4000];
 let patrolTestOverrides: Partial<BotPatrolConfig> | null = null;
 const pendingRechecks = new Set<string>();
-const pendingSuiteFlushes = new Map<string, { repositoryId: string; headSha: string; checkSuiteId: number | null; workflowRunId: number | null; attempt: number }>();
+const pendingSuiteFlushes = new Map<
+  string,
+  {
+    repositoryId: string;
+    headSha: string;
+    checkSuiteId: number | null;
+    workflowRunId: number | null;
+    attempt: number;
+    prNumbers: number[];
+    mergeGroup: boolean;
+    mergeGroupBranch: string | null;
+    mergeGroupBaseRef: string | null;
+    headRepositoryId: string | null;
+  }
+>();
 
 /** Allows integration tests to shorten background `mergeable === null` and suite-completion poll delays deterministically. */
 export function setBotWakeRecheckDelaysForTest(delays: number[] | null) {
@@ -170,6 +231,7 @@ export function botPrWakeStorage(store: Store) {
     ['reconcile_interval_ms', 'INTEGER'],
     ['reconcile_fingerprint', 'TEXT'],
     ['reconcile_env', 'TEXT'],
+    ['head_updated_at', 'TEXT'],
   ] as const) {
     if (!cols.has(name)) store.db.exec(`ALTER TABLE bot_pr_states ADD COLUMN ${name} ${type}`);
   }
@@ -203,7 +265,11 @@ export function markBotPrsForReconcile(store: Store, repositoryId: string, event
     if (sha) shas.add(sha);
     addLinked(check?.pull_requests);
     const head = branch(check?.head_branch ?? check?.check_suite?.head_branch);
-    if (head) heads.add(head);
+    if (head) {
+      heads.add(head);
+      const mq = parseMergeQueueBranch(head);
+      if (mq) addNumber(mq.prNumber);
+    }
   } else if (event === 'status') {
     const sha = normSha(payload.sha);
     if (sha) shas.add(sha);
@@ -510,12 +576,17 @@ export function syncBotPullRequestState(store: Store, repositoryId: string, pr: 
     || Boolean(prev?.conflict_suppressed_head_sha && headSha && String(prev.conflict_suppressed_head_sha).toLowerCase() !== headSha);
   const cleanupPlan = computeBotPrBranchCleanupPlan(prev, state, pr, nowIso, nowMs, cleanupCfg.retentionMs);
 
+  const headChanged = Boolean(prev?.head_sha && headSha && normSha(prev.head_sha) !== headSha);
+  const nextHeadUpdatedAt = headChanged
+    ? (typeof pr?.updated_at === 'string' && Number.isFinite(Date.parse(pr.updated_at)) ? pr.updated_at : nowIso)
+    : (prev?.head_updated_at ? String(prev.head_updated_at) : null);
+
   store.run(
     `INSERT INTO bot_pr_states(
-       repository_id,number,state,draft,base_ref,base_sha,head_sha,mergeable,mergeable_state,title,html_url,updated_at,
+       repository_id,number,state,draft,base_ref,base_sha,head_sha,mergeable,mergeable_state,title,html_url,updated_at,head_updated_at,
        merged,closed_at,branch_delete_due_at,branch_cleanup_status,branch_cleanup_reason,branch_cleanup_at,branch_cleanup_attempts
      )
-     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
      ON CONFLICT(repository_id,number) DO UPDATE SET
        state=excluded.state,
        draft=excluded.draft,
@@ -527,6 +598,7 @@ export function syncBotPullRequestState(store: Store, repositoryId: string, pr: 
        title=coalesce(excluded.title,bot_pr_states.title),
        html_url=coalesce(excluded.html_url,bot_pr_states.html_url),
        updated_at=excluded.updated_at,
+       head_updated_at=coalesce(excluded.head_updated_at,bot_pr_states.head_updated_at),
        merged=excluded.merged,
        closed_at=excluded.closed_at,
        branch_delete_due_at=excluded.branch_delete_due_at,
@@ -550,6 +622,7 @@ export function syncBotPullRequestState(store: Store, repositoryId: string, pr: 
     title,
     htmlUrl,
     nowIso,
+    nextHeadUpdatedAt,
     cleanupPlan.merged,
     cleanupPlan.closedAt,
     cleanupPlan.branchDeleteDueAt,
@@ -585,9 +658,52 @@ interface VerifiedBotPr {
   headRef: string;
   baseRef: string | null;
   baseSha: string | null;
+  createdAt: string | null;
+  headUpdatedAt: string | null;
   title: string;
   htmlUrl: string | null;
   prObject: Record<string, any>;
+}
+
+interface VerifiedPrTarget {
+  isBotPr: boolean;
+  owned: Row | null;
+  savedState: Row | undefined;
+  number: number;
+  headSha: string;
+  headRef: string;
+  headRepoId: string | null;
+  baseRef: string | null;
+  baseSha: string | null;
+  createdAt: string | null;
+  headUpdatedAt: string | null;
+  title: string;
+  htmlUrl: string | null;
+  prObject: Record<string, any>;
+}
+
+function botPrToTarget(repositoryId: string, verified: VerifiedBotPr): VerifiedPrTarget {
+  return {
+    isBotPr: true,
+    owned: verified.owned,
+    savedState: verified.savedState,
+    number: verified.number,
+    headSha: verified.headSha,
+    headRef: verified.headRef,
+    headRepoId: String(verified.owned.head_repository_id || repositoryId),
+    baseRef: verified.baseRef,
+    baseSha: verified.baseSha,
+    createdAt: verified.createdAt,
+    headUpdatedAt: verified.headUpdatedAt,
+    title: verified.title,
+    htmlUrl: verified.htmlUrl,
+    prObject: verified.prObject,
+  };
+}
+
+function isOwnedBotPrRecord(store: Store, repositoryId: string, prNumber: number): boolean {
+  if (!Number.isSafeInteger(prNumber) || prNumber < 1 || !store.hasTable('bot_pull_requests')) return false;
+  return Boolean(store.get('SELECT 1 FROM bot_pull_requests WHERE repository_id=? AND number=?', repositoryId, prNumber));
 }
 
 function verifiedOwnedOpenBotPr(store: Store, repositoryId: string, prNumber: number, pr?: any): VerifiedBotPr | null {
@@ -597,6 +713,7 @@ function verifiedOwnedOpenBotPr(store: Store, repositoryId: string, prNumber: nu
   if (pr && typeof pr === 'object') {
     if (pr.user?.id != null && String(pr.user.id) !== String(owned.author_id)) return null;
     if (pr.head?.repo?.id != null && String(pr.head.repo.id) !== String(owned.head_repository_id)) return null;
+    if (pr.base?.repo?.id != null && String(pr.base.repo.id) !== String(repositoryId)) return null;
     if (typeof pr.head?.ref === 'string' && pr.head.ref && pr.head.ref !== String(owned.branch)) return null;
     if (pr.id != null && /^\d+$/.test(String(owned.pr_id)) && String(pr.id) !== String(owned.pr_id)) return null;
   }
@@ -634,6 +751,10 @@ function verifiedOwnedOpenBotPr(store: Store, repositoryId: string, prNumber: nu
   const title = clip(pr?.title ?? savedState?.title ?? boardRow?.title ?? `Bot PR #${prNumber}`, 300);
   const htmlUrl = safeHttpUrl(pr?.html_url ?? savedState?.html_url) ?? (repoFullName ? `https://github.com/${repoFullName}/pull/${prNumber}` : null);
   const actorLogin = store.get('SELECT a.login FROM repositories r JOIN github_actors a ON a.account_id=r.account_id WHERE r.id=?', repositoryId)?.login;
+  const createdAt = typeof pr?.created_at === 'string' && Number.isFinite(Date.parse(pr.created_at)) ? pr.created_at : null;
+  const headUpdatedAt = savedState?.head_updated_at && Number.isFinite(Date.parse(String(savedState.head_updated_at)))
+    ? String(savedState.head_updated_at)
+    : null;
 
   const prObject: Record<string, any> = {
     ...(pr && typeof pr === 'object' ? pr : {}),
@@ -655,16 +776,73 @@ function verifiedOwnedOpenBotPr(store: Store, repositoryId: string, prNumber: nu
     headRef: String(owned.branch),
     baseRef,
     baseSha,
+    createdAt,
+    headUpdatedAt,
     title,
     htmlUrl,
     prObject,
   };
 }
 
+/** Verifies an open, non-draft pull request opened by someone other than this bot against live GitHub PR metadata. */
+function verifiedOpenNonBotPr(store: Store, repositoryId: string, prNumber: number, pr?: any): VerifiedPrTarget | null {
+  if (!Number.isSafeInteger(prNumber) || prNumber < 1) return null;
+  if (isOwnedBotPrRecord(store, repositoryId, prNumber)) return null;
+  if (!pr || typeof pr !== 'object') return null;
+  if (Number(pr.number) !== prNumber) return null;
+  if (pr.state !== 'open' || pr.draft === true) return null;
+  if (pr.base?.repo?.id != null && String(pr.base.repo.id) !== String(repositoryId)) return null;
+  const headSha = normSha(pr.head?.sha);
+  if (!headSha) return null;
+  const repoFullName = String(store.get('SELECT full_name FROM repositories WHERE id=?', repositoryId)?.full_name || '');
+  const baseRef = typeof pr.base?.ref === 'string' && pr.base.ref ? pr.base.ref : null;
+  const baseSha = normSha(pr.base?.sha);
+  const headRef = typeof pr.head?.ref === 'string' && pr.head.ref ? pr.head.ref : '';
+  const headRepoId = pr.head?.repo?.id != null ? String(pr.head.repo.id) : null;
+  const title = clip(pr.title ?? `PR #${prNumber}`, 300);
+  const htmlUrl = safeHttpUrl(pr.html_url) ?? (repoFullName ? `https://github.com/${repoFullName}/pull/${prNumber}` : null);
+  const createdAt = typeof pr.created_at === 'string' && Number.isFinite(Date.parse(pr.created_at)) ? pr.created_at : null;
+  return {
+    isBotPr: false,
+    owned: null,
+    savedState: undefined,
+    number: prNumber,
+    headSha,
+    headRef,
+    headRepoId,
+    baseRef,
+    baseSha,
+    createdAt,
+    headUpdatedAt: null,
+    title,
+    htmlUrl,
+    prObject: {
+      ...pr,
+      number: prNumber,
+      title,
+      state: 'open',
+      draft: false,
+      head: { ...(pr.head ?? {}), ref: headRef, sha: headSha },
+      base: { ...(pr.base ?? {}), ...(baseRef ? { ref: baseRef } : {}), ...(baseSha ? { sha: baseSha } : {}) },
+      html_url: htmlUrl,
+    },
+  };
+}
+
 export interface ParsedFailedCheck {
-  source: 'workflow_run' | 'check_suite' | 'check_run';
+  source: 'workflow_run' | 'check_suite' | 'check_run' | 'pull_request_dequeued';
   headSha: string;
   headBranch: string | null;
+  headRepositoryId: string | null;
+  workflowEvent?: string | null;
+  mergeGroup: boolean;
+  mergeGroupSha: string | null;
+  mergeGroupBranch: string | null;
+  mergeGroupBaseRef: string | null;
+  mergeGroupPrNumber: number | null;
+  dequeuedReason?: string | null;
+  createdAt?: string | null;
+  completedAt?: string | null;
   runOrSuiteId: string;
   canonicalGroup: string;
   workflowRunId: number | null;
@@ -690,43 +868,63 @@ function canonicalRunOrSuiteId(workflowRunId: number | null, checkSuiteId: numbe
   return String(workflowRunId ?? checkSuiteId ?? checkRunId ?? '');
 }
 
+function parseWorkflowRunObject(repoFullName: string, wf: any, dequeuedReason?: string): ParsedFailedCheck | null {
+  if (!wf || typeof wf !== 'object') return null;
+  const conclusion = String(wf.conclusion || '').toLowerCase();
+  if (!FAILED_CONCLUSIONS.has(conclusion)) return null;
+  const headSha = normSha(wf.head_sha);
+  const id = Number(wf.id);
+  if (!headSha || !Number.isSafeInteger(id) || id < 1) return null;
+  const attempt = Number.isSafeInteger(wf.run_attempt) && wf.run_attempt >= 1 ? Number(wf.run_attempt) : 1;
+  const workflowName = String(wf.name || wf.workflow?.name || 'GitHub Actions').trim() || 'GitHub Actions';
+  const displayTitle = typeof wf.display_title === 'string' && wf.display_title.trim() ? wf.display_title.trim() : '';
+  const checkSuiteId = Number.isSafeInteger(wf.check_suite_id) && wf.check_suite_id >= 1 ? Number(wf.check_suite_id) : null;
+  const url = safeHttpUrl(wf.html_url) ?? (repoFullName ? `https://github.com/${repoFullName}/actions/runs/${id}` : null);
+  const headBranch = typeof wf.head_branch === 'string' && wf.head_branch ? wf.head_branch : null;
+  const mq = parseMergeQueueBranch(headBranch);
+  const wfEvent = typeof wf.event === 'string' && wf.event ? wf.event : null;
+  const mergeGroup = wfEvent === 'merge_group' || Boolean(mq) || Boolean(dequeuedReason);
+  const summaryParts = [
+    mergeGroup
+      ? `Merge queue workflow "${workflowName}" completed with ${conclusion} (run #${wf.run_number ?? id}, attempt ${attempt}).`
+      : `Workflow "${workflowName}" completed with ${conclusion} (run #${wf.run_number ?? id}, attempt ${attempt}).`,
+    displayTitle && displayTitle !== workflowName ? `Title: ${displayTitle}` : '',
+    dequeuedReason ? `Dequeued reason: ${dequeuedReason}.` : '',
+  ].filter(Boolean);
+  return {
+    source: 'workflow_run',
+    headSha,
+    headBranch,
+    headRepositoryId: wf.head_repository?.id != null ? String(wf.head_repository.id) : null,
+    workflowEvent: wfEvent,
+    mergeGroup,
+    mergeGroupSha: mergeGroup ? headSha : null,
+    mergeGroupBranch: mergeGroup ? (mq?.branch ?? headBranch) : null,
+    mergeGroupBaseRef: mq?.baseRef ?? null,
+    mergeGroupPrNumber: mq?.prNumber ?? null,
+    ...(dequeuedReason ? { dequeuedReason } : {}),
+    createdAt: typeof wf.created_at === 'string' ? wf.created_at : (typeof wf.run_started_at === 'string' ? wf.run_started_at : null),
+    completedAt: typeof wf.updated_at === 'string' ? wf.updated_at : (typeof wf.created_at === 'string' ? wf.created_at : null),
+    runOrSuiteId: canonicalRunOrSuiteId(id, checkSuiteId, null),
+    canonicalGroup: canonicalCheckGroup(id, checkSuiteId, null),
+    workflowRunId: id,
+    checkSuiteId,
+    checkRunId: null,
+    attempt,
+    conclusion,
+    name: workflowName,
+    workflowName,
+    url,
+    summary: clip(summaryParts.join(' '), 1500),
+    pullRequests: Array.isArray(wf.pull_requests) ? wf.pull_requests : [],
+  };
+}
+
 function parseFailedCheckDelivery(repositoryId: string, repoFullName: string, event: string, payload: any): ParsedFailedCheck | null {
   if (!payload || typeof payload !== 'object' || String(payload.action || '') !== 'completed') return null;
 
   if (event === 'workflow_run' && payload.workflow_run && typeof payload.workflow_run === 'object') {
-    const wf = payload.workflow_run;
-    const conclusion = String(wf.conclusion || '').toLowerCase();
-    if (!FAILED_CONCLUSIONS.has(conclusion)) return null;
-    if (wf.head_repository?.id != null && String(wf.head_repository.id) !== String(repositoryId)) return null;
-    const headSha = normSha(wf.head_sha);
-    const id = Number(wf.id);
-    if (!headSha || !Number.isSafeInteger(id) || id < 1) return null;
-    const attempt = Number.isSafeInteger(wf.run_attempt) && wf.run_attempt >= 1 ? Number(wf.run_attempt) : 1;
-    const workflowName = String(wf.name || wf.workflow?.name || 'GitHub Actions').trim() || 'GitHub Actions';
-    const displayTitle = typeof wf.display_title === 'string' && wf.display_title.trim() ? wf.display_title.trim() : '';
-    const checkSuiteId = Number.isSafeInteger(wf.check_suite_id) && wf.check_suite_id >= 1 ? Number(wf.check_suite_id) : null;
-    const url = safeHttpUrl(wf.html_url) ?? (repoFullName ? `https://github.com/${repoFullName}/actions/runs/${id}` : null);
-    const summaryParts = [
-      `Workflow "${workflowName}" completed with ${conclusion} (run #${wf.run_number ?? id}, attempt ${attempt}).`,
-      displayTitle && displayTitle !== workflowName ? `Title: ${displayTitle}` : '',
-    ].filter(Boolean);
-    return {
-      source: 'workflow_run',
-      headSha,
-      headBranch: typeof wf.head_branch === 'string' && wf.head_branch ? wf.head_branch : null,
-      runOrSuiteId: canonicalRunOrSuiteId(id, checkSuiteId, null),
-      canonicalGroup: canonicalCheckGroup(id, checkSuiteId, null),
-      workflowRunId: id,
-      checkSuiteId,
-      checkRunId: null,
-      attempt,
-      conclusion,
-      name: workflowName,
-      workflowName,
-      url,
-      summary: clip(summaryParts.join(' '), 1500),
-      pullRequests: Array.isArray(wf.pull_requests) ? wf.pull_requests : [],
-    };
+    return parseWorkflowRunObject(repoFullName, payload.workflow_run);
   }
 
   if (event === 'check_suite' && payload.check_suite && typeof payload.check_suite === 'object') {
@@ -740,10 +938,22 @@ function parseFailedCheckDelivery(repositoryId: string, repoFullName: string, ev
     const workflowRunId = extractWorkflowRunIdFromUrl(cs.html_url, cs.details_url, cs.url);
     const appName = String(cs.app?.name || cs.app?.slug || 'check_suite').trim() || 'check_suite';
     const url = safeHttpUrl(cs.html_url || cs.details_url) ?? (repoFullName ? `https://github.com/${repoFullName}/commit/${headSha}/checks` : null);
+    const headBranch = typeof cs.head_branch === 'string' && cs.head_branch ? cs.head_branch : null;
+    const mq = parseMergeQueueBranch(headBranch);
+    const mergeGroup = Boolean(mq);
     return {
       source: 'check_suite',
       headSha,
-      headBranch: typeof cs.head_branch === 'string' && cs.head_branch ? cs.head_branch : null,
+      headBranch,
+      headRepositoryId: null,
+      workflowEvent: null,
+      mergeGroup,
+      mergeGroupSha: mergeGroup ? headSha : null,
+      mergeGroupBranch: mergeGroup ? mq!.branch : null,
+      mergeGroupBaseRef: mq?.baseRef ?? null,
+      mergeGroupPrNumber: mq?.prNumber ?? null,
+      createdAt: typeof cs.created_at === 'string' ? cs.created_at : null,
+      completedAt: typeof cs.updated_at === 'string' ? cs.updated_at : (typeof cs.created_at === 'string' ? cs.created_at : null),
       runOrSuiteId: canonicalRunOrSuiteId(workflowRunId, id, null),
       canonicalGroup: canonicalCheckGroup(workflowRunId, id, null),
       workflowRunId,
@@ -754,7 +964,7 @@ function parseFailedCheckDelivery(repositoryId: string, repoFullName: string, ev
       name: appName,
       workflowName: null,
       url,
-      summary: clip(`Check suite "${appName}" (${id}) completed with ${conclusion}.`, 1500),
+      summary: clip(mergeGroup ? `Merge queue check suite "${appName}" (${id}) completed with ${conclusion}.` : `Check suite "${appName}" (${id}) completed with ${conclusion}.`, 1500),
       pullRequests: Array.isArray(cs.pull_requests) ? cs.pull_requests : [],
     };
   }
@@ -784,10 +994,22 @@ function parseFailedCheckDelivery(repositoryId: string, repoFullName: string, ev
     const outSummary = typeof cr.output?.summary === 'string' ? cr.output.summary.trim() : '';
     const outText = typeof cr.output?.text === 'string' ? cr.output.text.trim() : '';
     const detail = [outTitle, outSummary, outText ? clip(outText, 600) : ''].filter(Boolean).join(' — ');
+    const headBranch = typeof cr.check_suite?.head_branch === 'string' && cr.check_suite.head_branch ? cr.check_suite.head_branch : null;
+    const mq = parseMergeQueueBranch(headBranch);
+    const mergeGroup = Boolean(mq);
     return {
       source: 'check_run',
       headSha,
-      headBranch: typeof cr.check_suite?.head_branch === 'string' && cr.check_suite.head_branch ? cr.check_suite.head_branch : null,
+      headBranch,
+      headRepositoryId: null,
+      workflowEvent: null,
+      mergeGroup,
+      mergeGroupSha: mergeGroup ? headSha : null,
+      mergeGroupBranch: mergeGroup ? mq!.branch : null,
+      mergeGroupBaseRef: mq?.baseRef ?? null,
+      mergeGroupPrNumber: mq?.prNumber ?? null,
+      createdAt: typeof cr.started_at === 'string' ? cr.started_at : null,
+      completedAt: typeof cr.completed_at === 'string' ? cr.completed_at : (typeof cr.started_at === 'string' ? cr.started_at : null),
       runOrSuiteId: canonicalRunOrSuiteId(workflowRunId, checkSuiteId, id),
       canonicalGroup: canonicalCheckGroup(workflowRunId, checkSuiteId, id),
       workflowRunId,
@@ -798,7 +1020,7 @@ function parseFailedCheckDelivery(repositoryId: string, repoFullName: string, ev
       name,
       workflowName: typeof cr.app?.name === 'string' ? cr.app.name : null,
       url,
-      summary: clip(detail ? `Check "${name}" (${conclusion}): ${detail}` : `Check "${name}" (${id}) completed with ${conclusion}.`, 1500),
+      summary: clip(detail ? `${mergeGroup ? 'Merge queue check' : 'Check'} "${name}" (${conclusion}): ${detail}` : `${mergeGroup ? 'Merge queue check' : 'Check'} "${name}" (${id}) completed with ${conclusion}.`, 1500),
       pullRequests: Array.isArray(cr.pull_requests) && cr.pull_requests.length
         ? cr.pull_requests
         : Array.isArray(cr.check_suite?.pull_requests)
@@ -811,19 +1033,34 @@ function parseFailedCheckDelivery(repositoryId: string, repoFullName: string, ev
   return null;
 }
 
-function candidateBotPrNumbersForCheck(store: Store, repositoryId: string, parsed: ParsedFailedCheck): number[] {
-  if (!store.hasTable('bot_pull_requests')) return [];
+function candidatePrNumbersForCheck(store: Store, repositoryId: string, parsed: ParsedFailedCheck, includeNonBot: boolean): number[] {
   const numbers = new Set<number>();
+  const hasBotTable = store.hasTable('bot_pull_requests');
+  const isBotPr = (n: number) => hasBotTable && Boolean(store.get('SELECT 1 FROM bot_pull_requests WHERE repository_id=? AND number=?', repositoryId, n));
+
+  if (parsed.mergeGroupPrNumber && Number.isSafeInteger(parsed.mergeGroupPrNumber) && parsed.mergeGroupPrNumber >= 1) {
+    if (!parsed.headRepositoryId || parsed.headRepositoryId === String(repositoryId)) {
+      if (isBotPr(parsed.mergeGroupPrNumber) || includeNonBot) numbers.add(parsed.mergeGroupPrNumber);
+    }
+  }
+
   for (const pr of parsed.pullRequests) {
     if (!pr || typeof pr !== 'object') continue;
-    if (pr.head?.repo?.id != null && String(pr.head.repo.id) !== String(repositoryId)) continue;
     if (pr.base?.repo?.id != null && String(pr.base.repo.id) !== String(repositoryId)) continue;
     const n = Number(pr.number);
-    if (Number.isSafeInteger(n) && n >= 1 && store.get('SELECT 1 FROM bot_pull_requests WHERE repository_id=? AND number=?', repositoryId, n)) {
+    if (!Number.isSafeInteger(n) || n < 1) continue;
+    if (isBotPr(n)) {
+      if (pr.head?.repo?.id != null && String(pr.head.repo.id) !== String(repositoryId)) continue;
+      if (parsed.headRepositoryId && parsed.headRepositoryId !== String(repositoryId)) continue;
+      numbers.add(n);
+    } else if (includeNonBot) {
+      if (parsed.mergeGroup && parsed.headRepositoryId && parsed.headRepositoryId !== String(repositoryId)) continue;
+      if (!parsed.mergeGroup && parsed.headRepositoryId && pr.head?.repo?.id != null && String(pr.head.repo.id) !== parsed.headRepositoryId) continue;
       numbers.add(n);
     }
   }
-  if (!numbers.size) {
+
+  if (!numbers.size && !parsed.mergeGroup && hasBotTable && (!parsed.headRepositoryId || parsed.headRepositoryId === String(repositoryId))) {
     const byShaOrBranch = store.all(
       'SELECT number FROM bot_pull_requests WHERE repository_id=? AND (lower(sha)=? OR (? IS NOT NULL AND branch=?)) ORDER BY number DESC',
       repositoryId,
@@ -833,7 +1070,9 @@ function candidateBotPrNumbersForCheck(store: Store, repositoryId: string, parse
     );
     for (const row of byShaOrBranch) numbers.add(Number(row.number));
   }
+
   return [...numbers].filter(n => {
+    if (!isBotPr(n)) return includeNonBot;
     const st = store.hasTable('bot_pr_states')
       ? store.get('SELECT state,draft FROM bot_pr_states WHERE repository_id=? AND number=?', repositoryId, n)
       : undefined;
@@ -842,13 +1081,59 @@ function candidateBotPrNumbersForCheck(store: Store, repositoryId: string, parse
   });
 }
 
+function hasLocalPrTaskForSha(store: Store, repositoryId: string, headSha: string): boolean {
+  if (!store.hasTable('tasks')) return false;
+  return Boolean(
+    store.get(
+      `SELECT 1 FROM (
+         SELECT head_sha, kind, object_number, input FROM tasks
+         WHERE repository_id=?
+         ORDER BY created_at DESC, id DESC
+         LIMIT 100
+       )
+       WHERE lower(head_sha)=? AND object_number IS NOT NULL
+         AND (kind LIKE '%.pr' OR (kind='task.request' AND json_extract(input,'$.target.type')='pr'))
+       LIMIT 1`,
+      repositoryId,
+      headSha,
+    ),
+  );
+}
+
+export function isMergeGroupRunFresh(
+  parsed: Pick<ParsedFailedCheck, 'mergeGroupBaseRef' | 'createdAt' | 'completedAt'>,
+  target: Pick<VerifiedPrTarget, 'baseRef' | 'createdAt' | 'headUpdatedAt'>,
+  headCommitDate?: string | null,
+): boolean {
+  if (parsed.mergeGroupBaseRef && target.baseRef && parsed.mergeGroupBaseRef !== target.baseRef) return false;
+  const runCreated = parsed.createdAt ? Date.parse(parsed.createdAt) : NaN;
+  const runCompleted = parsed.completedAt ? Date.parse(parsed.completedAt) : NaN;
+  const runRefTime = Number.isFinite(runCompleted) ? runCompleted : runCreated;
+  if (target.createdAt) {
+    const prCreated = Date.parse(target.createdAt);
+    if (Number.isFinite(runRefTime) && Number.isFinite(prCreated) && runRefTime < prCreated) return false;
+  }
+  const commitMs = headCommitDate ? Date.parse(headCommitDate) : NaN;
+  const headUpd = target.headUpdatedAt ? Date.parse(target.headUpdatedAt) : NaN;
+  // When the authoritative head commit timestamp is available, clamp with `headUpdatedAt` so a late-observed
+  // head change (e.g. missed `synchronize` webhook seen on a later comment) never drops a genuine merge_group failure.
+  const lowerBoundMs = Number.isFinite(commitMs)
+    ? (Number.isFinite(headUpd) ? Math.min(commitMs, headUpd) : commitMs)
+    : headUpd;
+  if (Number.isFinite(lowerBoundMs)) {
+    const runStartOrRef = Number.isFinite(runCreated) ? runCreated : runCompleted;
+    if (Number.isFinite(runStartOrRef) && runStartOrRef < lowerBoundMs) return false;
+  }
+  return true;
+}
+
 function checkFailureEventKey(repositoryId: string, prNumber: number, parsed: ParsedFailedCheck): string {
   return `${repositoryId}:pull_request.checks_failed:${prNumber}:${parsed.headSha}:${parsed.canonicalGroup}:${parsed.attempt}`;
 }
 
 /**
- * Collapses `workflow_run`, `check_suite`, and all job `check_run`s of the same attempt into one Manager wakeup,
- * even when one source supplies `workflow_run_id` and another supplies `check_suite_id`.
+ * Collapses `workflow_run`, `check_suite`, `pull_request.dequeued`, and all job `check_run`s of the same attempt into
+ * one Manager wakeup, even when one source supplies `workflow_run_id` and another supplies `check_suite_id`.
  */
 function hasRecordedCheckFailure(store: Store, repositoryId: string, prNumber: number, parsed: ParsedFailedCheck): boolean {
   if (store.get('SELECT 1 FROM dispatch_events WHERE event_key=?', checkFailureEventKey(repositoryId, prNumber, parsed))) {
@@ -857,17 +1142,104 @@ function hasRecordedCheckFailure(store: Store, repositoryId: string, prNumber: n
   if (!parsed.workflowRunId && !parsed.checkSuiteId) return false;
   const rows = store.all(
     `SELECT facts FROM dispatch_events
-     WHERE repository_id=? AND type='pull_request.checks_failed' AND object_number=? AND source='github'`,
+     WHERE repository_id=? AND object_type='pr' AND object_number=? AND type='pull_request.checks_failed' AND source='github'`,
     repositoryId,
     prNumber,
   );
   for (const row of rows) {
     try {
       const f = JSON.parse(String(row.facts || '{}'));
-      if (normSha(f.head_sha) !== parsed.headSha) continue;
+      const recordedSha = normSha(f.check?.merge_group_sha ?? f.merge_group_sha ?? f.head_sha);
+      if (recordedSha && recordedSha !== parsed.headSha) continue;
       if (Number(f.check?.attempt || 1) !== parsed.attempt) continue;
       if (parsed.workflowRunId && Number(f.check?.workflow_run_id) === parsed.workflowRunId) return true;
       if (parsed.checkSuiteId && Number(f.check?.check_suite_id) === parsed.checkSuiteId) return true;
+    } catch { /* ignore malformed row */ }
+  }
+  return false;
+}
+
+/**
+ * Deduplicates `pull_request.dequeued` fallbacks against `merge_group` check sources for the same PR head within the
+ * recent window.
+ * - `runlessFallbackOnly = false` (used by the runless `pull_request.dequeued` fallback): skips if ANY recent
+ *   `merge_group` failure was recorded for this PR head.
+ * - `runlessFallbackOnly = true` (used by concrete `merge_group` runs carrying a run/suite/merge_group_sha): skips ONLY
+ *   when a recent runless `pull_request.dequeued` fallback was already recorded for this PR head, so distinct
+ *   `merge_group` runs on the same unchanged PR head (e.g. re-enqueued without a push) each wake normally.
+ */
+function hasRecentMergeGroupCheckFailure(
+  store: Store,
+  repositoryId: string,
+  prNumber: number,
+  prHeadSha: string,
+  runlessFallbackOnly = false,
+  nowMs = Date.now(),
+): boolean {
+  const rows = store.all(
+    `SELECT facts, created_at FROM dispatch_events
+     WHERE repository_id=? AND object_type='pr' AND object_number=? AND type='pull_request.checks_failed' AND source='github'
+     ORDER BY +created_at DESC, rowid DESC LIMIT 10`,
+    repositoryId,
+    prNumber,
+  );
+  for (const row of rows) {
+    const createdMs = Date.parse(String(row.created_at || ''));
+    if (Number.isFinite(createdMs) && nowMs - createdMs > RECENT_DEQUEUED_DEDUP_MS) continue;
+    try {
+      const f = JSON.parse(String(row.facts || '{}'));
+      if (!(f.merge_group === true || f.check?.merge_group === true)) continue;
+      if (normSha(f.head_sha) !== prHeadSha) continue;
+      if (runlessFallbackOnly) {
+        const isRunlessFallback = f.check?.source === 'pull_request_dequeued'
+          && !f.check?.workflow_run_id
+          && !f.check?.check_suite_id
+          && !normSha(f.check?.merge_group_sha ?? f.merge_group_sha);
+        if (!isRunlessFallback) continue;
+      }
+      return true;
+    } catch { /* ignore malformed row */ }
+  }
+  return false;
+}
+
+/**
+ * Throttles non-bot PR `pull_request.checks_failed` wakeups for repeated Re-runs (`attempt + 1`) of the same
+ * `workflow_run_id`/`check_suite_id` on the same unchanged PR head (while an earlier event for that run/suite is
+ * `pending`/`dispatching`, or within 10 minutes of the prior wakeup). Distinct workflows/suites or new heads still wake.
+ */
+function hasNonBotCheckFailureThrottled(
+  store: Store,
+  repositoryId: string,
+  prNumber: number,
+  prHeadSha: string,
+  parsed: Pick<ParsedFailedCheck, 'mergeGroup' | 'workflowRunId' | 'checkSuiteId'>,
+  nowMs = Date.now(),
+): boolean {
+  if (!parsed.workflowRunId && !parsed.checkSuiteId) return false;
+  const rows = store.all(
+    `SELECT state, facts, created_at FROM dispatch_events
+     WHERE repository_id=? AND object_type='pr' AND object_number=? AND type='pull_request.checks_failed' AND source='github'
+     ORDER BY +created_at DESC, rowid DESC LIMIT 20`,
+    repositoryId,
+    prNumber,
+  );
+  for (const row of rows) {
+    try {
+      const f = JSON.parse(String(row.facts || '{}'));
+      if (f.bot_pull_request === true) continue;
+      if (normSha(f.head_sha) !== prHeadSha) continue;
+      const rowMergeGroup = Boolean(f.merge_group === true || f.check?.merge_group === true);
+      if (rowMergeGroup !== Boolean(parsed.mergeGroup)) continue;
+      const sameRunOrSuite = Boolean(
+        (parsed.workflowRunId && Number(f.check?.workflow_run_id) === parsed.workflowRunId)
+        || (parsed.checkSuiteId && Number(f.check?.check_suite_id) === parsed.checkSuiteId),
+      );
+      if (!sameRunOrSuite) continue;
+      const state = String(row.state || '');
+      if (state === 'pending' || state === 'dispatching') return true;
+      const createdMs = Date.parse(String(row.created_at || ''));
+      if (Number.isFinite(createdMs) && nowMs - createdMs <= NON_BOT_RERUN_COOLDOWN_MS) return true;
     } catch { /* ignore malformed row */ }
   }
   return false;
@@ -878,6 +1250,7 @@ function conflictEventKey(repositoryId: string, prNumber: number, headSha: strin
 }
 
 function openBotPrNumbersTargetingBranch(store: Store, repositoryId: string, branch: string, excludePrNumber?: number): number[] {
+  if (!store.hasTable('bot_pull_requests')) return [];
   const rows = store.all('SELECT number FROM bot_pull_requests WHERE repository_id=? ORDER BY number DESC', repositoryId);
   return rows
     .map(r => Number(r.number))
@@ -896,7 +1269,7 @@ function openBotPrNumbersTargetingBranch(store: Store, repositoryId: string, bra
 }
 
 export interface BotWakePreflightPlan {
-  kind: 'check_failure' | 'push_conflict' | 'pr_mergeable_pending';
+  kind: 'check_failure' | 'dequeued_check_failure' | 'push_conflict' | 'pr_mergeable_pending';
   prNumbers: number[];
   headSha?: string;
   workflowRunId?: number | null;
@@ -904,11 +1277,21 @@ export interface BotWakePreflightPlan {
   attempt?: number;
   branch?: string;
   baseSha?: string;
+  baseRef?: string;
+  mergeGroup?: boolean;
+  mergeGroupBranch?: string | null;
+  mergeGroupBaseRef?: string | null;
+  headRepositoryId?: string | null;
+  dequeuedReason?: string;
+  lookupPullsByCommit?: boolean;
 }
 
 export interface BotWakePreflight {
   pullRequests?: Record<number, Json>;
   comments?: Record<number, Json[]>;
+  headCommitDates?: Record<number, string>;
+  discoveredPrNumbers?: number[];
+  matchedMergeGroupRun?: Json | null;
   failedJobs?: Json[];
   resolvedWorkflowRunId?: number | null;
   resolvedCheckSuiteId?: number | null;
@@ -919,25 +1302,60 @@ export interface BotWakePreflight {
 }
 
 export function botWakePreflightPlan(store: Store, repositoryId: string, event: string, payload: Json): BotWakePreflightPlan | null {
-  if (!repositoryId || !payload || typeof payload !== 'object' || !store.hasTable('bot_pull_requests')) return null;
+  if (!repositoryId || !payload || typeof payload !== 'object') return null;
   const policy = store.get('SELECT * FROM policies WHERE repository_id=?', repositoryId);
   if (!policy?.enabled || !covers(projectCeiling(store, repositoryId, policy), 'comment')) return null;
   const repoFullName = String(store.get('SELECT full_name FROM repositories WHERE id=?', repositoryId)?.full_name || '');
+  const nonBotChecksEnabled = eventFilters(store, repositoryId, policy)['pull_request.checks_failed'];
 
   if (event === 'workflow_run' || event === 'check_suite' || event === 'check_run') {
     const parsed = parseFailedCheckDelivery(repositoryId, repoFullName, event, payload);
     if (!parsed) return null;
-    const candidates = candidateBotPrNumbersForCheck(store, repositoryId, parsed);
+    const candidates = candidatePrNumbersForCheck(store, repositoryId, parsed, nonBotChecksEnabled);
     const unseen = candidates.filter(n => !hasRecordedCheckFailure(store, repositoryId, n, parsed));
-    if (!unseen.length) return null;
-    return {
-      kind: 'check_failure',
-      prNumbers: unseen,
-      headSha: parsed.headSha,
-      workflowRunId: parsed.workflowRunId,
-      checkSuiteId: parsed.checkSuiteId,
-      attempt: parsed.attempt,
-    };
+    if (unseen.length) {
+      return {
+        kind: 'check_failure',
+        prNumbers: unseen,
+        headSha: parsed.headSha,
+        workflowRunId: parsed.workflowRunId,
+        checkSuiteId: parsed.checkSuiteId,
+        attempt: parsed.attempt,
+        mergeGroup: parsed.mergeGroup,
+        mergeGroupBranch: parsed.mergeGroupBranch,
+        mergeGroupBaseRef: parsed.mergeGroupBaseRef,
+        headRepositoryId: parsed.headRepositoryId,
+      };
+    }
+    const defaultBranch = String(policy.base_branch || '').trim() || 'main';
+    if (
+      nonBotChecksEnabled
+      && !parsed.mergeGroup
+      && !parsed.pullRequests.length
+      && !candidates.length
+      && (
+        parsed.source === 'check_run'
+        || parsed.source === 'check_suite'
+        || parsed.workflowEvent === 'pull_request'
+        || parsed.workflowEvent === 'pull_request_target'
+        || (parsed.headRepositoryId !== null && parsed.headRepositoryId !== repositoryId)
+        || (parsed.source === 'workflow_run' && parsed.workflowEvent === 'push' && parsed.headBranch !== null && parsed.headBranch !== defaultBranch)
+        || hasLocalPrTaskForSha(store, repositoryId, parsed.headSha)
+      )
+    ) {
+      return {
+        kind: 'check_failure',
+        prNumbers: [],
+        lookupPullsByCommit: true,
+        headSha: parsed.headSha,
+        workflowRunId: parsed.workflowRunId,
+        checkSuiteId: parsed.checkSuiteId,
+        attempt: parsed.attempt,
+        mergeGroup: false,
+        headRepositoryId: parsed.headRepositoryId,
+      };
+    }
+    return null;
   }
 
   if (event === 'push') {
@@ -966,7 +1384,19 @@ export function botWakePreflightPlan(store: Store, repositoryId: string, event: 
       }
       return null;
     }
-    if (!pr || pr.state !== 'open' || pr.draft === true || pr.mergeable !== null || !Number.isSafeInteger(n) || n < 1) return null;
+    if (p.action === 'dequeued' && pr && pr.state === 'open' && pr.draft !== true && Number.isSafeInteger(n) && n >= 1 && isDequeuedCheckFailureReason(p.reason)) {
+      if (isOwnedBotPrRecord(store, repositoryId, n) || nonBotChecksEnabled) {
+        return {
+          kind: 'dequeued_check_failure',
+          prNumbers: [n],
+          dequeuedReason: String(p.reason).trim(),
+          baseRef: typeof pr.base?.ref === 'string' && pr.base.ref ? pr.base.ref : undefined,
+          mergeGroup: true,
+        };
+      }
+      return null;
+    }
+    if (!pr || pr.state !== 'open' || pr.draft === true || pr.mergeable !== null || !Number.isSafeInteger(n) || n < 1 || !store.hasTable('bot_pull_requests')) return null;
     const owned = store.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?', repositoryId, n);
     if (!owned || (pr.user?.id != null && String(pr.user.id) !== String(owned.author_id))) return null;
     return { kind: 'pr_mergeable_pending', prNumbers: [n] };
@@ -988,6 +1418,119 @@ function summarizeFailedCheckRun(cr: any): Record<string, any> {
   };
 }
 
+function summarizeFailedWorkflowJobs(jobs: any[]): Json[] {
+  return jobs
+    .filter((j: any) => FAILED_CONCLUSIONS.has(String(j?.conclusion || '').toLowerCase()))
+    .slice(0, 15)
+    .map((j: any) => ({
+      id: Number(j.id) || null,
+      name: clip(j.name || 'job', 160),
+      conclusion: String(j.conclusion || 'failure'),
+      url: safeHttpUrl(j.html_url),
+      failed_steps: Array.isArray(j.steps)
+        ? j.steps
+            .filter((s: any) => FAILED_CONCLUSIONS.has(String(s?.conclusion || '').toLowerCase()))
+            .slice(0, 5)
+            .map((s: any) => clip(s?.name || 'step', 160))
+        : [],
+    }));
+}
+
+async function readHeadCommitDate(github: GitHub, headSha: string | null | undefined): Promise<string | null> {
+  const sha = normSha(headSha);
+  if (!sha) return null;
+  const commitObj = await github.request('GET', github.path(`/git/commits/${sha}`), undefined, true).catch(() => null);
+  const dateStr = commitObj?.committer?.date ?? commitObj?.author?.date ?? null;
+  return typeof dateStr === 'string' && Number.isFinite(Date.parse(dateStr)) ? dateStr : null;
+}
+
+async function inspectWorkflowOrSuiteChecks(
+  github: GitHub,
+  headSha: string | null | undefined,
+  initialWfRunId: number | null,
+  initialCsId: number | null,
+): Promise<{
+  suitePending: boolean;
+  failedJobs: Json[] | undefined;
+  resolvedWorkflowRunId: number | null;
+  resolvedCheckSuiteId: number | null;
+  resolvedWorkflowName: string | null;
+  resolvedWorkflowUrl: string | null;
+}> {
+  let wfRunId = initialWfRunId;
+  let csId = initialCsId;
+  let suitePending = false;
+  let failedJobs: Json[] | undefined;
+  let resolvedWorkflowName: string | null = null;
+  let resolvedWorkflowUrl: string | null = null;
+
+  if (wfRunId) {
+    const runObj = await github.request('GET', github.path(`/actions/runs/${wfRunId}`), undefined, true).catch(() => null);
+    if (runObj && typeof runObj === 'object') {
+      wfRunId = Number(runObj.id) || wfRunId;
+      if (Number.isSafeInteger(runObj.check_suite_id) && runObj.check_suite_id >= 1) csId = Number(runObj.check_suite_id);
+      if (typeof runObj.name === 'string' && runObj.name.trim()) resolvedWorkflowName = runObj.name.trim();
+      if (safeHttpUrl(runObj.html_url)) resolvedWorkflowUrl = safeHttpUrl(runObj.html_url);
+    }
+    const jobsRes = await github.request('GET', github.path(`/actions/runs/${wfRunId}/jobs?per_page=50`), undefined, true).catch(() => null);
+    const jobs = Array.isArray(jobsRes?.jobs) ? jobsRes.jobs : [];
+    if (jobs.length && jobs.some((j: any) => String(j?.status || 'completed') !== 'completed')) {
+      suitePending = true;
+    } else {
+      const failed = summarizeFailedWorkflowJobs(jobs);
+      if (failed.length) failedJobs = failed;
+    }
+  }
+  if (csId && headSha && !failedJobs?.length && !suitePending) {
+    const runsRes = await github.request('GET', github.path(`/commits/${headSha}/check-runs?per_page=100`), undefined, true).catch(() => null);
+    const allRuns = Array.isArray(runsRes?.check_runs) ? runsRes.check_runs : [];
+    const suiteRuns = allRuns.filter((cr: any) => Number(cr?.check_suite?.id) === csId);
+    if (suiteRuns.length) {
+      for (const cr of suiteRuns) {
+        wfRunId ??= extractWorkflowRunIdFromUrl(cr?.details_url, cr?.html_url);
+      }
+      if (suiteRuns.some((cr: any) => String(cr?.status || 'completed') !== 'completed')) {
+        suitePending = true;
+      } else {
+        const failedRuns = suiteRuns.filter((cr: any) => FAILED_CONCLUSIONS.has(String(cr?.conclusion || '').toLowerCase()));
+        if (failedRuns.length) failedJobs = failedRuns.slice(0, 15).map(summarizeFailedCheckRun);
+      }
+    }
+  }
+  return {
+    suitePending,
+    failedJobs,
+    resolvedWorkflowRunId: wfRunId,
+    resolvedCheckSuiteId: csId,
+    resolvedWorkflowName,
+    resolvedWorkflowUrl,
+  };
+}
+
+function matchingFailedMergeGroupRuns(
+  runs: any[],
+  repoFullName: string,
+  prNumber: number,
+  target: Pick<VerifiedPrTarget, 'baseRef' | 'createdAt' | 'headUpdatedAt'>,
+  headCommitDate?: string | null,
+  dequeuedReason?: string,
+): { run: any; parsed: ParsedFailedCheck }[] {
+  const matched: { run: any; parsed: ParsedFailedCheck; sortMs: number }[] = [];
+  for (const run of runs) {
+    if (!run || typeof run !== 'object') continue;
+    if (String(run.status || '') !== 'completed') continue;
+    const mq = parseMergeQueueBranch(run.head_branch);
+    if (!mq || mq.prNumber !== prNumber) continue;
+    const parsed = parseWorkflowRunObject(repoFullName, run, dequeuedReason);
+    if (!parsed) continue;
+    if (!isMergeGroupRunFresh(parsed, target, headCommitDate)) continue;
+    const sortMs = Date.parse(String(run.updated_at || run.created_at || '')) || 0;
+    matched.push({ run, parsed, sortMs });
+  }
+  matched.sort((a, b) => b.sortMs - a.sortMs || (b.parsed.workflowRunId ?? 0) - (a.parsed.workflowRunId ?? 0));
+  return matched.map(({ run, parsed }) => ({ run, parsed }));
+}
+
 export async function collectBotWakePreflight(
   store: Store,
   owner: Row,
@@ -995,8 +1538,9 @@ export async function collectBotWakePreflight(
   githubUrl?: string,
   deliveryId?: string,
 ): Promise<BotWakePreflight> {
-  const out: BotWakePreflight = { pullRequests: {}, comments: {} };
+  const out: BotWakePreflight = { pullRequests: {}, comments: {}, headCommitDates: {} };
   const repoId = String(owner.id);
+  const repoFullName = String(owner.full_name || '');
   const redactor = registeredRedactor(store);
   const github = new GitHub(store, owner, redactor, async () => {}, githubUrl);
   try {
@@ -1006,8 +1550,8 @@ export async function collectBotWakePreflight(
       {
         pull_requests: 'read',
         issues: 'read',
-        ...(plan.kind === 'push_conflict' && !plan.baseSha && plan.branch ? { contents: 'read' } : {}),
-        ...(plan.kind === 'check_failure' ? { checks: 'read', actions: 'read' } : {}),
+        ...((plan.kind === 'push_conflict' && !plan.baseSha && plan.branch) || plan.mergeGroup || plan.kind === 'dequeued_check_failure' ? { contents: 'read' } : {}),
+        ...(plan.kind === 'check_failure' || plan.kind === 'dequeued_check_failure' ? { checks: 'read', actions: 'read' } : {}),
       },
       false,
     );
@@ -1015,97 +1559,208 @@ export async function collectBotWakePreflight(
     return out;
   }
 
-  if (plan.kind === 'push_conflict' && !plan.baseSha && plan.branch) {
-    const refObj = await github.ref(plan.branch).catch(() => null);
-    out.resolvedBaseSha = normSha(refObj?.object?.sha);
-  }
+  try {
+    if (plan.kind === 'push_conflict' && !plan.baseSha && plan.branch) {
+      const refObj = await github.ref(plan.branch).catch(() => null);
+      out.resolvedBaseSha = normSha(refObj?.object?.sha);
+    }
 
-  const pendingMergeablePrs: number[] = [];
-  for (const prNumber of plan.prNumbers.slice(0, 25)) {
-    const pr = await github.request('GET', github.path(`/pulls/${prNumber}`), undefined, true).catch(() => null);
-    if (!pr || typeof pr !== 'object') continue;
-    out.pullRequests![prNumber] = pr;
-    if (pr.state === 'open' && pr.draft !== true) {
-      if (plan.kind === 'check_failure' || pr.mergeable === false || String(pr.mergeable_state || '').toLowerCase() === 'dirty') {
-        const comments = await github.pages(github.path(`/issues/${prNumber}/comments`)).catch(() => null);
-        if (Array.isArray(comments)) out.comments![prNumber] = comments;
+    const targetPrNumbers = [...plan.prNumbers];
+    if (plan.kind === 'check_failure' && plan.lookupPullsByCommit && plan.headSha) {
+      const commitPulls = await github.request('GET', github.path(`/commits/${plan.headSha}/pulls?per_page=10`), undefined, true).catch(() => null);
+      const discovered: number[] = [];
+      if (Array.isArray(commitPulls)) {
+        for (const pr of commitPulls) {
+          if (!pr || typeof pr !== 'object') continue;
+          const n = Number(pr.number);
+          if (!Number.isSafeInteger(n) || n < 1) continue;
+          if (pr.state !== 'open' || pr.draft === true) continue;
+          if (pr.base?.repo?.id != null && String(pr.base.repo.id) !== repoId) continue;
+          if (normSha(pr.head?.sha) !== plan.headSha) continue;
+          if (plan.headRepositoryId && (pr.head?.repo?.id == null || String(pr.head.repo.id) !== plan.headRepositoryId)) continue;
+          out.pullRequests![n] = pr;
+          discovered.push(n);
+          if (!targetPrNumbers.includes(n)) targetPrNumbers.push(n);
+        }
       }
-      const targetMatches = plan.kind !== 'push_conflict' || !plan.branch || pr.base?.ref === plan.branch;
-      if (targetMatches && pr.mergeable === null) pendingMergeablePrs.push(prNumber);
+      if (discovered.length) out.discoveredPrNumbers = discovered;
+      if (!targetPrNumbers.length) return out;
+    }
+
+    const pendingMergeablePrs: number[] = [];
+    let hasOpenCandidatePr = false;
+    for (const prNumber of targetPrNumbers.slice(0, 25)) {
+      const pr = out.pullRequests![prNumber] ?? await github.request('GET', github.path(`/pulls/${prNumber}`), undefined, true).catch(() => null);
+      if (!pr || typeof pr !== 'object') continue;
+      out.pullRequests![prNumber] = pr;
+      if (pr.state === 'open' && pr.draft !== true) {
+        hasOpenCandidatePr = true;
+        const isBot = isOwnedBotPrRecord(store, repoId, prNumber);
+        if (isBot && (plan.kind === 'check_failure' || plan.kind === 'dequeued_check_failure' || pr.mergeable === false || String(pr.mergeable_state || '').toLowerCase() === 'dirty')) {
+          const comments = await github.pages(github.path(`/issues/${prNumber}/comments`)).catch(() => null);
+          if (Array.isArray(comments)) out.comments![prNumber] = comments;
+        }
+        if ((plan.mergeGroup || plan.kind === 'dequeued_check_failure') && pr.head?.sha) {
+          const commitDate = await readHeadCommitDate(github, pr.head.sha);
+          if (commitDate) out.headCommitDates![prNumber] = commitDate;
+        }
+        const targetMatches = plan.kind !== 'push_conflict' || !plan.branch || pr.base?.ref === plan.branch;
+        if (isBot && targetMatches && pr.mergeable === null) pendingMergeablePrs.push(prNumber);
+      }
+    }
+
+    if (plan.kind === 'check_failure' && hasOpenCandidatePr) {
+      const inspected = await inspectWorkflowOrSuiteChecks(github, plan.headSha, plan.workflowRunId ?? null, plan.checkSuiteId ?? null);
+      out.suitePending = inspected.suitePending || undefined;
+      out.failedJobs = inspected.failedJobs;
+      out.resolvedWorkflowRunId = inspected.resolvedWorkflowRunId;
+      out.resolvedCheckSuiteId = inspected.resolvedCheckSuiteId;
+      out.resolvedWorkflowName = inspected.resolvedWorkflowName;
+      out.resolvedWorkflowUrl = inspected.resolvedWorkflowUrl;
+      if (inspected.suitePending && plan.headSha) {
+        const flushKey = inspected.resolvedCheckSuiteId
+          ? `${repoId}:suite:${inspected.resolvedCheckSuiteId}:${plan.attempt ?? 1}`
+          : inspected.resolvedWorkflowRunId
+            ? `${repoId}:run:${inspected.resolvedWorkflowRunId}:${plan.attempt ?? 1}`
+            : '';
+        if (flushKey) {
+          pendingSuiteFlushes.set(flushKey, {
+            repositoryId: repoId,
+            headSha: plan.headSha,
+            checkSuiteId: inspected.resolvedCheckSuiteId,
+            workflowRunId: inspected.resolvedWorkflowRunId,
+            attempt: plan.attempt ?? 1,
+            prNumbers: targetPrNumbers.slice(0, 25),
+            mergeGroup: Boolean(plan.mergeGroup),
+            mergeGroupBranch: plan.mergeGroupBranch ?? null,
+            mergeGroupBaseRef: plan.mergeGroupBaseRef ?? null,
+            headRepositoryId: plan.headRepositoryId ?? null,
+          });
+          schedulePendingSuiteRecheck(store, owner, flushKey, targetPrNumbers.slice(0, 25), githubUrl, deliveryId ?? null);
+        }
+      }
+    }
+
+    if (plan.kind === 'dequeued_check_failure' && hasOpenCandidatePr && targetPrNumbers.length) {
+      const prNumber = targetPrNumbers[0]!;
+      const pr = out.pullRequests![prNumber] as any;
+      const savedState = store.hasTable('bot_pr_states')
+        ? store.get('SELECT head_updated_at FROM bot_pr_states WHERE repository_id=? AND number=?', repoId, prNumber)
+        : undefined;
+      const runsRes = await github.request('GET', github.path('/actions/runs?event=merge_group&per_page=30'), undefined, true).catch(() => null);
+      const runs = Array.isArray(runsRes?.workflow_runs) ? runsRes.workflow_runs : [];
+      const matched = matchingFailedMergeGroupRuns(
+        runs,
+        repoFullName,
+        prNumber,
+        {
+          baseRef: typeof pr?.base?.ref === 'string' ? pr.base.ref : (plan.baseRef ?? null),
+          createdAt: typeof pr?.created_at === 'string' ? pr.created_at : null,
+          headUpdatedAt: savedState?.head_updated_at ? String(savedState.head_updated_at) : null,
+        },
+        out.headCommitDates?.[prNumber] ?? null,
+        plan.dequeuedReason,
+      );
+      if (matched.length) {
+        const latest = matched[0]!;
+        out.matchedMergeGroupRun = latest.run;
+        const inspected = await inspectWorkflowOrSuiteChecks(github, latest.parsed.headSha, latest.parsed.workflowRunId, latest.parsed.checkSuiteId);
+        out.failedJobs = inspected.failedJobs;
+        out.resolvedWorkflowRunId = inspected.resolvedWorkflowRunId;
+        out.resolvedCheckSuiteId = inspected.resolvedCheckSuiteId;
+        out.resolvedWorkflowName = inspected.resolvedWorkflowName;
+        out.resolvedWorkflowUrl = inspected.resolvedWorkflowUrl;
+      }
+    }
+
+    if (pendingMergeablePrs.length) {
+      scheduleMergeableRecheck(store, owner, pendingMergeablePrs, plan.branch ?? null, plan.baseSha ?? out.resolvedBaseSha ?? null, githubUrl, deliveryId ?? null);
+    }
+    return out;
+  } finally {
+    if (github.token && store.get('SELECT type FROM accounts WHERE id=?', owner.account_id)?.type === 'github_app') {
+      await revokeInstallationToken(githubUrl || 'https://api.github.com', github.token).catch(() => false);
     }
   }
+}
 
-  if (plan.kind === 'check_failure') {
-    let wfRunId = plan.workflowRunId ?? null;
-    let csId = plan.checkSuiteId ?? null;
-    if (wfRunId) {
-      const runObj = await github.request('GET', github.path(`/actions/runs/${wfRunId}`), undefined, true).catch(() => null);
-      if (runObj && typeof runObj === 'object') {
-        out.resolvedWorkflowRunId = Number(runObj.id) || wfRunId;
-        if (Number.isSafeInteger(runObj.check_suite_id) && runObj.check_suite_id >= 1) csId = Number(runObj.check_suite_id);
-        if (typeof runObj.name === 'string' && runObj.name.trim()) out.resolvedWorkflowName = runObj.name.trim();
-        if (safeHttpUrl(runObj.html_url)) out.resolvedWorkflowUrl = safeHttpUrl(runObj.html_url);
-      }
-      const jobsRes = await github.request('GET', github.path(`/actions/runs/${wfRunId}/jobs?per_page=50`), undefined, true).catch(() => null);
-      const jobs = Array.isArray(jobsRes?.jobs) ? jobsRes.jobs : [];
-      if (jobs.length && jobs.some((j: any) => String(j?.status || 'completed') !== 'completed')) {
-        out.suitePending = true;
+async function flushPendingSuiteForNonBotPrs(
+  store: Store,
+  owner: Row,
+  flushKey: string,
+  githubUrl: string | undefined,
+  deliveryId: string | null,
+): Promise<void> {
+  const pending = pendingSuiteFlushes.get(flushKey);
+  if (!pending || !store.db.isOpen) return;
+  const repoId = String(owner.id);
+  const repoFullName = String(owner.full_name || '');
+  const nonBotPrs = pending.prNumbers.filter(n => !isOwnedBotPrRecord(store, repoId, n));
+  if (!nonBotPrs.length) return;
+  const policy = store.get('SELECT * FROM policies WHERE repository_id=?', repoId);
+  if (!policy?.enabled || !covers(projectCeiling(store, repoId, policy), 'comment')) return;
+  if (!eventFilters(store, repoId, policy)['pull_request.checks_failed']) return;
+
+  const redactor = registeredRedactor(store);
+  const github = new GitHub(store, owner, redactor, async () => {}, githubUrl);
+  try {
+    await github.connect(false, undefined, { pull_requests: 'read', checks: 'read', actions: 'read', ...(pending.mergeGroup ? { contents: 'read' } : {}) }, false);
+    const inspected = await inspectWorkflowOrSuiteChecks(github, pending.headSha, pending.workflowRunId, pending.checkSuiteId);
+    if (inspected.suitePending) return;
+    pendingSuiteFlushes.delete(flushKey);
+    if (!inspected.failedJobs?.length) return;
+
+    const wfRunId = inspected.resolvedWorkflowRunId;
+    const csId = inspected.resolvedCheckSuiteId;
+    const name = inspected.resolvedWorkflowName || String((inspected.failedJobs[0] as any)?.name || 'check_suite');
+    const parsed: ParsedFailedCheck = {
+      source: wfRunId ? 'workflow_run' : csId ? 'check_suite' : 'check_run',
+      headSha: pending.headSha,
+      headBranch: pending.mergeGroupBranch,
+      headRepositoryId: pending.headRepositoryId,
+      workflowEvent: null,
+      mergeGroup: pending.mergeGroup,
+      mergeGroupSha: pending.mergeGroup ? pending.headSha : null,
+      mergeGroupBranch: pending.mergeGroup ? pending.mergeGroupBranch : null,
+      mergeGroupBaseRef: pending.mergeGroup ? pending.mergeGroupBaseRef : null,
+      mergeGroupPrNumber: pending.mergeGroup && nonBotPrs.length === 1 ? nonBotPrs[0]! : null,
+      runOrSuiteId: canonicalRunOrSuiteId(wfRunId, csId, null),
+      canonicalGroup: canonicalCheckGroup(wfRunId, csId, null),
+      workflowRunId: wfRunId,
+      checkSuiteId: csId,
+      checkRunId: null,
+      attempt: pending.attempt,
+      conclusion: String((inspected.failedJobs[0] as any)?.conclusion || 'failure').toLowerCase(),
+      name,
+      workflowName: inspected.resolvedWorkflowName,
+      url: inspected.resolvedWorkflowUrl ?? (repoFullName ? `https://github.com/${repoFullName}/commit/${pending.headSha}/checks` : null),
+      summary: clip(`Checks "${name}" completed with ${inspected.failedJobs.length} failed job(s) on attempt ${pending.attempt}.`, 1500),
+      pullRequests: nonBotPrs.map(n => ({ number: n })),
+    };
+
+    for (const prNumber of nonBotPrs) {
+      if (!store.db.isOpen) break;
+      const pr = await github.request('GET', github.path(`/pulls/${prNumber}`), undefined, true).catch(() => null);
+      const target = verifiedOpenNonBotPr(store, repoId, prNumber, pr);
+      if (!target) continue;
+      if (pending.mergeGroup) {
+        const commitDate = await readHeadCommitDate(github, target.headSha);
+        if (!isMergeGroupRunFresh(parsed, target, commitDate)) continue;
+        if (hasRecentMergeGroupCheckFailure(store, repoId, prNumber, target.headSha, true)) continue;
       } else {
-        const failed = jobs
-          .filter((j: any) => FAILED_CONCLUSIONS.has(String(j?.conclusion || '').toLowerCase()))
-          .slice(0, 15)
-          .map((j: any) => ({
-            id: Number(j.id) || null,
-            name: clip(j.name || 'job', 160),
-            conclusion: String(j.conclusion || 'failure'),
-            url: safeHttpUrl(j.html_url),
-            failed_steps: Array.isArray(j.steps)
-              ? j.steps
-                  .filter((s: any) => FAILED_CONCLUSIONS.has(String(s?.conclusion || '').toLowerCase()))
-                  .slice(0, 5)
-                  .map((s: any) => clip(s?.name || 'step', 160))
-              : [],
-          }));
-        if (failed.length) out.failedJobs = failed;
+        if (target.headSha !== parsed.headSha) continue;
+        if (parsed.headRepositoryId && target.headRepoId !== parsed.headRepositoryId) continue;
       }
+      if (hasRecordedCheckFailure(store, repoId, prNumber, parsed)) continue;
+      if (hasNonBotCheckFailureThrottled(store, repoId, prNumber, target.headSha, parsed)) continue;
+      const ev = buildCheckFailedEventInput(store, repoId, parsed.source, 'completed', '', deliveryId, target, parsed, inspected.failedJobs);
+      store.transaction(() => recordEvent(store, ev));
     }
-    if (csId && plan.headSha && !out.failedJobs?.length && !out.suitePending) {
-      const runsRes = await github.request('GET', github.path(`/commits/${plan.headSha}/check-runs?per_page=100`), undefined, true).catch(() => null);
-      const allRuns = Array.isArray(runsRes?.check_runs) ? runsRes.check_runs : [];
-      const suiteRuns = allRuns.filter((cr: any) => Number(cr?.check_suite?.id) === csId);
-      if (suiteRuns.length) {
-        for (const cr of suiteRuns) {
-          wfRunId ??= extractWorkflowRunIdFromUrl(cr?.details_url, cr?.html_url);
-        }
-        if (suiteRuns.some((cr: any) => String(cr?.status || 'completed') !== 'completed')) {
-          out.suitePending = true;
-        } else {
-          const failedRuns = suiteRuns.filter((cr: any) => FAILED_CONCLUSIONS.has(String(cr?.conclusion || '').toLowerCase()));
-          if (failedRuns.length) out.failedJobs = failedRuns.slice(0, 15).map(summarizeFailedCheckRun);
-        }
-      }
-    }
-    out.resolvedWorkflowRunId ??= wfRunId;
-    out.resolvedCheckSuiteId = csId;
-    if (out.suitePending && plan.headSha) {
-      const flushKey = csId ? `${repoId}:suite:${csId}:${plan.attempt ?? 1}` : wfRunId ? `${repoId}:run:${wfRunId}:${plan.attempt ?? 1}` : '';
-      if (flushKey) {
-        pendingSuiteFlushes.set(flushKey, {
-          repositoryId: repoId,
-          headSha: plan.headSha,
-          checkSuiteId: csId,
-          workflowRunId: wfRunId,
-          attempt: plan.attempt ?? 1,
-        });
-        schedulePendingSuiteRecheck(store, owner, flushKey, plan.prNumbers, githubUrl, deliveryId ?? null);
-      }
+  } finally {
+    if (github.token && store.get('SELECT type FROM accounts WHERE id=?', owner.account_id)?.type === 'github_app') {
+      await revokeInstallationToken(githubUrl || 'https://api.github.com', github.token).catch(() => false);
     }
   }
-
-  if (pendingMergeablePrs.length) {
-    scheduleMergeableRecheck(store, owner, pendingMergeablePrs, plan.branch ?? null, plan.baseSha ?? out.resolvedBaseSha ?? null, githubUrl, deliveryId ?? null);
-  }
-  return out;
 }
 
 function schedulePendingSuiteRecheck(
@@ -1129,7 +1784,14 @@ function schedulePendingSuiteRecheck(
           });
         }
         if (!pendingSuiteFlushes.has(flushKey) || !store.db.open) break;
-        await reconcileOpenBotPullRequestsForRepo(store, owner, githubUrl, deliveryId, prNumbers).catch(() => {});
+        const repoId = String(owner.id);
+        const botPrs = prNumbers.filter(n => isOwnedBotPrRecord(store, repoId, n));
+        if (botPrs.length) {
+          await reconcileOpenBotPullRequestsForRepo(store, owner, githubUrl, deliveryId, botPrs).catch(() => {});
+        }
+        if (pendingSuiteFlushes.has(flushKey) && store.db.isOpen) {
+          await flushPendingSuiteForNonBotPrs(store, owner, flushKey, githubUrl, deliveryId).catch(() => {});
+        }
       }
     } catch {
       // Never let a background suite-flush poll reject unhandled (e.g. closed DB or revoked installation).
@@ -1168,7 +1830,7 @@ function scheduleMergeableRecheck(
             t.unref?.();
           });
         }
-        if (!store.db.open) break;
+        if (!store.db.isOpen) break;
         const policy = store.get('SELECT * FROM policies WHERE repository_id=?', repoId);
         if (!policy?.enabled || !covers(projectCeiling(store, repoId, policy), 'comment')) break;
         const redactor = registeredRedactor(store);
@@ -1180,7 +1842,7 @@ function scheduleMergeableRecheck(
         }
         const stillNull: number[] = [];
         for (const prNumber of remaining) {
-          if (!store.db.open) break;
+          if (!store.db.isOpen) break;
           const pr = await github.request('GET', github.path(`/pulls/${prNumber}`), undefined, true).catch(() => null);
           if (!pr || typeof pr !== 'object' || !store.db.open) continue;
           const comments = isPullRequestConflicted(pr, pushedBranch ? 'push' : 'pull_request', '')
@@ -1231,7 +1893,7 @@ function isPullRequestConflicted(pr: any, event: string, action: string, reason 
   if (pr.mergeable === false || pr.mergeable === 0) return true;
   const state = String(pr.mergeable_state || '').toLowerCase();
   if (state === 'dirty' || state === 'conflicting') return true;
-  if (event === 'pull_request' && action === 'dequeued' && /conflict|dirty|merge/i.test(reason)) return true;
+  if (event === 'pull_request' && action === 'dequeued' && /conflict|dirty/i.test(reason)) return true;
   return false;
 }
 
@@ -1294,10 +1956,19 @@ function clearBotPrConflictSuppressionOnHumanActivity(store: Store, repositoryId
   if (!store.hasTable('bot_pull_requests') || !store.hasTable('bot_pr_states')) return;
   if (!['issue_comment', 'pull_request_review', 'pull_request_review_comment'].includes(event)) return;
   const action = String(payload?.action || '');
-  if ((event === 'issue_comment' || event === 'pull_request_review_comment') && action !== 'created') return;
-  if (event === 'pull_request_review' && action !== 'submitted') return;
-  const actor = payload?.comment?.user ?? payload?.review?.user ?? payload?.sender;
-  const body = payload?.comment?.body ?? payload?.review?.body ?? '';
+  const isCreateOrSubmit =
+    ((event === 'issue_comment' || event === 'pull_request_review_comment') && action === 'created')
+    || (event === 'pull_request_review' && action === 'submitted');
+  const isEdited = action === 'edited';
+  if (!isCreateOrSubmit && !isEdited) return;
+  const body = event === 'pull_request_review' ? payload?.review?.body : payload?.comment?.body;
+  if (isEdited) {
+    const from = payload?.changes?.body?.from;
+    if (typeof from !== 'string' || typeof body !== 'string' || from === body) return;
+  }
+  const actor = isEdited
+    ? (payload?.sender ?? payload?.comment?.user ?? payload?.review?.user)
+    : (payload?.comment?.user ?? payload?.review?.user ?? payload?.sender);
   if (String(actor?.type || '') === 'Bot') return;
   const login = actor?.login ? String(actor.login).toLowerCase() : '';
   if (login.endsWith('[bot]')) return;
@@ -1555,12 +2226,15 @@ function collectHumanComments(store: Store, repositoryId: string, prNumber: numb
     if (!facts) continue;
     const actorType = facts.trigger?.actor_type;
     const actorId = facts.trigger?.actor_id;
+    const isEdited = facts.trigger?.edited === true;
     if (facts.comment) {
       const cid = String(facts.comment.id || row.id);
-      addCandidate(`comment:${cid}`, cid, actorType ?? 'User', actorId, facts.comment.author ?? facts.actor, facts.comment.body, row.created_at, facts.comment.url);
+      const key = isEdited ? `comment:${cid}:edit:${row.id}` : `comment:${cid}`;
+      addCandidate(key, cid, actorType ?? 'User', actorId, facts.comment.author ?? facts.actor, facts.comment.body, row.created_at, facts.comment.url);
     } else if (facts.review) {
       const rid = String(facts.trigger?.source?.id || row.id);
-      addCandidate(`review:${rid}`, rid, actorType ?? 'User', actorId, facts.review.author ?? facts.actor, facts.review.body, row.created_at, facts.trigger?.url);
+      const key = isEdited ? `review:${rid}:edit:${row.id}` : `review:${rid}`;
+      addCandidate(key, rid, actorType ?? 'User', actorId, facts.review.author ?? facts.actor, facts.review.body, row.created_at, facts.trigger?.url);
     }
   }
 
@@ -1841,8 +2515,10 @@ export function botPrWakeRevisionFacts(store: Store, repositoryId: string, prNum
 export function refreshBotPrWakeFacts(store: Store, event: Row, facts: Record<string, any>): Record<string, any> {
   const type = String(event.type || '');
   if (type !== 'pull_request.checks_failed' && type !== 'pull_request.conflicted' && type !== 'pull_request.patrol') return facts;
+  if (facts?.bot_pull_request === false) return facts;
   const prNumber = Number(facts?.pr_number ?? event.object_number ?? 0);
   if (!Number.isSafeInteger(prNumber) || prNumber < 1) return facts;
+  if (type === 'pull_request.checks_failed' && !isOwnedBotPrRecord(store, String(event.repository_id), prNumber)) return facts;
   const capturedHumanComments = Array.isArray(facts?.revisions?.new_human_comments)
     ? facts.revisions.new_human_comments.map((c: any) => ({
         id: c.id,
@@ -1865,17 +2541,26 @@ function buildCheckFailedEventInput(
   action: string,
   actor: string,
   delivery: string | null,
-  verified: VerifiedBotPr,
+  target: VerifiedPrTarget,
   parsed: ParsedFailedCheck,
   failedJobs?: Json[],
   liveComments?: any[],
 ): EventInput {
   const redactor = registeredRedactor(store);
-  const rootIssue = rootIssueOfBotPr(store, repositoryId, verified.number);
-  const eventKey = checkFailureEventKey(repositoryId, verified.number, parsed);
+  const rootIssue = target.isBotPr ? rootIssueOfBotPr(store, repositoryId, target.number) : null;
+  const eventKey = checkFailureEventKey(repositoryId, target.number, parsed);
   const jobSummary = Array.isArray(failedJobs) && failedJobs.length
     ? ` Failed jobs: ${failedJobs.map((j: any) => `${j.name}${j.failed_steps?.length ? ` (${j.failed_steps.join(', ')})` : ''}`).join('; ')}.`
     : '';
+  const mergeGroupFacts = parsed.mergeGroup
+    ? {
+        merge_group: true,
+        merge_group_sha: parsed.mergeGroupSha,
+        merge_group_branch: parsed.mergeGroupBranch,
+        ...(parsed.mergeGroupBaseRef ? { merge_group_base_ref: parsed.mergeGroupBaseRef } : {}),
+      }
+    : {};
+  const dequeuedFacts = parsed.dequeuedReason ? { dequeued_reason: parsed.dequeuedReason } : {};
   const checkFacts = publicContent(
     {
       source: parsed.source,
@@ -1888,58 +2573,70 @@ function buildCheckFailedEventInput(
       attempt: parsed.attempt,
       conclusion: parsed.conclusion,
       url: parsed.url,
+      ...mergeGroupFacts,
+      ...dequeuedFacts,
       summary: clip(parsed.summary + jobSummary, 2000),
       ...(Array.isArray(failedJobs) && failedJobs.length ? { failed_jobs: failedJobs } : {}),
     },
     redactor,
   );
 
-  const revisions = botPrWakeRevisionFacts(store, repositoryId, verified.number, liveComments);
+  const revisions = target.isBotPr ? botPrWakeRevisionFacts(store, repositoryId, target.number, liveComments) : undefined;
   const wakeSummary = {
     type: 'pull_request.checks_failed',
-    pr_number: verified.number,
-    head_sha: verified.headSha,
+    bot_pull_request: target.isBotPr,
+    pr_number: target.number,
+    head_sha: target.headSha,
+    ...mergeGroupFacts,
+    ...dequeuedFacts,
     check: checkFacts,
   };
-  const options: CreateOption[] = [
-    {
-      id: 'development',
-      work: 'development.pr',
-      title: `修复 bot PR #${verified.number} 检查失败（${clip(parsed.name, 60)}）`,
-      default: false,
-      spec: {
-        type: 'object',
-        kind: 'development.pr',
-        number: verified.number,
-        head: verified.headSha,
-        input: { revision: { source: 'checks_failed' }, wake_event: wakeSummary },
-        delivery,
-      },
+  const replyOpt: CreateOption = {
+    id: 'reply',
+    work: 'reply',
+    title: target.isBotPr ? `通用回复 #${target.number}` : `分析并回复 PR #${target.number} 检查失败（${clip(parsed.name, 60)}）`,
+    default: false,
+    spec: {
+      type: 'reply',
+      kind: 'workflow.pr',
+      number: target.number,
+      head: target.headSha,
+      input: { pull_request: target.prObject, wake_event: wakeSummary },
+      key: `checks_failed:${parsed.canonicalGroup}:${parsed.attempt}`,
+      delivery,
     },
-    {
-      id: 'reply',
-      work: 'reply',
-      title: `通用回复 #${verified.number}`,
-      default: false,
-      spec: {
-        type: 'reply',
-        kind: 'workflow.pr',
-        number: verified.number,
-        head: verified.headSha,
-        input: { pull_request: verified.prObject, wake_event: wakeSummary },
-        key: `checks_failed:${parsed.canonicalGroup}:${parsed.attempt}`,
-        delivery,
-      },
-    },
-  ];
+  };
+  // Never offer branch-writing `development.pr` / `writes: ["pull_request"]` options for pull requests opened by others.
+  const options: CreateOption[] = target.isBotPr
+    ? [
+        {
+          id: 'development',
+          work: 'development.pr',
+          title: `修复 bot PR #${target.number} 检查失败（${clip(parsed.name, 60)}）`,
+          default: false,
+          spec: {
+            type: 'object',
+            kind: 'development.pr',
+            number: target.number,
+            head: target.headSha,
+            input: { revision: { source: 'checks_failed' }, wake_event: wakeSummary },
+            delivery,
+          },
+        },
+        replyOpt,
+      ]
+    : [replyOpt];
 
   const trigger = {
     event,
     action,
     reason: 'pull_request.checks_failed',
     actor,
-    pr_number: verified.number,
-    head_sha: verified.headSha,
+    bot_pull_request: target.isBotPr,
+    pr_number: target.number,
+    head_sha: target.headSha,
+    ...mergeGroupFacts,
+    ...dequeuedFacts,
     check_name: checkFacts.name,
     run_or_suite_id: checkFacts.run_or_suite_id,
     workflow_run_id: checkFacts.workflow_run_id,
@@ -1950,25 +2647,31 @@ function buildCheckFailedEventInput(
     summary: checkFacts.summary,
   };
 
+  const prefix = target.isBotPr
+    ? (parsed.mergeGroup ? 'bot PR 合并队列检查失败' : 'bot PR 检查失败')
+    : (parsed.mergeGroup ? 'PR 合并队列检查失败' : 'PR 检查失败');
+
   return {
     repositoryId,
     key: eventKey,
     type: 'pull_request.checks_failed',
     source: 'github',
-    summary: `bot PR 检查失败：#${verified.number} ${clip(parsed.name, 80)}（${parsed.conclusion}）`,
-    object: { type: 'pr', number: verified.number },
+    summary: `${prefix}：#${target.number} ${clip(parsed.name, 80)}（${parsed.conclusion}）`,
+    object: { type: 'pr', number: target.number },
     delivery,
     facts: {
       event,
       action,
       actor,
-      bot_pull_request: true,
-      pr_number: verified.number,
-      head_sha: verified.headSha,
-      root_issue_number: rootIssue,
-      object: objectFacts(verified.prObject),
+      bot_pull_request: target.isBotPr,
+      pr_number: target.number,
+      head_sha: target.headSha,
+      ...mergeGroupFacts,
+      ...dequeuedFacts,
+      ...(target.isBotPr ? { root_issue_number: rootIssue } : {}),
+      object: objectFacts(target.prObject),
       check: checkFacts,
-      revisions,
+      ...(revisions ? { revisions } : {}),
     },
     options,
     merge: {
@@ -1976,15 +2679,18 @@ function buildCheckFailedEventInput(
       data: {
         reason: 'pull_request.checks_failed',
         wake_type: 'pull_request.checks_failed',
+        bot_pull_request: target.isBotPr,
         actor,
-        pr_number: verified.number,
-        head_sha: verified.headSha,
+        pr_number: target.number,
+        head_sha: target.headSha,
+        ...mergeGroupFacts,
+        ...dequeuedFacts,
         check: checkFacts,
         url: checkFacts.url,
       },
       trigger,
-      head: verified.headSha,
-      kinds: ['development.pr'],
+      head: target.headSha,
+      kinds: target.isBotPr ? ['development.pr'] : ['task.request'],
     },
   };
 }
@@ -2151,8 +2857,9 @@ function applyResolvedCheckPreflight(parsed: ParsedFailedCheck, preflight?: BotW
 }
 
 /**
- * Produces deduplicated `pull_request.checks_failed` and `pull_request.conflicted` Manager events
- * for open, non-draft PRs recorded in `bot_pull_requests`.
+ * Produces deduplicated `pull_request.checks_failed` (for open non-draft bot PRs and other authors' PRs, including
+ * Merge Queue `merge_group` runs and CI-failure `pull_request.dequeued` fallbacks) and `pull_request.conflicted`
+ * (for open non-draft bot PRs) Manager events.
  */
 export function botPrWakeEvents(
   store: Store,
@@ -2162,17 +2869,20 @@ export function botPrWakeEvents(
   delivery: string,
   preflight?: BotWakePreflight,
 ): EventInput[] {
-  if (!repositoryId || !payload || typeof payload !== 'object' || !store.hasTable('bot_pull_requests')) return [];
+  if (!repositoryId || !payload || typeof payload !== 'object') return [];
   const p = payload as any;
   const action = String(p.action || '');
   const actor = String(p.sender?.login || '');
   const repoFullName = String(store.get('SELECT full_name FROM repositories WHERE id=?', repositoryId)?.full_name || '');
+  const policy = store.get('SELECT * FROM policies WHERE repository_id=?', repositoryId);
+  const canComment = Boolean(policy?.enabled && covers(projectCeiling(store, repositoryId, policy), 'comment'));
+  const nonBotChecksEnabled = canComment && eventFilters(store, repositoryId, policy)['pull_request.checks_failed'];
 
+  if (event === 'pull_request' && p.pull_request && !preflight?.pullRequests?.[Number(p.pull_request.number)]) {
+    syncBotPullRequestState(store, repositoryId, p.pull_request);
+  }
   if (preflight?.pullRequests) {
     for (const pr of Object.values(preflight.pullRequests)) syncBotPullRequestState(store, repositoryId, pr);
-  }
-  if (event === 'pull_request' && p.pull_request) {
-    syncBotPullRequestState(store, repositoryId, p.pull_request);
   }
   clearBotPrConflictSuppressionOnHumanActivity(store, repositoryId, event, p);
   markBotPrsForReconcile(store, repositoryId, event, p);
@@ -2180,6 +2890,7 @@ export function botPrWakeEvents(
   const events: EventInput[] = [];
 
   if (event === 'workflow_run' || event === 'check_suite' || event === 'check_run') {
+    if (!canComment) return [];
     const rawParsed = parseFailedCheckDelivery(repositoryId, repoFullName, event, p);
     if (!rawParsed || preflight?.suitePending) return [];
     const parsed = applyResolvedCheckPreflight(rawParsed, preflight);
@@ -2192,31 +2903,73 @@ export function botPrWakeEvents(
       if (k) pendingSuiteFlushes.delete(k);
     }
 
-    const prNumbers = candidateBotPrNumbersForCheck(store, repositoryId, parsed);
+    const prNumbers = [...new Set([
+      ...candidatePrNumbersForCheck(store, repositoryId, parsed, nonBotChecksEnabled),
+      ...(nonBotChecksEnabled && Array.isArray(preflight?.discoveredPrNumbers) ? preflight.discoveredPrNumbers : []),
+    ])];
     for (const prNumber of prNumbers) {
       const livePr = preflight?.pullRequests?.[prNumber];
-      const verified = verifiedOwnedOpenBotPr(store, repositoryId, prNumber, livePr);
-      if (!verified || verified.headSha !== parsed.headSha) continue;
-      if (hasRecordedCheckFailure(store, repositoryId, prNumber, parsed)) continue;
-      events.push(
-        buildCheckFailedEventInput(
-          store,
-          repositoryId,
-          event,
-          action,
-          actor,
-          delivery,
-          verified,
-          parsed,
-          preflight?.failedJobs,
-          preflight?.comments?.[prNumber] as any[] | undefined,
-        ),
-      );
+      const isOwned = isOwnedBotPrRecord(store, repositoryId, prNumber);
+      if (isOwned) {
+        if (parsed.headRepositoryId && parsed.headRepositoryId !== String(repositoryId)) continue;
+        const verified = verifiedOwnedOpenBotPr(store, repositoryId, prNumber, livePr);
+        if (!verified) continue;
+        const target = botPrToTarget(repositoryId, verified);
+        if (parsed.mergeGroup) {
+          if (!isMergeGroupRunFresh(parsed, target, preflight?.headCommitDates?.[prNumber] ?? null)) continue;
+          if (hasRecentMergeGroupCheckFailure(store, repositoryId, prNumber, target.headSha, true)) continue;
+        } else if (target.headSha !== parsed.headSha) {
+          continue;
+        }
+        if (hasRecordedCheckFailure(store, repositoryId, prNumber, parsed)) continue;
+        events.push(
+          buildCheckFailedEventInput(
+            store,
+            repositoryId,
+            event,
+            action,
+            actor,
+            delivery,
+            target,
+            parsed,
+            preflight?.failedJobs,
+            preflight?.comments?.[prNumber] as any[] | undefined,
+          ),
+        );
+      } else {
+        if (!nonBotChecksEnabled) continue;
+        const target = verifiedOpenNonBotPr(store, repositoryId, prNumber, livePr);
+        if (!target) continue;
+        if (parsed.mergeGroup) {
+          if (parsed.headRepositoryId && parsed.headRepositoryId !== String(repositoryId)) continue;
+          if (!isMergeGroupRunFresh(parsed, target, preflight?.headCommitDates?.[prNumber] ?? null)) continue;
+          if (hasRecentMergeGroupCheckFailure(store, repositoryId, prNumber, target.headSha, true)) continue;
+        } else {
+          if (target.headSha !== parsed.headSha) continue;
+          if (parsed.headRepositoryId && target.headRepoId !== parsed.headRepositoryId) continue;
+        }
+        if (hasRecordedCheckFailure(store, repositoryId, prNumber, parsed)) continue;
+        if (hasNonBotCheckFailureThrottled(store, repositoryId, prNumber, target.headSha, parsed)) continue;
+        events.push(
+          buildCheckFailedEventInput(
+            store,
+            repositoryId,
+            event,
+            action,
+            actor,
+            delivery,
+            target,
+            parsed,
+            preflight?.failedJobs,
+          ),
+        );
+      }
     }
     return events;
   }
 
   const inspectBranchAdvance = (pushedBranch: string, baseSha: string, sourceEvent: 'push' | 'pull_request', detectedVia: 'push' | 'base_advanced', excludePr?: number) => {
+    if (!store.hasTable('bot_pull_requests')) return;
     const rows = store.all('SELECT number FROM bot_pull_requests WHERE repository_id=? ORDER BY number ASC', repositoryId);
     for (const row of rows) {
       const prNumber = Number(row.number);
@@ -2272,9 +3025,91 @@ export function botPrWakeEvents(
       return events;
     }
     const livePr = preflight?.pullRequests?.[prNumber] ?? p.pull_request;
+    const dequeueReason = String(p.reason || '').trim();
+    if (action === 'dequeued' && isDequeuedCheckFailureReason(dequeueReason) && !isPullRequestConflicted(livePr, 'pull_request', action, dequeueReason)) {
+      if (!canComment) return [];
+      const isOwned = isOwnedBotPrRecord(store, repositoryId, prNumber);
+      const botVerified = isOwned ? verifiedOwnedOpenBotPr(store, repositoryId, prNumber, livePr) : null;
+      const target = isOwned
+        ? (botVerified ? botPrToTarget(repositoryId, botVerified) : null)
+        : (nonBotChecksEnabled ? verifiedOpenNonBotPr(store, repositoryId, prNumber, livePr) : null);
+      if (!target) return [];
+      const payloadHeadSha = normSha(p.pull_request?.head?.sha);
+      if (payloadHeadSha && payloadHeadSha !== target.headSha) return [];
+      const matchedRun = preflight?.matchedMergeGroupRun;
+      if (matchedRun && typeof matchedRun === 'object') {
+        const rawParsed = parseWorkflowRunObject(repoFullName, matchedRun, dequeueReason);
+        if (rawParsed) {
+          const parsed = applyResolvedCheckPreflight(rawParsed, preflight);
+          if (hasRecordedCheckFailure(store, repositoryId, prNumber, parsed)) return [];
+          if (hasRecentMergeGroupCheckFailure(store, repositoryId, prNumber, target.headSha, true)) return [];
+          if (!target.isBotPr && hasNonBotCheckFailureThrottled(store, repositoryId, prNumber, target.headSha, parsed)) return [];
+          events.push(
+            buildCheckFailedEventInput(
+              store,
+              repositoryId,
+              'pull_request',
+              action,
+              actor,
+              delivery,
+              target,
+              parsed,
+              preflight?.failedJobs,
+              target.isBotPr ? (preflight?.comments?.[prNumber] as any[] | undefined) : undefined,
+            ),
+          );
+          return events;
+        }
+      }
+      if (!payloadHeadSha || payloadHeadSha !== target.headSha) return [];
+      if (hasRecentMergeGroupCheckFailure(store, repositoryId, prNumber, target.headSha)) return [];
+      const fallbackParsed: ParsedFailedCheck = {
+        source: 'pull_request_dequeued',
+        headSha: target.headSha,
+        headBranch: null,
+        headRepositoryId: String(repositoryId),
+        workflowEvent: 'merge_group',
+        mergeGroup: true,
+        mergeGroupSha: null,
+        mergeGroupBranch: null,
+        mergeGroupBaseRef: target.baseRef,
+        mergeGroupPrNumber: prNumber,
+        dequeuedReason: dequeueReason,
+        runOrSuiteId: `dequeued:${delivery}`,
+        canonicalGroup: `dequeued:${delivery}`,
+        workflowRunId: null,
+        checkSuiteId: null,
+        checkRunId: null,
+        attempt: 1,
+        conclusion: /TIMEOUT|TIMED_OUT/i.test(dequeueReason) ? 'timed_out' : 'failure',
+        name: 'Merge Queue',
+        workflowName: 'Merge Queue',
+        url: target.htmlUrl,
+        summary: clip(`PR #${prNumber} was dequeued from the merge queue due to ${dequeueReason}.`, 1500),
+        pullRequests: [{ number: prNumber }],
+      };
+      if (hasRecordedCheckFailure(store, repositoryId, prNumber, fallbackParsed)) return [];
+      if (!target.isBotPr && hasNonBotCheckFailureThrottled(store, repositoryId, prNumber, target.headSha, fallbackParsed)) return [];
+      events.push(
+        buildCheckFailedEventInput(
+          store,
+          repositoryId,
+          'pull_request',
+          action,
+          actor,
+          delivery,
+          target,
+          fallbackParsed,
+          preflight?.failedJobs,
+          target.isBotPr ? (preflight?.comments?.[prNumber] as any[] | undefined) : undefined,
+        ),
+      );
+      return events;
+    }
+
     const verified = verifiedOwnedOpenBotPr(store, repositoryId, prNumber, livePr);
     if (!verified) return [];
-    if (!isPullRequestConflicted(livePr, 'pull_request', action, String(p.reason || ''))) return [];
+    if (!isPullRequestConflicted(livePr, 'pull_request', action, dequeueReason)) return [];
     const liveComments = preflight?.comments?.[prNumber] as any[] | undefined;
     if (isConflictWakeSuppressed(store, repositoryId, verified, liveComments)) return [];
     const baseSha = normSha((livePr as any)?.base?.sha) ?? verified.baseSha ?? digest(`base:${verified.baseRef ?? 'main'}:${verified.headSha}`).slice(0, 40);
@@ -3005,6 +3840,13 @@ async function reconcileOpenBotPullRequestsForRepo(
       branchHeads.set(branch, sha);
       return sha;
     };
+    let recentMergeGroupRuns: any[] | null = null;
+    const readRecentMergeGroupRuns = async () => {
+      if (recentMergeGroupRuns !== null) return recentMergeGroupRuns;
+      const res = await guardRequest(github.request('GET', github.path('/actions/runs?event=merge_group&per_page=30'), undefined, true));
+      recentMergeGroupRuns = Array.isArray(res?.workflow_runs) ? res.workflow_runs : [];
+      return recentMergeGroupRuns;
+    };
 
     // One GraphQL read of all due PRs says which of them changed since the last read; only those (and PRs whose patrol
     // is due) are read in detail over REST. Without a GraphQL answer every due PR is read over REST, as before #1396.
@@ -3168,6 +4010,13 @@ async function reconcileOpenBotPullRequestsForRepo(
                 source: group.wfRunId ? 'workflow_run' : group.suiteId ? 'check_suite' : 'check_run',
                 headSha: verified.headSha,
                 headBranch: verified.headRef,
+                headRepositoryId: String(repositoryId),
+                workflowEvent: null,
+                mergeGroup: false,
+                mergeGroupSha: null,
+                mergeGroupBranch: null,
+                mergeGroupBaseRef: null,
+                mergeGroupPrNumber: null,
                 runOrSuiteId: canonicalRunOrSuiteId(group.wfRunId, group.suiteId, Number(first.id) || null),
                 canonicalGroup: canonicalCheckGroup(group.wfRunId, group.suiteId, Number(first.id) || null),
                 workflowRunId: group.wfRunId,
@@ -3186,7 +4035,7 @@ async function reconcileOpenBotPullRequestsForRepo(
               if (hasRecordedCheckFailure(store, repositoryId, prNumber, parsed)) continue;
               cachedComments ??= (await guardRequest(github.pages(github.path(`/issues/${prNumber}/comments`)))) ?? [];
               const failedJobs = failedRuns.slice(0, 15).map(summarizeFailedCheckRun);
-              const ev = buildCheckFailedEventInput(store, repositoryId, parsed.source, 'completed', '', deliveryId, verified, parsed, failedJobs, cachedComments);
+              const ev = buildCheckFailedEventInput(store, repositoryId, parsed.source, 'completed', '', deliveryId, botPrToTarget(repositoryId, verified), parsed, failedJobs, cachedComments);
               store.transaction(() => recordEvent(store, ev));
             }
 
@@ -3203,6 +4052,13 @@ async function reconcileOpenBotPullRequestsForRepo(
                 source: 'check_suite',
                 headSha: verified.headSha,
                 headBranch: verified.headRef,
+                headRepositoryId: String(repositoryId),
+                workflowEvent: null,
+                mergeGroup: false,
+                mergeGroupSha: null,
+                mergeGroupBranch: null,
+                mergeGroupBaseRef: null,
+                mergeGroupPrNumber: null,
                 runOrSuiteId: String(suiteId),
                 canonicalGroup: `suite:${suiteId}`,
                 workflowRunId: null,
@@ -3218,9 +4074,58 @@ async function reconcileOpenBotPullRequestsForRepo(
               };
               if (hasRecordedCheckFailure(store, repositoryId, prNumber, parsed)) continue;
               cachedComments ??= (await guardRequest(github.pages(github.path(`/issues/${prNumber}/comments`)))) ?? [];
-              const ev = buildCheckFailedEventInput(store, repositoryId, 'check_suite', 'completed', '', deliveryId, verified, parsed, [], cachedComments);
+              const ev = buildCheckFailedEventInput(store, repositoryId, 'check_suite', 'completed', '', deliveryId, botPrToTarget(repositoryId, verified), parsed, [], cachedComments);
               store.transaction(() => recordEvent(store, ev));
             }
+          }
+        }
+
+        // Also reconcile recent failed Merge Queue (`merge_group`) runs targeting `gh-readonly-queue/<base>/pr-<N>-<sha>`
+        // (fetched lazily once per repository pass) so dropped `merge_group` / `dequeued` webhooks still wake the Manager.
+        const mqRuns = await readRecentMergeGroupRuns();
+        if (rateLimited) break;
+        const candidateMqRuns = (mqRuns ?? []).filter((run: any) => {
+          if (!run || typeof run !== 'object' || String(run.status || '') !== 'completed') return false;
+          if (!FAILED_CONCLUSIONS.has(String(run.conclusion || '').toLowerCase())) return false;
+          const mq = parseMergeQueueBranch(run.head_branch);
+          return Boolean(mq && mq.prNumber === prNumber);
+        });
+        if (candidateMqRuns.length) {
+          const headCommitDate = await readHeadCommitDate(github, verified.headSha);
+          const verifiedTarget = botPrToTarget(repositoryId, verified);
+          const freshMqRuns = matchingFailedMergeGroupRuns(candidateMqRuns, repoFullName, prNumber, verifiedTarget, headCommitDate);
+          for (const { parsed: mqParsed } of freshMqRuns) {
+            if (rateLimited || !store.db.isOpen) break;
+            if (hasRecordedCheckFailure(store, repositoryId, prNumber, mqParsed)) continue;
+            if (hasRecentMergeGroupCheckFailure(store, repositoryId, prNumber, verifiedTarget.headSha, true)) continue;
+            const inspected = await inspectWorkflowOrSuiteChecks(github, mqParsed.headSha, mqParsed.workflowRunId, mqParsed.checkSuiteId);
+            if (inspected.suitePending) continue;
+            const resolved = applyResolvedCheckPreflight(mqParsed, {
+              failedJobs: inspected.failedJobs,
+              resolvedWorkflowRunId: inspected.resolvedWorkflowRunId,
+              resolvedCheckSuiteId: inspected.resolvedCheckSuiteId,
+              resolvedWorkflowName: inspected.resolvedWorkflowName,
+              resolvedWorkflowUrl: inspected.resolvedWorkflowUrl,
+            });
+            if (resolved.checkSuiteId) pendingSuiteFlushes.delete(`${repositoryId}:suite:${resolved.checkSuiteId}:${resolved.attempt}`);
+            if (resolved.workflowRunId) pendingSuiteFlushes.delete(`${repositoryId}:run:${resolved.workflowRunId}:${resolved.attempt}`);
+            if (hasRecordedCheckFailure(store, repositoryId, prNumber, resolved)) continue;
+            if (hasRecentMergeGroupCheckFailure(store, repositoryId, prNumber, verifiedTarget.headSha, true)) continue;
+            cachedComments ??= (await guardRequest(github.pages(github.path(`/issues/${prNumber}/comments`)))) ?? [];
+            if (rateLimited) break;
+            const ev = buildCheckFailedEventInput(
+              store,
+              repositoryId,
+              resolved.source,
+              'completed',
+              '',
+              deliveryId,
+              verifiedTarget,
+              resolved,
+              inspected.failedJobs,
+              cachedComments,
+            );
+            store.transaction(() => recordEvent(store, ev));
           }
         }
 
@@ -3531,6 +4436,13 @@ export function carryUnconsumedTaskUpdates(store: Store, taskId: string, current
           carried_from: String(taskId),
           pr_number: prNumber,
           head_sha: effectiveHead,
+          ...(data.merge_group || data.check?.merge_group ? {
+            merge_group: true,
+            merge_group_sha: data.merge_group_sha ?? data.check?.merge_group_sha ?? null,
+            merge_group_branch: data.merge_group_branch ?? data.check?.merge_group_branch ?? null,
+            ...((data.merge_group_base_ref ?? data.check?.merge_group_base_ref) ? { merge_group_base_ref: data.merge_group_base_ref ?? data.check?.merge_group_base_ref } : {}),
+          } : {}),
+          ...((data.dequeued_reason ?? data.check?.dequeued_reason) ? { dequeued_reason: data.dequeued_reason ?? data.check?.dequeued_reason } : {}),
           root_issue_number: rootIssue,
           object: objectFacts(verified.prObject),
           check: data.check,
@@ -3601,7 +4513,7 @@ export function carryUnconsumedTaskUpdates(store: Store, taskId: string, current
       if (!Number.isSafeInteger(objNum) || objNum < 1) continue;
       // Avoid duplicating if `carryRevisionRequests` (`revision.carried:${taskId}`) already carried this exact comment/request ID.
       const sourceId = data.revision_request?.id ?? data.source?.id ?? data.comment?.id;
-      if (sourceId != null) {
+      if (sourceId != null && !data.edited) {
         const revCarried = store.get('SELECT facts FROM dispatch_events WHERE event_key=?', `${repositoryId}:revision.carried:${taskId}`);
         if (revCarried?.facts) {
           let carriedReqs: any[] = [];

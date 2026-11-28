@@ -388,6 +388,7 @@ test('repository rows report every feature\'s access gaps, whether or not the fe
     { kind: 'permission', name: 'actions', required: 'write', current: 'read', features: ['release', 'actions_dispatch'] },
     { kind: 'permission', name: 'workflows', required: 'write', current: null, features: ['ci_changes'] },
     { kind: 'event', name: 'check_run', features: ['ci_checks'] },
+    { kind: 'event', name: 'check_suite', features: ['ci_checks'] },
     { kind: 'event', name: 'status', features: ['ci_checks'] },
     { kind: 'event', name: 'workflow_run', features: ['actions_failures'] }];
   // The switch only decides how urgent the console shows it, not whether the gap is reported.
@@ -397,7 +398,7 @@ test('repository rows report every feature\'s access gaps, whether or not the fe
   // The baseline fields keep their meaning: actions is below the baseline, workflows and workflow_run are not part of it.
   assert.deepEqual(listed.map(r => [r.permission_missing?.map(m => m.permission), r.events_missing]), [[['actions'], []], [['actions'], []], [[], []]]);
   // The in-place permission check returns whole rows, and a granted installation clears the gaps.
-  github.installations = [installation(77, { ...full, workflows: 'write' }, { events: [...events, 'check_run', 'status', 'workflow_run'] })];
+  github.installations = [installation(77, { ...full, workflows: 'write' }, { events: [...events, 'check_run', 'check_suite', 'status', 'workflow_run'] })];
   const checked = await admin('/api/installations/permissions/check', 'POST', {});
   assert.deepEqual(checked.value.repositories.map(r => [r.id, r.full_name, r.access_gaps.length, r.actions_failures_enabled]),
     [['101', 'fixture/project-101', 0, true], ['202', 'fixture/project-202', 0, false], ['303', 'fixture/project-303', 1, false]]);

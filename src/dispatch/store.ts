@@ -863,6 +863,13 @@ export function genericRefusal(
       return { work: role, code: 'task_executor_unavailable', reason: `角色「${role}」不存在、已停用或不可作为执行角色。` };
     }
   }
+  if (writes.includes('pull_request') && context.event.type === 'pull_request.checks_failed' && (context.facts as any)?.bot_pull_request === false) {
+    return {
+      work: 'pull_request',
+      code: 'non_bot_pr_write_forbidden',
+      reason: '这是他人开启的 PR 检查失败事件，禁止授予 pull_request 写分支权限；请直接分析日志并回复，或派发只读分析任务（writes: ["github"] 或按需 ["actions_rerun"]）。',
+    };
+  }
   if (writes.includes('pull_request') && target && (target.type === 'issue' || target.type === 'pr') && target.number) {
     if (target.type === 'issue' && !actionsDevelopmentAllowed(store, repo, target.number)) {
       return { work: 'pull_request', code: 'actions_development_not_allowed', reason: '这是 Actions 失败提报的 Issue，项目已关闭 Actions 失败处理或能力上限不到 develop。' };
@@ -877,6 +884,15 @@ export function genericRefusal(
       };
     }
     if (target.type === 'pr') {
+      const isOwnedBotPr = store.hasTable('bot_pull_requests')
+        && Boolean(store.get('SELECT 1 FROM bot_pull_requests WHERE repository_id=? AND number=?', repo, target.number));
+      if (!isOwnedBotPr && (context.event.type === 'pull_request.checks_failed' || (context.facts as any)?.bot_pull_request === false)) {
+        return {
+          work: 'pull_request',
+          code: 'non_bot_pr_write_forbidden',
+          reason: '这是他人开启的 PR，禁止授予 pull_request 写分支权限；请直接分析日志并回复，或派发只读分析任务（writes: ["github"] 或按需 ["actions_rerun"]）。',
+        };
+      }
       const resumable = findResumableBotPrTask(store, repo, target.number);
       if (resumable) {
         return {
@@ -1345,9 +1361,14 @@ function join(store: Store, event: Row, taskId: string, decision: Decision, targ
       recordedRequests = [...(singleReq ? [singleReq] : []), ...multiReqs];
       if (!isDormantDev) {
         const known = (input.revision?.requests || []) as any[];
+        const updatedKnown = known.map(k => {
+          const editedMatch = recordedRequests.find(r => r && r.edited && k.type === r.type && String(k.id) === String(r.id));
+          return editedMatch ? { ...k, ...editedMatch } : k;
+        });
         const addedReqs = recordedRequests.filter(r => r && !known.some(k => k.type === r.type && String(k.id) === String(r.id)));
-        const revision = addedReqs.length
-          ? { revision: { ...(input.revision || {}), source: input.revision?.source || 'request', requests: [...known, ...addedReqs] } }
+        const hasEditedReq = recordedRequests.some(r => r?.edited && known.some(k => k.type === r.type && String(k.id) === String(r.id)));
+        const revision = addedReqs.length || hasEditedReq
+          ? { revision: { ...(input.revision || {}), source: input.revision?.source || 'request', requests: [...updatedKnown, ...addedReqs] } }
           : {};
         const pushedHead = typeof merge.head === 'string' && /^[a-f0-9]{40}$/.test(merge.head) ? merge.head : null;
         const headMove = task.kind === 'task.request' && input.target?.type === 'pr' && pushedHead && pushedHead !== task.head_sha

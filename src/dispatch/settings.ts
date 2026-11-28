@@ -55,13 +55,14 @@ export function effectiveManagerPrompt(store: Store, repositoryId: string): stri
 export interface EventFilters {
   'issue.opened': boolean; 'issue.updated': boolean; 'issue.mention': boolean; 'issue.labels': string[]; 'issue.development_label': boolean;
   'pull_request.opened': boolean; 'pull_request.synchronize': boolean; 'pull_request.updated': boolean; 'pull_request.mention': boolean; 'pull_request.labels': string[];
+  'pull_request.checks_failed': boolean;
   'review.published.issue': boolean; 'review.published.pr': boolean; 'actions.run_failed': boolean;
 }
 export const dispatchEventTypes = ['issue.opened', 'issue.updated', 'issue.mention', 'issue.labeled', 'issue.linked_pull_request', 'pull_request.opened', 'pull_request.synchronize', 'pull_request.updated',
   'pull_request.mention', 'pull_request.labeled', 'pull_request.checks_failed', 'pull_request.conflicted', 'pull_request.patrol', 'review.published', 'development.stopped', 'release.manual', 'actions.run_failed', 'schedule.due'];
 export const filterColumns: Record<string, string> = { 'issue.opened': 'review_issues', 'issue.updated': 'review_issue_updates', 'pull_request.opened': 'review_pull_requests',
   'pull_request.synchronize': 'review_pr_updates', 'pull_request.updated': 'review_pr_discussion', 'actions.run_failed': 'actions_failures_enabled' };
-const filterFlags = ['issue.mention', 'issue.development_label', 'pull_request.mention', 'review.published.issue', 'review.published.pr'];
+const filterFlags = ['issue.mention', 'issue.development_label', 'pull_request.mention', 'pull_request.checks_failed', 'review.published.issue', 'review.published.pr'];
 
 export function syncEventFilters(store: Store, repositoryId: string, changes: Record<string, unknown>) {
   const policy = policyOf(store, repositoryId); if (!policy) return;
@@ -79,6 +80,7 @@ export function eventFilters(store: Store, repositoryId: string, policy = policy
     'issue.opened': issues, 'issue.updated': flag('issue.updated', issues && !!policy?.review_issue_updates), 'issue.mention': flag('issue.mention', issues), 'issue.labels': labels('issue.labels'),
     'issue.development_label': flag('issue.development_label'), 'pull_request.opened': pulls, 'pull_request.synchronize': !!policy?.review_pr_updates,
     'pull_request.updated': flag('pull_request.updated', pulls && !!policy?.review_pr_discussion), 'pull_request.mention': flag('pull_request.mention', pulls), 'pull_request.labels': labels('pull_request.labels'),
+    'pull_request.checks_failed': flag('pull_request.checks_failed', pulls),
     'review.published.issue': flag('review.published.issue'), 'review.published.pr': flag('review.published.pr'), 'actions.run_failed': !!policy?.actions_failures_enabled,
   };
 }

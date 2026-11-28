@@ -12,8 +12,8 @@ const cjkWords = text => text.match(/[^\s]*[\u4e00-\u9fff][^\s]*/g) || [];
 test('App 定义只在机器人账号检查，各功能的安装权限和事件缺口在项目行、缺口对话框与同步结论中显示', async ({ page }) => {
   const full = { contents: 'write', issues: 'write', pull_requests: 'write', statuses: 'write', actions: 'write', checks: 'write', metadata: 'read' };
   const events = ['issues', 'pull_request', 'issue_comment', 'pull_request_review', 'pull_request_review_comment'];
-  // Gate onboarding also needs workflows, CI status display check_run/status, and Actions failure analysis workflow_run.
-  const everything = { ...full, workflows: 'write' }, allEvents = [...events, 'check_run', 'status', 'workflow_run'];
+  // Gate onboarding also needs workflows, CI status/PR check display check_run/check_suite/status, and Actions failure analysis workflow_run.
+  const everything = { ...full, workflows: 'write' }, allEvents = [...events, 'check_run', 'check_suite', 'status', 'workflow_run'];
   const app = { slug: 'fixture-app', html_url: 'https://github.com/apps/fixture-app', owner: { login: 'fixture', type: 'Organization' },
     permissions: { ...full, statuses: 'read', actions: undefined }, events: ['issues', 'pull_request'] };
   const installations = [{ id: 7, account: { id: 10, login: 'fixture', type: 'Organization' }, repository_selection: 'all',
@@ -81,15 +81,17 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     // Every gap opens with what is missing, how to fix it and what it stops, including features that are off.
     await chip('101').click();
     const gapsView = page.locator('dialog.access-dialog'), items = gapsView.locator('.access-gaps > li');
-    await expect(gapsView.getByRole('heading', { name: '权限与事件缺口 · fixture/project-101' })).toBeVisible(); await expect(items).toHaveCount(7);
+    await expect(gapsView.getByRole('heading', { name: '权限与事件缺口 · fixture/project-101' })).toBeVisible(); await expect(items).toHaveCount(8);
     await expect(items.nth(1)).toContainText('Workflows 需要「Read and write」，现在「No access」');
     await expect(items.nth(1)).toContainText('把 Workflows 设为「Read and write」并保存；新增权限要由安装所有者（fixture）在 GitHub 的安装设置里接受');
     await expect(items.nth(1)).toContainText('CI 工作流改动（手动使用时）：推不了改动 .github/workflows 的 bot 分支，这类 PR 开不出来');
     // #1072: a project that cannot write Actions cannot start workflows either; it has no switch, so it reads as manual use.
     await expect(items.nth(0)).toContainText('触发 Actions 工作流（手动使用时）：定时任务、管理助手和飞书群触发不了工作流');
     await expect(items.nth(4)).toContainText('未订阅事件 Check run');
-    await expect(items.nth(6)).toContainText('默认分支和版本标签上的失败运行不会生成排查事件。涉及：Actions 失败分析（未开启）');
-    await expect(items.nth(6)).toContainText('勾选 Workflow run 并保存。这是事件订阅，不是 Workflows 权限');
+    await expect(items.nth(5)).toContainText('未订阅事件 Check suite');
+    await expect(items.nth(7)).toContainText('默认分支和版本标签上的失败运行不会生成排查事件');
+    await expect(items.nth(7)).toContainText('涉及：Actions 失败分析（未开启）');
+    await expect(items.nth(7)).toContainText('勾选 Workflow run 并保存。这是事件订阅，不是 Workflows 权限');
     for (const [width, height] of [[1365, 900], [1440, 900], [390, 844]]) {
       await page.setViewportSize({ width, height });
       await items.nth(0).evaluate(node => node.scrollIntoView({ block: 'start' }));
@@ -127,7 +129,7 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     // #977: a fresh empty reading names its state on the settings table too, instead of leaving an empty cell.
     await expect(chip('101')).toHaveText('正常'); await expect(chip('202')).toHaveText('正常');
     // Without workflow_run both rows are flagged; switching the feature on only raises that row from blue to amber.
-    installations[0].events = [...events, 'check_run', 'status'];
+    installations[0].events = [...events, 'check_run', 'check_suite', 'status'];
     expect((await admin('/api/repositories/101/policy', 'PATCH', { actions_failures_enabled: true })).status).toBe(200);
     await sync.click(); await expect(message).toContainText('未订阅事件 Workflow run（影响 Actions 失败分析）');
     await expect(chip('101')).toHaveText('事件未订阅'); await expect(chip('101')).toHaveClass(/status-warning/);

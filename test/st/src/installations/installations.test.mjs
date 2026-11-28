@@ -383,10 +383,11 @@ test('the global permission check measures only the App definition and keeps its
   assert.deepEqual(report.app.feature_gaps, [
     { kind: 'permission', name: 'workflows', required: 'write', current: null, features: ['ci_changes'] },
     { kind: 'event', name: 'check_run', features: ['ci_checks'] },
+    { kind: 'event', name: 'check_suite', features: ['ci_checks'] },
     { kind: 'event', name: 'status', features: ['ci_checks'] },
     { kind: 'event', name: 'workflow_run', features: ['actions_failures'] },
   ]);
-  app.permissions = { ...full, workflows: 'write' }; app.events = [...events, 'check_run', 'status', 'workflow_run']; report = await check();
+  app.permissions = { ...full, workflows: 'write' }; app.events = [...events, 'check_run', 'check_suite', 'status', 'workflow_run']; report = await check();
   assert.deepEqual([report.ok, report.app.feature_gaps], [true, []]);
   app.owner = { login: 'someone', type: 'User' }; report = await check();
   assert.equal(report.app.settings_url, 'https://github.com/settings/apps/fixture-app/permissions');

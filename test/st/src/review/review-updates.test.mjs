@@ -5,6 +5,9 @@ import { harness, setup, account, repository } from '../../../fixtures/helpers.m
 import { TaskEngine } from '../../../../dist/agent/engine.js';
 import { recordRevision } from '../../../../dist/github/publisher.js';
 import { enqueueRefusal, pullRequestNeeded, queueWebhook, updateTrigger } from '../../../../dist/review/queue.js';
+import { botPrWakeEvents } from '../../../../dist/review/bot-pr-wake.js';
+import { applyDecision, continuations, decideImmediately } from '../../../../dist/dispatch/store.js';
+import { ruleDecider } from '../../../../dist/dispatch/worker.js';
 import { emptyRepositoryFixture } from '../../../fixtures/empty-repository-helpers.mjs';
 
 // Reviews of what a person changes after an Issue or PR was opened: edits, comments, reviews and replies to review comments.
@@ -259,5 +262,252 @@ test('a queued PR update review prepares the current head instead of being super
   h.setBranch('ready'); h.store.run("UPDATE tasks SET kind='review.pr',head_sha=?,unique_key='101:review.pr:1:update:x',input=? WHERE id=?", 'c'.repeat(40), JSON.stringify({ trigger: { reason: 'pull_request_edited' } }), h.taskId);
   const task = await h.run(); assert.equal(task.status, 'succeeded'); assert.equal(task.head_sha, current.head.sha);
   assert.equal(h.store.get('SELECT count(*) n FROM tasks').n, 1);
+});
+
+test('edited comments, reviews, and review comments trigger only on real body changes and preserve outsider, @bot transition, and dedup boundaries (#1427)', async t => {
+  const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
+  await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true });
+  h.store.run("INSERT OR REPLACE INTO github_actors VALUES(?,?,?,?)", a.id, '999', 'dept-bot[bot]', new Date().toISOString());
+  h.store.run("INSERT INTO bot_pull_requests VALUES('101',7,'55','999','101','bot/issue-1',?,'src-7',0)", 'c'.repeat(40));
+
+  const head = 'c'.repeat(40);
+  const issue = { number: 1, state: 'open', title: 'Fix parser', body: 'Initial issue', user: { id: 5 } };
+  const pr = { number: 7, state: 'open', draft: false, head: { sha: head }, user: { id: 999 }, body: 'Bot PR' };
+  const humanPr = { number: 8, state: 'open', draft: false, head: { sha: 'd'.repeat(40) }, user: { id: 5 }, body: 'Human PR' };
+  const stranger = { type: 'User', login: 'mallory', id: 9 };
+  const otherBot = { type: 'Bot', login: 'copilot[bot]', id: 77 };
+  const thisBot = { type: 'Bot', login: 'dept-bot[bot]', id: 999 };
+  const q = (event, payload, delivery, current) => queueWebhook(h.store, '101', event, { repository: { id: 101 }, ...payload }, delivery, current);
+  const latestEvent = (type, num) => h.store.get(
+    'SELECT * FROM dispatch_events WHERE repository_id=? AND type=? AND object_number=? ORDER BY created_at DESC, rowid DESC LIMIT 1',
+    '101', type, num,
+  );
+
+  // 1. Issue comment created then edited with real body change: delivery-based dedup key never collides with original created key!
+  assert.equal(q('issue_comment', { action: 'created', sender: user, issue, comment: { id: 301, body: 'Initial note.', html_url: 'https://github.invalid/issues/1#issuecomment-301' } }, 'del-ic-create'), 1);
+  finish(h);
+  assert.equal(q('issue_comment', {
+    action: 'edited',
+    sender: user,
+    issue,
+    comment: { id: 301, body: 'Initial note. Also handle empty input.', html_url: 'https://github.invalid/issues/1#issuecomment-301' },
+    changes: { body: { from: 'Initial note.' } },
+  }, 'del-ic-edit-1'), 0);
+  const evIcEdit = latestEvent('issue.updated', 1);
+  assert.ok(evIcEdit, 'edited issue comment recorded issue.updated');
+  const fIcEdit = JSON.parse(evIcEdit.facts);
+  assert.equal(fIcEdit.trigger.reason, 'comment_edited');
+  assert.equal(fIcEdit.trigger.edited, true);
+  assert.equal(fIcEdit.trigger.previous.body, 'Initial note.');
+  assert.equal(h.store.get("SELECT status FROM tasks WHERE kind='review.issue' AND object_number=1").status, 'queued');
+  finish(h);
+
+  // 2. No-op edits (unchanged body or missing changes.body.from) produce ZERO events and ZERO filtered rows.
+  const countBeforeNoop = h.store.get('SELECT count(*) n FROM dispatch_events').n;
+  for (const [ev, pl, del] of [
+    ['issue_comment', { action: 'edited', sender: user, issue, comment: { id: 301, body: 'Same' }, changes: { body: { from: 'Same' } } }, 'del-noop-1'],
+    ['issue_comment', { action: 'edited', sender: user, issue, comment: { id: 301, body: 'Missing from' } }, 'del-noop-2'],
+    ['pull_request_review', { action: 'edited', sender: user, pull_request: humanPr, review: { id: 401, body: 'Same', state: 'commented' }, changes: { body: { from: 'Same' } } }, 'del-noop-3'],
+    ['pull_request_review_comment', { action: 'edited', sender: user, pull_request: humanPr, comment: { id: 501, body: 'Same' }, changes: { body: { from: 'Same' } } }, 'del-noop-4'],
+  ]) {
+    assert.equal(q(ev, pl, del), 0, del);
+  }
+  assert.equal(h.store.get('SELECT count(*) n FROM dispatch_events').n, countBeforeNoop, 'no-op edits create neither wakeups nor filtered rows');
+
+  // 3. pullRequestNeeded returns true for edited PR conversation comment with body change, false for no-op edit.
+  const prEditPayload = {
+    repository: { id: 101 },
+    action: 'edited',
+    sender: user,
+    issue: { number: 8, state: 'open', user: { id: 5 }, pull_request: { url: 'https://api.github.invalid/pulls/8' } },
+    comment: { id: 302, body: 'Please check edge case X.', html_url: 'https://github.invalid/pull/8#issuecomment-302' },
+    changes: { body: { from: 'Please check.' } },
+  };
+  assert.equal(pullRequestNeeded(h.store, '101', 'issue_comment', prEditPayload), true);
+  assert.equal(pullRequestNeeded(h.store, '101', 'issue_comment', { ...prEditPayload, changes: { body: { from: 'Please check edge case X.' } } }), false);
+  assert.equal(q('issue_comment', prEditPayload, 'del-pr-ic-edit', humanPr), 1);
+  const evPrIcEdit = latestEvent('pull_request.updated', 8);
+  assert.equal(JSON.parse(evPrIcEdit.facts).trigger.edited, true);
+  assert.equal(JSON.parse(evPrIcEdit.facts).trigger.previous.body, 'Please check.');
+  finish(h);
+
+  // 4. pull_request_review.edited and pull_request_review_comment.edited (comment + reply) carry edited + previous.body.
+  q('pull_request_review', {
+    action: 'edited',
+    sender: user,
+    pull_request: humanPr,
+    review: { id: 402, state: 'commented', body: 'Updated review: fix null guard.', html_url: 'https://github.invalid/pull/8#pullrequestreview-402' },
+    changes: { body: { from: 'Old review.' } },
+  }, 'del-rev-edit');
+  const fRevEdit = JSON.parse(latestEvent('pull_request.updated', 8).facts);
+  assert.equal(fRevEdit.trigger.reason, 'review_edited');
+  assert.equal(fRevEdit.trigger.edited, true);
+  assert.equal(fRevEdit.trigger.previous.body, 'Old review.');
+  finish(h);
+
+  q('pull_request_review_comment', {
+    action: 'edited',
+    sender: user,
+    pull_request: humanPr,
+    comment: { id: 502, body: 'Updated inline suggestion.', path: 'a.js', line: 9, in_reply_to_id: 500, html_url: 'https://github.invalid/pull/8#discussion_r502' },
+    changes: { body: { from: 'Old inline.' } },
+  }, 'del-rc-edit');
+  const fRcEdit = JSON.parse(latestEvent('pull_request.updated', 8).facts);
+  assert.equal(fRcEdit.trigger.reason, 'review_reply_edited');
+  assert.equal(fRcEdit.trigger.edited, true);
+  assert.equal(fRcEdit.trigger.previous.body, 'Old inline.');
+  finish(h);
+
+  // 5. Outsider & @bot mention transition matrix on edited comments:
+  //    - Outsider editing without @bot -> filtered as outsider_comment (`issue_comment.edited`)
+  q('issue_comment', {
+    action: 'edited',
+    sender: stranger,
+    issue,
+    comment: { id: 310, body: 'Updated outsider comment without mention', author_association: 'NONE' },
+    changes: { body: { from: 'Initial outsider comment' } },
+  }, 'del-out-no-mention');
+  const filtOut1 = h.store.get("SELECT state,type,reason FROM dispatch_events WHERE event_key='101:filtered:del-out-no-mention'");
+  assert.equal(filtOut1.state, 'filtered');
+  assert.equal(filtOut1.type, 'issue.updated');
+  assert.match(filtOut1.reason, /外人的评论只有提到 bot/);
+
+  //    - Outsider editing comment that ALREADY had @bot -> filtered as outsider_comment (no duplicate mention!)
+  q('issue_comment', {
+    action: 'edited',
+    sender: stranger,
+    issue,
+    comment: { id: 311, body: '@bot still asking with typo fixed', author_association: 'NONE' },
+    changes: { body: { from: '@bot still askng' } },
+  }, 'del-out-already-mention');
+  assert.equal(h.store.get("SELECT state FROM dispatch_events WHERE event_key='101:filtered:del-out-already-mention'")?.state, 'filtered');
+  assert.equal(h.store.get("SELECT count(*) n FROM dispatch_events WHERE type='issue.mention'").n, 0);
+
+  //    - Outsider editing comment to NEWLY add @bot -> enters issue.mention with edited + previous.body!
+  q('issue_comment', {
+    action: 'edited',
+    sender: stranger,
+    issue,
+    comment: { id: 312, body: '@bot please explain how this works', author_association: 'NONE', html_url: 'https://github.invalid/issues/1#issuecomment-312' },
+    changes: { body: { from: 'how does this work' } },
+  }, 'del-out-new-mention');
+  const evOutMention = latestEvent('issue.mention', 1);
+  assert.ok(evOutMention, 'outsider newly adding @bot via edit enters issue.mention');
+  assert.equal(evOutMention.event_key, '101:issue.mention:1:update:del-out-new-mention');
+  assert.equal(JSON.parse(evOutMention.facts).trigger.edited, true);
+  assert.equal(JSON.parse(evOutMention.facts).trigger.previous.body, 'how does this work');
+  finish(h);
+
+  //    - Trusted user editing a comment that ALREADY had @bot -> routes to issue.updated (not duplicate issue.mention)
+  q('issue_comment', {
+    action: 'edited',
+    sender: user,
+    issue,
+    comment: { id: 313, body: '@bot please also check case B', html_url: 'https://github.invalid/issues/1#issuecomment-313' },
+    changes: { body: { from: '@bot please check case A' } },
+  }, 'del-trusted-already-mention');
+  assert.equal(h.store.get("SELECT count(*) n FROM dispatch_events WHERE type='issue.mention'").n, 1, 'already-mentioned trusted edit does not duplicate issue.mention');
+  assert.equal(JSON.parse(latestEvent('issue.updated', 1).facts).trigger.edited, true);
+  finish(h);
+
+  //    - Trusted user editing a comment to NEWLY add @bot -> enters issue.mention with delivery-based key
+  q('issue_comment', {
+    action: 'edited',
+    sender: user,
+    issue,
+    comment: { id: 314, body: '@bot please implement this', html_url: 'https://github.invalid/issues/1#issuecomment-314' },
+    changes: { body: { from: 'thinking about this' } },
+  }, 'del-trusted-new-mention');
+  assert.equal(h.store.get("SELECT count(*) n FROM dispatch_events WHERE type='issue.mention'").n, 2);
+  assert.equal(latestEvent('issue.mention', 1).event_key, '101:issue.mention:1:update:del-trusted-new-mention');
+
+  // 6. Bot's own edits, closed/draft PR edits, and other bot edits on human PR never trigger;
+  //    other bot editing its review comment on bot's own PR #7 DOES trigger.
+  const evBeforeGuards = h.store.get("SELECT count(*) n FROM dispatch_events WHERE state<>'filtered'").n;
+  q('pull_request_review_comment', { action: 'edited', sender: thisBot, pull_request: pr, comment: { id: 601, body: 'Bot self edit' }, changes: { body: { from: 'old' } } }, 'del-bot-self');
+  q('pull_request_review_comment', { action: 'edited', sender: user, pull_request: { ...humanPr, draft: true }, comment: { id: 602, body: 'Draft edit' }, changes: { body: { from: 'old' } } }, 'del-draft-edit');
+  q('pull_request_review_comment', { action: 'edited', sender: user, pull_request: { ...humanPr, state: 'closed' }, comment: { id: 603, body: 'Closed edit' }, changes: { body: { from: 'old' } } }, 'del-closed-edit');
+  q('pull_request_review_comment', { action: 'edited', sender: otherBot, pull_request: humanPr, comment: { id: 604, body: 'Other bot on human PR' }, changes: { body: { from: 'old' } } }, 'del-otherbot-human');
+  assert.equal(h.store.get("SELECT count(*) n FROM dispatch_events WHERE state<>'filtered'").n, evBeforeGuards);
+
+  q('pull_request_review_comment', {
+    action: 'edited',
+    sender: otherBot,
+    pull_request: pr,
+    comment: { id: 605, body: 'Updated bot review finding.', author_association: 'NONE', path: 'x.js', line: 4 },
+    changes: { body: { from: 'Old bot review finding.' } },
+  }, 'del-otherbot-botpr-edit');
+  const evBotPrEdit = latestEvent('pull_request.updated', 7);
+  assert.ok(evBotPrEdit, 'other review bot editing comment on bot PR triggers Manager');
+  assert.equal(JSON.parse(evBotPrEdit.facts).trigger.edited, true);
+  assert.equal(JSON.parse(evBotPrEdit.facts).trigger.actor_type, 'Bot');
+});
+
+test('edited human comments clear bot PR conflict suppression and update merged revision request bodies (#1427)', async t => {
+  const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
+  const pol = await admin('/api/repositories/101/policy', 'PATCH', { capability_ceiling: 'develop' });
+  assert.equal(pol.status, 200, JSON.stringify(pol.value));
+  const head = 'e'.repeat(40);
+  h.store.run("INSERT OR REPLACE INTO github_actors VALUES(?,?,?,?)", a.id, '999', 'dept-bot[bot]', new Date().toISOString());
+  h.store.run("INSERT INTO bot_pull_requests VALUES('101',7,'55','999','101','bot/issue-1',?,'src-7',0)", head);
+  h.store.run(
+    `INSERT INTO bot_pr_states(repository_id,number,state,draft,head_sha,conflict_suppressed_head_sha,conflict_suppressed_env,conflict_suppressed_at,conflict_suppressed_reason,updated_at)
+     VALUES('101',7,'open',0,?,?,'env1','2026-11-20T00:00:00Z','stalled','2026-11-20T00:00:00Z')`,
+    head, head,
+  );
+  const pr = { number: 7, state: 'open', draft: false, head: { sha: head }, user: { id: 999 } };
+
+  // Unchanged edit or bot edit must NOT clear suppression.
+  botPrWakeEvents(h.store, '101', 'issue_comment', {
+    action: 'edited', sender: user, issue: { number: 7, state: 'open', pull_request: {} },
+    comment: { id: 701, body: 'same' }, changes: { body: { from: 'same' } },
+  }, 'sup-noop');
+  botPrWakeEvents(h.store, '101', 'issue_comment', {
+    action: 'edited', sender: { type: 'Bot', login: 'dept-bot[bot]', id: 999 }, issue: { number: 7, state: 'open', pull_request: {} },
+    comment: { id: 702, body: 'bot edited' }, changes: { body: { from: 'bot old' } },
+  }, 'sup-bot');
+  assert.equal(h.store.get("SELECT conflict_suppressed_head_sha FROM bot_pr_states WHERE repository_id='101' AND number=7").conflict_suppressed_head_sha, head);
+
+  // Real human body edit clears conflict suppression so the next conflict wakeup can proceed.
+  botPrWakeEvents(h.store, '101', 'pull_request_review', {
+    action: 'edited', sender: user, pull_request: pr,
+    review: { id: 703, state: 'commented', body: 'Please rebase now that main settled.' },
+    changes: { body: { from: 'Wait for main.' } },
+  }, 'sup-human-edit');
+  assert.equal(h.store.get("SELECT conflict_suppressed_head_sha FROM bot_pr_states WHERE repository_id='101' AND number=7").conflict_suppressed_head_sha, null);
+
+  // Merging an edited review comment into a queued bot PR revision task updates the stored request body in place.
+  const taskId = 'rev-task-edit-merge';
+  const reqV1 = { type: 'review_comment', id: '801', author: 'alice', author_id: '5', author_type: 'User', url: 'https://github.invalid/pull/7#discussion_r801', body: 'Original request' };
+  h.store.run(
+    "INSERT INTO tasks(id,repository_id,kind,status,summary,input,object_number,head_sha,created_at,updated_at) VALUES(?,'101','development.pr','queued','Revise PR #7',?,7,?,?,?)",
+    taskId,
+    JSON.stringify({ revision: { source: 'request', requests: [reqV1] } }),
+    head,
+    new Date().toISOString(),
+    new Date().toISOString(),
+  );
+  // Queue edited review_comment with the same id=801, then continue into the queued development.pr task.
+  decideImmediately(null);
+  t.after(() => decideImmediately(ruleDecider));
+  queueWebhook(h.store, '101', 'pull_request_review_comment', {
+    repository: { id: 101 },
+    action: 'edited',
+    sender: user,
+    pull_request: pr,
+    comment: { id: 801, body: 'Updated request: also add validation.', author_association: 'MEMBER', html_url: 'https://github.invalid/pull/7#discussion_r801', path: 'src/a.js', line: 5 },
+    changes: { body: { from: 'Original request' } },
+  }, 'del-merge-edit-801');
+  const evRow = h.store.get("SELECT * FROM dispatch_events WHERE event_key='101:pull_request.updated:7:update:del-merge-edit-801'");
+  assert.ok(evRow);
+  const conts = continuations(h.store, evRow);
+  const targetCont = conts.find(c => c.task_id === taskId);
+  assert.ok(targetCont, 'queued development.pr task is continuable');
+  applyDecision(h.store, evRow, { decision: 'continue', option_ids: [targetCont.id], reason: 'Merge edited review comment into queued revision task.' }, null);
+  const updatedRequests = JSON.parse(h.store.get('SELECT input FROM tasks WHERE id=?', taskId).input).revision.requests;
+  assert.equal(updatedRequests.length, 1, 'same request id was updated in place without duplicating');
+  assert.equal(updatedRequests[0].body, 'Updated request: also add validation.');
+  assert.equal(updatedRequests[0].edited, true);
+  assert.equal(updatedRequests[0].previous_body, 'Original request');
 });
 

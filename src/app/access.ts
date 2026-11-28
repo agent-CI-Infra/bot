@@ -16,9 +16,9 @@ export const featureNeeds: Record<Feature, Needs> = {
   development: { permissions: { metadata: 'read', contents: 'write', issues: 'write', pull_requests: 'write' }, events: appEvents },
   // Task agents read CI results with their own read-only token; a missing grant only hides CI results from them.
   ci_reads: { permissions: { actions: 'read', checks: 'read', statuses: 'read' } },
-  // Console task lists and detail pages display GitHub Actions / commit status checks from check_run and status webhooks
-  // or live read-only sync; missing event subscriptions only stop real-time push to the console, never task CI reads.
-  ci_checks: { permissions: { checks: 'read', statuses: 'read' }, events: ['check_run', 'status'] },
+  // Console task lists, detail pages, and PR CI failure analysis receive check_run, check_suite (including startup_failure
+  // suites without check runs), and status webhooks; missing subscriptions stop real-time push without blocking task CI reads.
+  ci_checks: { permissions: { checks: 'read', statuses: 'read' }, events: ['check_run', 'check_suite', 'status'] },
   board: { permissions: { metadata: 'read', contents: 'read', issues: 'read', pull_requests: 'read', actions: 'read' } },
   release: { app: true, permissions: { metadata: 'read', contents: 'write', actions: 'write', pull_requests: 'read' } },
   ci_changes: { app: true, permissions: { metadata: 'read', contents: 'write', pull_requests: 'write', workflows: 'write' } },
