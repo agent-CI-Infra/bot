@@ -7,6 +7,16 @@ import { covers, projectCeiling } from '../projects/ceiling.js';
 import { botPullRequestsOfIssue, recordEvent, rootIssueOfBotPr, threadKey, type CreateOption, type Decision, type EventInput } from '../dispatch/store.js';
 import { roleConfiguration } from '../roles/definition.js';
 import { taskPermissions } from '../tasks/configuration.js';
+import {
+  cleanupDueBotPrBranches,
+  computeBotPrBranchCleanupPlan,
+  ensureBotPrBranchCleanupColumns,
+  parseIsoMs,
+  resolveBotPrBranchCleanupConfig,
+  scheduleBotPrBranchCleanup,
+  setBotPrBranchCleanupClockFallbackForTest,
+  type BotPrBranchCleanupResult,
+} from './bot-pr-branch-cleanup.js';
 
 const HEX_SHA = /^[a-f0-9]{40}$/i;
 const ZERO_SHA = /^0{40}$/;
@@ -70,6 +80,7 @@ export function setBotWakeRecheckDelaysForTest(delays: number[] | null) {
 /** Allows unit/integration tests to configure patrol intervals, cooldowns, capability version, and clock deterministically. */
 export function setBotPatrolConfigForTest(overrides: Partial<BotPatrolConfig> | null) {
   patrolTestOverrides = overrides ? { ...overrides } : null;
+  setBotPrBranchCleanupClockFallbackForTest(overrides?.now ?? null);
 }
 
 function resolvePatrolConfig(overrides?: Partial<BotPatrolConfig>): BotPatrolConfig {
@@ -162,6 +173,7 @@ export function botPrWakeStorage(store: Store) {
   ] as const) {
     if (!cols.has(name)) store.db.exec(`ALTER TABLE bot_pr_states ADD COLUMN ${name} ${type}`);
   }
+  ensureBotPrBranchCleanupColumns(store);
 }
 
 /**
@@ -463,7 +475,7 @@ export function diffPatrolEnvironments(
 }
 
 /** Keeps auxiliary state for PRs recorded in `bot_pull_requests` without altering its 9-column schema. */
-export function syncBotPullRequestState(store: Store, repositoryId: string, pr: any, now = new Date().toISOString()): void {
+export function syncBotPullRequestState(store: Store, repositoryId: string, pr: any, now?: string): void {
   const number = Number(pr?.number);
   if (!repositoryId || !Number.isSafeInteger(number) || number < 1) return;
   if (!store.hasTable('bot_pull_requests')) return;
@@ -472,6 +484,11 @@ export function syncBotPullRequestState(store: Store, repositoryId: string, pr: 
   if (pr?.user?.id != null && String(pr.user.id) !== String(owned.author_id)) return;
   if (pr?.head?.repo?.id != null && String(pr.head.repo.id) !== String(owned.head_repository_id)) return;
   if (!store.hasTable('bot_pr_states')) botPrWakeStorage(store);
+  else ensureBotPrBranchCleanupColumns(store);
+
+  const cleanupCfg = resolveBotPrBranchCleanupConfig(patrolTestOverrides?.now ? { now: patrolTestOverrides.now } : undefined);
+  const nowMs = now ? (parseIsoMs(now) ?? cleanupCfg.now()) : cleanupCfg.now();
+  const nowIso = now ?? new Date(nowMs).toISOString();
 
   const prev = store.get('SELECT * FROM bot_pr_states WHERE repository_id=? AND number=?', repositoryId, number);
   const state = typeof pr?.state === 'string' && pr.state ? pr.state : String(prev?.state ?? 'open');
@@ -491,10 +508,14 @@ export function syncBotPullRequestState(store: Store, repositoryId: string, pr: 
     || pr?.mergeable === true
     || String(pr?.mergeable_state || '').toLowerCase() === 'clean'
     || Boolean(prev?.conflict_suppressed_head_sha && headSha && String(prev.conflict_suppressed_head_sha).toLowerCase() !== headSha);
+  const cleanupPlan = computeBotPrBranchCleanupPlan(prev, state, pr, nowIso, nowMs, cleanupCfg.retentionMs);
 
   store.run(
-    `INSERT INTO bot_pr_states(repository_id,number,state,draft,base_ref,base_sha,head_sha,mergeable,mergeable_state,title,html_url,updated_at)
-     VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+    `INSERT INTO bot_pr_states(
+       repository_id,number,state,draft,base_ref,base_sha,head_sha,mergeable,mergeable_state,title,html_url,updated_at,
+       merged,closed_at,branch_delete_due_at,branch_cleanup_status,branch_cleanup_reason,branch_cleanup_at,branch_cleanup_attempts
+     )
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
      ON CONFLICT(repository_id,number) DO UPDATE SET
        state=excluded.state,
        draft=excluded.draft,
@@ -506,6 +527,13 @@ export function syncBotPullRequestState(store: Store, repositoryId: string, pr: 
        title=coalesce(excluded.title,bot_pr_states.title),
        html_url=coalesce(excluded.html_url,bot_pr_states.html_url),
        updated_at=excluded.updated_at,
+       merged=excluded.merged,
+       closed_at=excluded.closed_at,
+       branch_delete_due_at=excluded.branch_delete_due_at,
+       branch_cleanup_status=excluded.branch_cleanup_status,
+       branch_cleanup_reason=excluded.branch_cleanup_reason,
+       branch_cleanup_at=excluded.branch_cleanup_at,
+       branch_cleanup_attempts=excluded.branch_cleanup_attempts,
        conflict_suppressed_head_sha=CASE WHEN ? THEN NULL ELSE bot_pr_states.conflict_suppressed_head_sha END,
        conflict_suppressed_env=CASE WHEN ? THEN NULL ELSE bot_pr_states.conflict_suppressed_env END,
        conflict_suppressed_at=CASE WHEN ? THEN NULL ELSE bot_pr_states.conflict_suppressed_at END,
@@ -521,12 +549,27 @@ export function syncBotPullRequestState(store: Store, repositoryId: string, pr: 
     mergeableState,
     title,
     htmlUrl,
-    now,
+    nowIso,
+    cleanupPlan.merged,
+    cleanupPlan.closedAt,
+    cleanupPlan.branchDeleteDueAt,
+    cleanupPlan.branchCleanupStatus,
+    cleanupPlan.branchCleanupReason,
+    cleanupPlan.branchCleanupAt,
+    cleanupPlan.branchCleanupAttempts,
     clearSuppression ? 1 : 0,
     clearSuppression ? 1 : 0,
     clearSuppression ? 1 : 0,
     clearSuppression ? 1 : 0,
   );
+  if (cleanupPlan.cancelledPending) {
+    store.audit(
+      'system',
+      'bot_pr.branch_cleanup_cancelled',
+      `pr#${number}:${String(owned.branch || 'unknown').slice(0, 200)}:reopened`,
+      repositoryId,
+    );
+  }
   if (headSha && pr?.state === 'open' && pr?.draft !== true && String(owned.sha).toLowerCase() !== headSha) {
     if (!pr?.head?.ref || pr.head.ref === String(owned.branch)) {
       store.run('UPDATE bot_pull_requests SET sha=? WHERE repository_id=? AND number=?', headSha, repositoryId, number);
@@ -2907,12 +2950,12 @@ async function reconcileOpenBotPullRequestsForRepo(
   deliveryId: string | null = null,
   onlyPrNumbers?: number[],
   options?: ReconcileOptions,
-): Promise<void> {
+): Promise<{ graphqlRateLimited: boolean }> {
   const repositoryId = String(repo.id);
   const repoFullName = String(repo.full_name || '');
   const policy = store.get('SELECT * FROM policies WHERE repository_id=?', repositoryId);
-  if (!policy?.enabled || !covers(projectCeiling(store, repositoryId, policy), 'comment')) return;
-  if (!store.hasTable('bot_pull_requests')) return;
+  if (!policy?.enabled || !covers(projectCeiling(store, repositoryId, policy), 'comment')) return { graphqlRateLimited: false };
+  if (!store.hasTable('bot_pull_requests')) return { graphqlRateLimited: false };
   if (!store.hasTable('bot_pr_states')) botPrWakeStorage(store);
 
   const patrolConfig = resolvePatrolConfig(options?.patrol);
@@ -2922,7 +2965,7 @@ async function reconcileOpenBotPullRequestsForRepo(
   const prFilter = Array.isArray(onlyPrNumbers)
     ? [...new Set(onlyPrNumbers.filter(n => Number.isSafeInteger(n) && n > 0))]
     : null;
-  if (prFilter && !prFilter.length) return;
+  if (prFilter && !prFilter.length) return { graphqlRateLimited: false };
   // Every open bot PR is a candidate (#1396 removed the newest-25 cap). A webhook-driven recheck (prFilter) reads its
   // PRs over REST at once; the scheduled reconcile reads only the PRs that are due, and connects only when one is.
   const allCandidates = store.all(
@@ -2941,7 +2984,7 @@ async function reconcileOpenBotPullRequestsForRepo(
   const candidates = scheduled && !options?.forcePatrol
     ? allCandidates.filter(row => botPrReconcileDue(row, nowMs, localEnv, patrolConfig))
     : allCandidates;
-  if (!candidates.length) return;
+  if (!candidates.length) return { graphqlRateLimited: false };
 
   const redactor = registeredRedactor(store);
   const github = new GitHub(store, repo, redactor, async () => {}, apiUrl);
@@ -2968,7 +3011,7 @@ async function reconcileOpenBotPullRequestsForRepo(
     let snapshots: Map<number, BotPrSnapshot | null> | null = null;
     if (scheduled) {
       const batch = await readBotPrSnapshots(github, candidates.map(row => Number(row.number)));
-      if (batch.rateLimited) return;
+      if (batch.rateLimited) return { graphqlRateLimited: true };
       snapshots = batch.snapshots;
       for (const s of snapshots?.values() ?? []) if (s?.baseRef && s.baseTip && !branchHeads.has(s.baseRef)) branchHeads.set(s.baseRef, s.baseTip);
     }
@@ -3334,6 +3377,7 @@ async function reconcileOpenBotPullRequestsForRepo(
         if (scheduled && !rateLimited && store.db.isOpen) saveBotPrReconcile(store, repositoryId, prNumber, nowMs, seen ?? 'unreadable', row, localEnv);
       }
     }
+    return { graphqlRateLimited: false };
   } finally {
     if (github.token && store.get('SELECT type FROM accounts WHERE id=?', repo.account_id)?.type === 'github_app') {
       await revokeInstallationToken(apiUrl || 'https://api.github.com', github.token).catch(() => false);
@@ -3352,6 +3396,7 @@ async function reconcileOpenBotPullRequestsForRepo(
 export class BotPrWakeScanner {
   private timer?: ReturnType<typeof setInterval>;
   private active?: Promise<void>;
+  private readonly activeCleanups = new Set<Promise<unknown>>();
   private closing = false;
   private patrolOptions?: Partial<BotPatrolConfig>;
   constructor(readonly store: Store, readonly apiUrl?: string, patrolOptions?: Partial<BotPatrolConfig>) {
@@ -3367,11 +3412,27 @@ export class BotPrWakeScanner {
     this.closing = true;
     if (this.timer) { clearInterval(this.timer); this.timer = undefined; }
     await this.active;
+    if (this.activeCleanups.size) await Promise.allSettled([...this.activeCleanups]);
+  }
+  scheduleBranchCleanup(repositoryId: string, prNumber: number): Promise<BotPrBranchCleanupResult> {
+    if (this.closing || !this.store.db.isOpen) {
+      return Promise.resolve({ repositoryId, prNumber, branch: null, status: 'noop', reason: 'closing' });
+    }
+    const patrolNow = patrolTestOverrides?.now ?? this.patrolOptions?.now;
+    return scheduleBotPrBranchCleanup(this.store, repositoryId, prNumber, this.apiUrl, {
+      now: patrolNow,
+      isClosing: () => this.closing,
+      onTrack: work => {
+        this.activeCleanups.add(work);
+        void work.finally(() => this.activeCleanups.delete(work));
+      },
+    });
   }
   async tick(options?: { forcePatrol?: boolean; patrol?: Partial<BotPatrolConfig> }): Promise<void> {
-    if (this.closing || !this.store.db.open || !this.store.hasTable('bot_pull_requests')) return;
+    if (this.closing || !this.store.db.isOpen || !this.store.hasTable('bot_pull_requests')) return;
     if (this.active) return this.active;
     const mergedPatrol = { ...this.patrolOptions, ...options?.patrol };
+    const cleanupNow = patrolTestOverrides?.now ?? mergedPatrol.now;
     this.active = (async () => {
       const repos = this.store.all(
         `SELECT DISTINCT r.*
@@ -3381,11 +3442,20 @@ export class BotPrWakeScanner {
          LEFT JOIN bot_pr_states s ON s.repository_id=b.repository_id AND s.number=b.number
          WHERE p.enabled=1 AND coalesce(s.state,'open')<>'closed'`,
       );
+      const graphqlRateLimitedRepos = new Set<string>();
       for (const repo of repos) {
-        if (this.closing || !this.store.db.open) break;
-        await reconcileOpenBotPullRequestsForRepo(this.store, repo, this.apiUrl, null, undefined, {
+        if (this.closing || !this.store.db.isOpen) break;
+        const outcome = await reconcileOpenBotPullRequestsForRepo(this.store, repo, this.apiUrl, null, undefined, {
           patrol: mergedPatrol,
           forcePatrol: options?.forcePatrol,
+        }).catch(() => ({ graphqlRateLimited: false }));
+        if (outcome?.graphqlRateLimited) graphqlRateLimitedRepos.add(String(repo.id));
+      }
+      if (!this.closing && this.store.db.isOpen) {
+        await cleanupDueBotPrBranches(this.store, this.apiUrl, {
+          now: cleanupNow,
+          isClosing: () => this.closing,
+          skipMissingStateRepos: graphqlRateLimitedRepos,
         }).catch(() => {});
       }
     })().finally(() => { this.active = undefined; });

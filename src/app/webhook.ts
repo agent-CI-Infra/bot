@@ -216,6 +216,22 @@ export async function ingest(
       Object.assign(response, { forwards_created: enqueueForwards(store,String(owner.id),event,payload,id) });
       store.run('UPDATE deliveries SET response=? WHERE id=?', JSON.stringify(response), id);
     }
-    return { status, response, sync, memberSync };
+    let branchCleanup: { repositoryId: string; prNumber: number } | null = null;
+    if (status === 200 && !duplicate && owner && payload && event === 'pull_request' && action === 'closed') {
+      const pr = payload.pull_request as any;
+      const prNumber = Number(pr?.number);
+      const isMerged = pr?.merged === true || (typeof pr?.merged_at === 'string' && Number.isFinite(Date.parse(pr.merged_at)));
+      if (isMerged && Number.isSafeInteger(prNumber) && prNumber >= 1 && store.hasTable('bot_pr_states')) {
+        const st = store.get(
+          'SELECT state,merged,branch_cleanup_status FROM bot_pr_states WHERE repository_id=? AND number=?',
+          String(owner.id),
+          prNumber,
+        );
+        if (st && String(st.state || '').toLowerCase() === 'closed' && Number(st.merged) === 1 && st.branch_cleanup_status === 'pending') {
+          branchCleanup = { repositoryId: String(owner.id), prNumber };
+        }
+      }
+    }
+    return { status, response, sync, memberSync, branchCleanup };
   }); } catch (error) { if (body) try { removeDeliveryBody(store, body.ref); } catch {} throw error; }
 }
