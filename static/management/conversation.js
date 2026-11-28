@@ -119,6 +119,30 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
   const alive = generation => !disposed && panel.isConnected && me?.id === user && generation === scopeGeneration;
   const showStatus = (text = status.textContent) => { if (disposed) return; status.classList.remove('view-error'); status.setAttribute('role', 'status'); status.textContent = text; };
   const showError = err => { if (!disposed) { status.textContent = readErrorText(err); status.classList.add('view-error'); status.setAttribute('role', 'alert'); } };
+  // A failed management command carries the server's code. The receipt page already explains these codes (#355), so the
+  // assistant says the same sentence and keeps the code as secondary text — but only for management_command: another tool
+  // (github_write) runs its own action, so a sentence written about a submitted command would describe the wrong thing.
+  // A code the console cannot explain keeps its bare value, exactly as before, rather than being guessed at.
+  // authorization_changed is also raised by the mid-turn guard after the command or the write has already finished
+  // (src/management/agent.ts), so it must not claim that nothing ran, nor that the step did.
+  // management_tool_failed is the catch-all thrown after the action was already attempted, and it is emitted for every
+  // tool (a github write runs before the guard too), so it can arrive after the write landed: the receipt sentence says
+  // the command did not complete, which the code cannot support, so any tool speaks in the same unsure terms here and
+  // keeps the bare code.
+  const failedNotice = data => data.error === 'authorization_changed'
+    ? '无法确认这一步是否完成：执行过程中权限变了，请在回执与执行进展里核对后再重试。（authorization_changed）'
+    : data.error === 'management_tool_failed' ? '无法确认这一步是否完成：' + data.error
+    : data.name === 'management_command' && managementFailureHints[data.error] ? '操作未完成：' + managementFailureHints[data.error] + '（' + data.error + '）'
+    : '操作未完成：' + data.error;
+  // A turn-level failure can stop before any command was submitted (the permission guard runs mid-turn), so it speaks in
+  // access terms instead of borrowing a receipt sentence that says a submitted command did not run. A code the receipt
+  // page knows still gets its own name and a pointer to the failed step instead of the model/permission advice; only a
+  // code the console cannot explain at all keeps that advice, exactly as before.
+  const turnFailureText = data => data.notice ? '这次处理未完成：' + data.notice
+    : data.detail ? '这次处理未完成：' + data.detail + '（' + data.error + '）'
+    : managementAccessHints[data.error] ? '这次处理未完成：' + managementAccessHints[data.error]
+    : managementFailureHints[data.error] ? '这次处理未完成：' + data.error + '。请在执行进展里核对失败的那一步。'
+    : '这次处理未完成：' + data.error + '。可以检查管理助手的模型与权限配置后继续。';
   const showConversation = () => {
     accessSlot.hidden = true; accessSlot.replaceChildren();
     statusBar.hidden = false; sidebar.hidden = false; sessionToolbar.hidden = false; feedWrap.hidden = false; input.hidden = false;
@@ -453,12 +477,12 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}, 
     } else if (row.type === 'tool_error') {
       const step = currentTurn.steps.find(item => data.call_id ? item.id === data.call_id : item.name === data.name && item.state === 'running') ?? toolStep(currentTurn, data, row.sequence);
       setStepState(step, currentTurn.state === 'stopped' ? 'interrupted' : 'failed');
-      step.detail.append(element('p', '操作未完成：' + data.error, 'management-run-notice'));
+      step.detail.append(element('p', failedNotice(data), 'management-run-notice'));
     } else if (row.type === 'done') finishTurn(currentTurn, data.state ?? 'completed', row.created_at);
     else if (row.type === 'error' || row.type === 'stopped') {
       finishTurn(currentTurn, row.type === 'error' ? 'failed' : 'stopped', row.created_at);
       if (!currentTurn.notice) {
-        currentTurn.notice = element('p', row.type === 'stopped' ? '已停止后续处理。已提交的操作仍保留结果，请在执行进展中核对。' : data.notice ? '这次处理未完成：' + data.notice : data.detail ? '这次处理未完成：' + data.detail + '（' + data.error + '）' : '这次处理未完成：' + data.error + '。可以检查管理助手的模型与权限配置后继续。', 'management-run-notice');
+        currentTurn.notice = element('p', row.type === 'stopped' ? '已停止后续处理。已提交的操作仍保留结果，请在执行进展中核对。' : turnFailureText(data), 'management-run-notice');
         replies.append(currentTurn.notice);
       }
       onActivity(!!active, true);
