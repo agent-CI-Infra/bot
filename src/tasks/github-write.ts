@@ -8,6 +8,7 @@ import { githubWrite, type WriteResource, type WriteOperation } from '../github/
 import { githubWriteAllowed } from '../roles/permissions.js';
 import { taskActingRole, taskRolePolicies, sourcePolicies } from './management.js';
 import { effectiveWrites } from './grants.js';
+import { pullRequestRefusal } from './pull-request.js';
 import { scheduledIssueOperationAllowed } from './schedule-write.js';
 import { Publisher, publicationScope } from '../github/publisher.js';
 import { inlineLocation, reviewConclusions } from '../review/findings.js';
@@ -475,17 +476,110 @@ export async function publishReviewDelivery(
   }
 }
 
-export function grantedTaskWrite(store: Store, task: Row, redactor: Redactor, guard: () => Promise<void>, apiUrl?: string, getWorkspace?: () => Workspace | undefined) {
+/**
+ * Checks whether a `github_write` call targets strictly this task's own bot PR lifecycle (allowed under a `pull_request`
+ * grant even when the task does not hold full `github` write):
+ * - `POST /pulls` whose `body.head` is a `bot/*` branch owned by this task in `bot_branches`
+ * - `PATCH /pulls/:n`, `POST /issues/:n/comments`, `POST|DELETE /issues/:n/labels[/:label]` on a bot PR owned by this task.
+ * Never permits merge (`PUT /pulls/:n/merge`), Issues creation/edits, human PR edits, `/contents/*`, `/git/*`, or Actions.
+ */
+function checkScopedPullRequestWrite(
+  store: Store,
+  task: Row,
+  repository: Row,
+  args: any,
+): { allowed: true } | { allowed: false; detail: string } {
+  const method = String(args?.method ?? '').toUpperCase();
+  const path = typeof args?.path === 'string' ? args.path.trim() : '';
+  const repoId = String(task.repository_id);
+  const taskId = String(task.id);
+  const taskInput = (() => { try { return JSON.parse(String(task.input || '{}')); } catch { return {}; } })();
+  const adoptedPrNumber = Number.isSafeInteger(Number(taskInput?.bot_pr?.number)) ? Number(taskInput.bot_pr.number) : null;
+  const adoptedBranch = typeof taskInput?.bot_pr?.head?.ref === 'string' ? taskInput.bot_pr.head.ref.trim() : null;
+
+  if (method === 'POST' && path === '/pulls') {
+    const rawHead = typeof args?.body?.head === 'string' ? args.body.head.trim() : '';
+    if (!rawHead) {
+      return { allowed: false, detail: 'Under the pull_request grant (without full github write), POST /pulls requires body.head naming a bot/* branch pushed by this task via push_bot_branch.' };
+    }
+    const repoOwner = String(repository.full_name || '').split('/')[0] || '';
+    let headBranch = rawHead.replace(/^refs\/heads\//, '');
+    if (headBranch.includes(':')) {
+      const [prefix, rest] = headBranch.split(':', 2);
+      if (!repoOwner || prefix!.toLowerCase() !== repoOwner.toLowerCase() || !rest) {
+        return { allowed: false, detail: 'Cross-repository head references are not allowed under the pull_request grant; push to this repository\'s bot/* branch first.' };
+      }
+      headBranch = rest.replace(/^refs\/heads\//, '');
+    }
+    const ownedBranch = headBranch.startsWith('bot/') && Boolean(
+      (adoptedBranch && headBranch === adoptedBranch)
+      || (store.hasTable('bot_branches') && store.get('SELECT 1 FROM bot_branches WHERE repository_id=? AND branch=? AND task_id=?', repoId, headBranch, taskId)),
+    );
+    if (!ownedBranch) {
+      return {
+        allowed: false,
+        detail: `Under the pull_request grant (without full github write), POST /pulls may only open a pull request from a bot/* branch pushed by this task via push_bot_branch ("${headBranch}" is not registered to this task).`,
+      };
+    }
+    return { allowed: true };
+  }
+
+  const prMatch =
+    (method === 'PATCH' && /^\/pulls\/([1-9]\d{0,9})$/.exec(path))
+    || (method === 'POST' && /^\/issues\/([1-9]\d{0,9})\/comments$/.exec(path))
+    || ((method === 'POST' || method === 'DELETE') && /^\/issues\/([1-9]\d{0,9})\/labels(?:\/[^/]+)?$/.exec(path));
+  if (prMatch) {
+    const prNumber = Number(prMatch[1]);
+    const prRow = store.hasTable('bot_pull_requests')
+      ? store.get('SELECT source_task_id,branch FROM bot_pull_requests WHERE repository_id=? AND number=?', repoId, prNumber)
+      : undefined;
+    const ownsPr = Boolean(
+      (adoptedPrNumber !== null && prNumber === adoptedPrNumber)
+      || (prRow && (
+        String(prRow.source_task_id) === taskId
+        || (typeof prRow.branch === 'string' && store.hasTable('bot_branches') && store.get('SELECT 1 FROM bot_branches WHERE repository_id=? AND branch=? AND task_id=?', repoId, prRow.branch, taskId))
+      )),
+    );
+    if (ownsPr) return { allowed: true };
+    return {
+      allowed: false,
+      detail: `Under the pull_request grant (without full github write), github_write is restricted to this task's own bot pull request (#${prNumber} is not owned by this task).`,
+    };
+  }
+
+  return {
+    allowed: false,
+    detail: 'Under the pull_request grant (without full github write), github_write is restricted to opening/updating this task\'s own bot pull request (POST /pulls from its pushed bot/* branch, PATCH /pulls/{n}, and comments/labels on that bot PR); merging, Issues, contents, refs, and other PRs require their own grant/policy.',
+  };
+}
+
+export function grantedTaskWrite(
+  store: Store,
+  task: Row,
+  redactor: Redactor,
+  guard: () => Promise<void>,
+  apiUrl?: string,
+  getWorkspace?: () => Workspace | undefined,
+  options?: { onPullRequestWritten?: (event: { method: string; path: string; result: any }) => void },
+) {
   const scope = 'task:' + publicationScope(task);
   return async (name: string, args: any) => {
+    const effective = effectiveWrites(store, task, sourcePolicies(store, task));
     const write = name === 'post_review' ? 'review' : name === 'rerun_failed_run' ? 'actions_rerun' : 'github';
-    const refused = () => ({
+    const refused = (missingWrite = write) => ({
       error: 'delivery_not_granted',
       tool: name,
-      missing: 'grant:' + write,
-      message: `This task does not hold the ${write} write now, so nothing was sent. Ask the Manager to grant it (grant_writes), or report what is missing.`,
+      missing: 'grant:' + missingWrite,
+      message: `This task does not hold the ${missingWrite} write now, so nothing was sent. Ask the Manager to grant it (grant_writes), or report what is missing.`,
     });
-    if (!effectiveWrites(store, task, sourcePolicies(store, task)).includes(write)) return refused();
+
+    const hasFullGithub = name === 'github_write' && effective.includes('github');
+    const hasScopedPrWrite = name === 'github_write' && effective.includes('pull_request');
+    if (name === 'github_write') {
+      if (!hasFullGithub && !hasScopedPrWrite) return refused('github');
+    } else if (!effective.includes(write)) {
+      return refused();
+    }
 
     const ceiling = projectCeiling(store, String(task.repository_id));
     if (!covers(ceiling, 'comment')) {
@@ -495,6 +589,16 @@ export function grantedTaskWrite(store: Store, task: Row, redactor: Redactor, gu
     const repository = store.get('SELECT * FROM repositories WHERE id=?', task.repository_id)!;
     const workspace = getWorkspace?.();
     if (name === 'github_write') {
+      const scopedCheck = hasScopedPrWrite ? checkScopedPullRequestWrite(store, task, repository, args) : { allowed: false as const, detail: '' };
+      if (!hasFullGithub) {
+        const prRefusal = pullRequestRefusal(store, task);
+        if (prRefusal) {
+          return { error: prRefusal.code, tool: 'github_write', missing: prRefusal.missing, message: prRefusal.message };
+        }
+        if (!scopedCheck.allowed) {
+          return { error: 'github_write_scope_forbidden', tool: 'github_write', detail: scopedCheck.detail };
+        }
+      }
       const context = {
         store,
         repository,
@@ -503,12 +607,27 @@ export function grantedTaskWrite(store: Store, task: Row, redactor: Redactor, gu
         apiUrl,
         scope,
         actor: { kind: 'task' as const, role: taskActingRole(store, task), task_id: String(task.id) },
-        allowed: (resource: string, operation?: 'create' | 'reply' | 'labels') =>
-          effectiveWrites(store, task, sourcePolicies(store, task)).includes('github') &&
-          sourcePolicies(store, task).every(policy => githubWriteAllowed(policy, resource, operation)),
+        allowed: (resource: string, operation?: 'create' | 'reply' | 'labels') => {
+          const liveEffective = effectiveWrites(store, task, sourcePolicies(store, task));
+          if (liveEffective.includes('github') && sourcePolicies(store, task).every(policy => githubWriteAllowed(policy, resource, operation))) {
+            return true;
+          }
+          if (liveEffective.includes('pull_request') && resource === 'pull_requests' && !pullRequestRefusal(store, task) && scopedCheck.allowed) {
+            return true;
+          }
+          return false;
+        },
         ...(workspace ? { collectMedia: (paths: string[]) => collectPullRequestMedia(workspace, paths) } : {}),
       };
-      return githubWrite(context, args);
+      const result = await githubWrite(context, args);
+      if (result && !result.error && options?.onPullRequestWritten) {
+        const m = String(args?.method ?? '').toUpperCase();
+        const p = typeof args?.path === 'string' ? args.path.trim() : '';
+        if ((m === 'POST' && p === '/pulls') || (m === 'PATCH' && /^\/pulls\/\d+$/.test(p))) {
+          options.onPullRequestWritten({ method: m, path: p, result });
+        }
+      }
+      return result;
     }
 
     if (name === 'rerun_failed_run') {

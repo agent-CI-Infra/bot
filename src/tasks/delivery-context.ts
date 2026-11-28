@@ -120,11 +120,11 @@ export function resolveExpectedWorkspaceHead(task: Row, parsedInput?: any): stri
   return isSha40(candidate) ? candidate.toLowerCase() : null;
 }
 
-/** Checks whether the workspace HEAD drifted away from the recorded publication baseline (excluding valid conflict merges/rebases or integrations). */
+/** Checks whether the workspace HEAD drifted away from the recorded publication baseline (excluding valid conflict merges/rebases, integrations, or control-plane verified commit ancestry). */
 export function checkWorkspaceHeadDrift(
   expectedHead: string | null | undefined,
   actualHead: string | null | undefined,
-  options: { conflictResolved?: boolean; rebased?: boolean; integration?: boolean } = {},
+  options: { conflictResolved?: boolean; rebased?: boolean; integration?: boolean; commitAncestryVerified?: boolean } = {},
 ): { drifted: boolean; head_matches_baseline: boolean | null; expected_head_sha: string | null; workspace_head_sha: string | null } {
   const expected = isSha40(expectedHead) ? expectedHead.toLowerCase() : null;
   const actual = isSha40(actualHead) ? actualHead.toLowerCase() : null;
@@ -135,7 +135,7 @@ export function checkWorkspaceHeadDrift(
   if (matches) {
     return { drifted: false, head_matches_baseline: true, expected_head_sha: expected, workspace_head_sha: actual };
   }
-  if (options.conflictResolved || options.rebased || options.integration) {
+  if (options.conflictResolved || options.rebased || options.integration || options.commitAncestryVerified) {
     return { drifted: false, head_matches_baseline: false, expected_head_sha: expected, workspace_head_sha: actual };
   }
   return { drifted: true, head_matches_baseline: false, expected_head_sha: expected, workspace_head_sha: actual };
@@ -200,9 +200,9 @@ export function buildDeliveryContext(store: Store, task: Row): DeliveryContext {
   let prBaseSemantics: string;
   if (intended === 'pull_request' || writes.includes('pull_request')) {
     if (botPr?.number) {
-      prBaseSemantics = `The workspace is checked out at existing bot PR #${botPr.number} head (${shaLabel}) targeting base branch ${branchLabel}. Calling open_pull_request updates that PR branch against ${branchLabel}. Do NOT run git checkout/switch to another branch; the control plane tracks and enforces this baseline (only explicit conflict resolution merges/rebases onto bot-conflict-base).`;
+      prBaseSemantics = `The workspace is checked out at existing bot PR #${botPr.number} head (${shaLabel}) targeting base branch ${branchLabel}. Preferred workflow: prepare clean Git commits (or merge/rebase onto ${branchLabel} when resolving conflicts), verify \`git diff ${branchLabel}...HEAD\`, call \`push_bot_branch\` to push through the control plane, then update PR #${botPr.number} body/title with \`github_write\` (\`PATCH /pulls/${botPr.number}\`) as needed and finish with \`submit_report\`. Fallback: \`open_pull_request\` (on the legacy path do not switch branches; only explicit conflict merges/rebases onto bot-conflict-base). Never cite unpushed local commit SHAs.`;
     } else {
-      prBaseSemantics = `The workspace is checked out at baseline commit ${shaLabel} on branch ${branchLabel}. Calling open_pull_request creates a bot branch from this baseline and opens a PR with base branch ${branchLabel}. Do NOT run git checkout/switch to another branch; the control plane tracks and enforces this baseline.`;
+      prBaseSemantics = `The workspace is checked out at baseline commit ${shaLabel} on branch ${branchLabel}. Preferred workflow: create clean Git commits on top of ${shaLabel}, verify \`git diff ${shaLabel}...HEAD\`, call \`push_bot_branch\` to push your bot branch through the control plane, then open the PR against ${branchLabel} via \`github_write\` (\`POST /pulls\`) citing only the confirmed remote SHA, and finish with \`submit_report\`. Fallback: \`open_pull_request\` (on the legacy path, Do NOT run git checkout to switch branches). Never cite unpushed local commit SHAs.`;
     }
   } else {
     prBaseSemantics = baseBranch

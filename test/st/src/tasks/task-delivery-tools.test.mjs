@@ -105,11 +105,11 @@ test('a report task that finds a needed change continues after grant_writes and 
     dev: ({ tools, names, messages }) => {
       if (!granted) {
         // Before the grant the executor has no PR tool: it reports the needed change instead.
-        assert.ok(!tools.includes('open_pull_request') && !tools.includes('post_review') && !tools.includes('github_write'), tools.join(','));
+        assert.ok(!tools.includes('push_bot_branch') && !tools.includes('open_pull_request') && !tools.includes('post_review') && !tools.includes('github_write'), tools.join(','));
         if (!names.includes('read_file')) return call('read_file', { path: 'calc.mjs' });
         return call('submit_report', { summary: 'add subtracts its second argument; calc.mjs needs a one-line code change', artifacts: [], evidence: [{ source: 'calc.mjs', result: 'add = (a, b) => a - b' }], unknowns: [] });
       }
-      assert.ok(tools.includes('open_pull_request'), 'after the grant the executor gets open_pull_request');
+      assert.ok(tools.includes('push_bot_branch') && tools.includes('open_pull_request') && tools.includes('github_write'), 'after the grant the executor gets push_bot_branch, open_pull_request, and scoped github_write');
       if (!names.includes('write_file')) return call('write_file', { path: 'calc.mjs', content: fixed });
       if (!mediaSelectionAttempted) {
         mediaSelectionAttempted = true;
@@ -143,7 +143,7 @@ test('a report task that finds a needed change continues after grant_writes and 
   assert.match(detail.changes.find(change => change.added?.includes('pull_request')).reason, /same task/);
   assert.ok(h.store.get("SELECT 1 FROM audit WHERE action='task.grant_writes' AND repository_id='101'"));
   const devRuns = detail.runs.filter(run => run.role === 'dev').reverse();
-  assert.deepEqual(devRuns.map(run => run.tools), [['submit_report'], ['submit_report', 'open_pull_request']]);
+  assert.deepEqual(devRuns.map(run => run.tools), [['submit_report'], ['submit_report', 'push_bot_branch', 'open_pull_request', 'github_write']]);
 });
 
 test('a delivery call the task no longer holds is refused with its reason, nothing is written, and a report still ends it', { timeout: 240000 }, async t => {

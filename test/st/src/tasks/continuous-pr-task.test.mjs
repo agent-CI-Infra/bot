@@ -359,7 +359,13 @@ test('#1331 end-to-end 3-round continuous bot PR task: in-place worktree reuse (
     if (req.method === 'GET' && /^\/pulls\/(\d+)$/.test(sub)) {
       const num = Number(/^\/pulls\/(\d+)$/.exec(sub)[1]);
       const pr = ghState.prs.get(num);
-      return pr ? send(pr) : send({ message: 'Not Found' }, 404);
+      if (!pr) return send({ message: 'Not Found' }, 404);
+      // Mirror real GitHub: GET /pulls/:n reflects the live head branch SHA updated by git push as well as REST ref updates.
+      try {
+        const liveSha = execFileSync('git', ['rev-parse', '--verify', '-q', `refs/heads/${pr.head.ref}`], { cwd: bare, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+        if (liveSha) pr.head.sha = liveSha;
+      } catch { /* ignore */ }
+      return send(pr);
     }
     if (req.method === 'PATCH' && /^\/pulls\/(\d+)$/.test(sub)) {
       const num = Number(/^\/pulls\/(\d+)$/.exec(sub)[1]);
@@ -630,9 +636,11 @@ test('#1331 end-to-end 3-round continuous bot PR task: in-place worktree reuse (
   assert.equal(store.get("SELECT id FROM role_instances WHERE task_id=? AND role='dev'", taskId).id, round1DevInstance.id, 'same dev role_instance reused');
 
   // Verify Round 2 commit was built on top of prHeadHuman (not clobbering human.txt!) and PR #88 was PATCHed with round:2 scope
-  assert.equal(ghState.createdCommits.length, 2);
-  assert.deepEqual(ghState.createdCommits[1].parents, [prHeadHuman], 'round 2 commit parent is prHeadHuman');
-  const r2Tree = readGitTree(ghState.createdCommits[1].sha);
+  const r2Head = git(bare, 'rev-parse', 'refs/heads/bot/issue-42');
+  const r2Parents = git(bare, 'show', '-s', '--format=%P', r2Head).split(/\s+/).filter(Boolean);
+  assert.notEqual(r2Head, prHeadHuman, 'round 2 pushed a new commit onto bot/issue-42');
+  assert.deepEqual(r2Parents, [prHeadHuman], 'round 2 commit parent is prHeadHuman');
+  const r2Tree = readGitTree(r2Head);
   assert.ok(r2Tree.some(e => e.path === 'human.txt'), 'published round 2 tree preserved human.txt');
   assert.match(git(bare, 'cat-file', 'blob', r2Tree.find(e => e.path === 'app.mjs').sha), /"v2"/);
   assert.equal(ghState.prPatches.length, 1, 'round 2 updated PR #88 in place via PATCH');

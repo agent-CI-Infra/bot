@@ -12,6 +12,8 @@ import { planPullRequestMedia, publishPullRequestMedia, type CandidateMedia } fr
 import { hostedMediaUrl } from './hosted-pr-media.js';
 import { assertWorkflowChangesAuthorized, workflowsPermissionMissingDetail } from './workflow-changes.js';
 import { syncBotPullRequestState } from '../review/bot-pr-wake.js';
+import type { GitCache } from '../agent/git-cache.js';
+import { pushCandidateCommitViaGit } from './git-push.js';
 
 /**
  * A bot pull request now at `sha`. Only a confirmed head and its refreshed description count, once across retries. `revisions`
@@ -25,7 +27,7 @@ export function recordRevision(store:Store,task:Row,number:number,sha:string){
 export const publicationScope=(task:Row)=>{let round=1;try{round=Number(JSON.parse(task.input||'{}').round)||1;}catch{round=1;}return round>1?`${task.id}:round:${round}`:String(task.id);};
 export class Publisher {
   private readonly scope:string;
-  constructor(readonly store:Store,readonly github:GitHub,readonly task:Row,readonly validate:()=>Promise<void>, readonly headDelays = [0, 250, 750, 1500, 2500],readonly log:(value:any)=>void=()=>{},readonly beforeWrite?:()=>void,scopeOverride?:string){this.scope=scopeOverride??publicationScope(task);}
+  constructor(readonly store:Store,readonly github:GitHub,readonly task:Row,readonly validate:()=>Promise<void>, readonly headDelays = [0, 250, 750, 1500, 2500],readonly log:(value:any)=>void=()=>{},readonly beforeWrite?:()=>void,scopeOverride?:string,readonly gitCache?:GitCache){this.scope=scopeOverride??publicationScope(task);}
   private resolveTarget(override?: { type: 'issue' | 'pr'; number: number }): { type: 'issue' | 'pr'; number: number } {
     if (override && Number.isSafeInteger(override.number) && override.number > 0) return override;
     try {
@@ -286,6 +288,45 @@ export class Publisher {
           stop('github_workflows_permission_missing','waiting_permission',workflowsPermissionMissingDetail(workflowFiles,this.github.installationPermissions!=null));
         throw error;
       });
+      if(this.gitCache&&this.github.cloneUrl&&!candidate.created_commit_sha){
+        await this.validate();
+        const current=await observe();
+        const parents=rebase?[candidate.base_sha]:[candidate.base_sha,...(candidate.expected_sha&&candidate.expected_sha!==candidate.base_sha?[candidate.expected_sha]:[])];
+        const pushedCommit=await pushCandidateCommitViaGit({
+          gitCache:this.gitCache,
+          github:this.github,
+          repositoryId:String(this.task.repository_id),
+          branch:candidate.branch,
+          expectedTreeSha:expected,
+          sourceTreeSha:candidate.source_tree,
+          files:candidate.files,
+          snapshotFiles:candidate.snapshot_files||[],
+          parents,
+          expectedRemoteSha:candidate.expected_sha??null,
+          currentRemoteSha:current?.object?.sha??null,
+          message:this.published(implementationText(candidate,this.task.object_number).title),
+          authorName:'Department Bot',
+          authorEmail:this.github.authorEmail(),
+          authorDate:candidate.date,
+          writeToken,
+          workflowFiles,
+          redactor:this.github.redactor,
+          beforePush:()=>{assertTaskExternalEffect(this.store,this.task,'branch');this.github.beforeWrite?.();this.beforeWrite?.();},
+        });
+        if(pushedCommit){
+          candidate.created_tree_sha=expected;candidate.created_commit_sha=pushedCommit;save();
+          publicationFact(this.store,this.task,'commit_created',{operation_key:key,branch:candidate.branch,commit_sha:pushedCommit,tree_sha:expected,expected_sha:candidate.expected_sha??null});
+          const request=candidate.expected_sha?{sha:pushedCommit,force:rebase}:{ref:'refs/heads/'+candidate.branch,sha:pushedCommit};
+          const find=async()=>{const state=await this.github.ref(candidate.branch);return state?.object?.sha===pushedCommit?state:null;};
+          publicationFact(this.store,this.task,'branch_update_requested',{operation_key:key,branch:candidate.branch,target_sha:pushedCommit,expected_sha:candidate.expected_sha??null});
+          await this.effect(key,'branch',request,async()=>({ref:'refs/heads/'+candidate.branch,object:{sha:pushedCommit}}),find,true);
+          const confirmed=await observe();
+          if(confirmed?.object?.sha!==pushedCommit)stop('branch_not_confirmed',undefined,'Branch update receipt exists, but the current remote head is not confirmed. Query read_publication_context.');
+          candidate.remote_sha=pushedCommit;candidate.published_tree_sha=expected;candidate.branch_confirmed={sha:pushedCommit,observed_at:new Date().toISOString()};save();
+          publicationFact(this.store,this.task,'branch_confirmed',{operation_key:key,branch:candidate.branch,commit_sha:pushedCommit,tree_sha:expected});
+          return pushedCommit;
+        }
+      }
       for(const file of candidate.files){
         if(file.base64===undefined)continue; // Verified object already belongs to the source snapshot.
         const data=Buffer.from(file.base64,'base64');if(blobSha(data)!==file.sha)stop('candidate_blob_mismatch',undefined,`发布前校验候选文件 ${file.path} 失败，内容与预期 SHA ${file.sha} 不一致。`);

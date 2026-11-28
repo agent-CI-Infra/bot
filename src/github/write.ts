@@ -112,17 +112,18 @@ const routes: Route[] = [
 ];
 
 const fn = (name: string, description: string, properties: any, required: string[]) => ({ type: 'function', function: { name, description, parameters: { type: 'object', properties, required, additionalProperties: false } } });
-const taskMediaGuidance = 'To attach workspace screenshots or recordings to a comment, Issue, PR or review, pass media with repository-relative paths and reference them in body with ![Screenshot](workspace:path) or [Recording](workspace:path).';
-const assistantMediaGuidance = 'To attach screenshots or recordings to a comment, Issue, PR or review, pass media with authorized Feishu attachments ("resource:<resource_id>") and/or assistant computer files ("workspace:<path>" under /workspace, /tmp or ~/) and reference them in body with ![Screenshot](resource:<id>) / ![Screenshot](workspace:<path>) for images (PNG/JPEG/GIF/WebP, up to 5 MiB) or [Recording](resource:<id>) / [Recording](workspace:<path>) for videos (MP4/WebM, up to 20 MiB; 30 MiB total, up to 8 files).';
+const taskMediaGuidance = 'By default, attach workspace screenshots or recordings via platform-hosted media: pass media with repository-relative paths and reference them in body with ![Screenshot](workspace:path) or [Recording](workspace:path). If a maintainer explicitly requests storing media elsewhere (such as inside the repository or another location), follow their request; if reviewers disagree, weigh repository conventions and explain clearly.';
+const assistantMediaGuidance = 'By default, attach screenshots or recordings via platform-hosted media: pass media with authorized Feishu attachments ("resource:<resource_id>") and/or assistant computer files ("workspace:<path>" under /workspace, /tmp or ~/) and reference them in body with ![Screenshot](resource:<id>) / ![Screenshot](workspace:<path>) for images (PNG/JPEG/GIF/WebP, up to 5 MiB) or [Recording](resource:<id>) / [Recording](workspace:<path>) for videos (MP4/WebM, up to 20 MiB; 30 MiB total, up to 8 files). If a maintainer explicitly requests another storage location, follow their request.';
+const ownBodyMaintenanceGuidance = 'For any PR or Issue created by the bot itself, always keep its body updated to the latest complete state (current goal/approach, conclusions, verification evidence, latest screenshots/media, and status) via PATCH /pulls/{n} or PATCH /issues/{n} whenever progress brings meaningful changes worth preserving, while using comments below for stage updates and discussion replies. Never edit another author\'s Issue or PR body unless its author or a maintainer explicitly asks in that GitHub thread. Never cite unpushed local commit SHAs in PR bodies, comments, captions, or links; push via push_bot_branch first and cite only the confirmed remote SHA.';
 const writeDescription = (repoNote: string, mediaGuidance: string) =>
   `Write to GitHub through the control plane, exactly like the GitHub REST API: method and a path relative to the repository ${repoNote}, with the REST JSON body. `
-  + 'Examples: POST /issues {title, body}; POST /issues/12/comments {body}; POST /issues/12/labels {labels}; PATCH /issues/12 {state}; POST /pulls {title, head, base, body}; '
+  + 'Examples: POST /issues {title, body}; POST /issues/12/comments {body}; POST /issues/12/labels {labels}; PATCH /issues/12 {state}; POST /pulls {title, head, base, body}; PATCH /pulls/7 {title?, body?, state?}; '
   + 'POST /pulls/7/reviews {event, body, comments}; PUT /pulls/7/merge; PUT /contents/docs/a.md {message, content (base64), sha?, branch?}; POST /git/refs {ref, sha}; '
   + 'POST /actions/workflows/nightly.yml/dispatches {ref, inputs?} starts a workflow that declares workflow_dispatch and returns its workflow_run_id and html_url (read its runs first: do not start one that is already queued or running unless asked); '
   + 'POST /actions/runs/99/rerun, POST /actions/runs/99/rerun-failed-jobs, POST /actions/runs/99/rerun-pending-jobs, POST /actions/runs/99/cancel, POST /actions/runs/99/force-cancel, or POST /actions/jobs/88/rerun manage Actions runs and jobs. '
   + 'PUT /pulls/7/merge {sha?, merge_method?} merges the pull request, or adds it to the merge queue when its base branch requires one (the answer says queued); it needs Contents and Pull requests write and is allowed only as the project\'s auto-merge policy says (your instructions state it). Writes that move the default branch without a pull request follow the same policy. '
   + 'Allowed only where your role has write on the route\'s GitHub resource (Issues, Pull requests, Contents or Actions) and the project\'s capability ceiling allows it (comment for Issues, pull requests and Actions, develop for Contents); other repositories, other routes and changes to .github/workflows/ are refused. '
-  + `Text is sent as written: an @mention notifies that person, so mention someone only when the task asks for it; secrets are removed. ${mediaGuidance} key: a short stable name for this write (for example "triage-comment"); calling again with the same key returns the earlier result instead of writing twice, so keep it when retrying and use a new key for a different write. `
+  + `Text is sent as written: an @mention notifies that person, so mention someone only when the task asks for it; secrets are removed. ${mediaGuidance} ${ownBodyMaintenanceGuidance} key: a short stable name for this write (for example "triage-comment"); calling again with the same key returns the earlier result instead of writing twice, so keep it when retrying and use a new key for a different write. `
   + 'Use github_read to check state before writing; write only what your task needs.';
 const description = writeDescription('(/repos/{owner}/{repo} is implied)', taskMediaGuidance);
 const properties = { method: { type: 'string', enum: [...writeMethods] }, path: { type: 'string', description: 'Repository-relative REST path, such as /issues/12/comments. No query string.' },
@@ -130,7 +131,7 @@ const properties = { method: { type: 'string', enum: [...writeMethods] }, path: 
   media: commentMediaSchema,
   merge_request: { type: 'string', maxLength: 500, description: 'Only with PUT /pulls/{n}/merge or a write that moves the default branch, when the auto-merge policy needs a maintainer\'s explicit request for it: the link to their comment, review or review comment on this pull request (for a default-branch write, on the Issue or pull request where they asked), or "current_message" when the message you are answering in a Feishu or management conversation asks for it. The control plane checks that the person has write access to the repository.' } };
 /** What an agent is told about github_write in one project; it applies only where the tool is among its tools. */
-export const githubWriteInstructions = (policy: AutoMergePolicy) => ' If github_write is among your tools, your role may write to this repository on GitHub through the control plane, shaped like the GitHub REST API. Use it only for what this task and its prompt ask for (for example a comment, a label or a follow-up Issue), read the current state with github_read first, keep one stable key per intended write and never use it to approve a pull request unless the task explicitly asks for that. Never push to another author\'s branch or to the default branch unless a person explicitly asked for that push (in a GitHub comment, in Feishu or in the task they created); then cite that request where you report the write. '
+export const githubWriteInstructions = (policy: AutoMergePolicy) => ' If github_write is among your tools, your role may write to this repository on GitHub through the control plane, shaped like the GitHub REST API. Use it only for what this task and its prompt ask for (for example opening/updating a bot PR after push_bot_branch, a comment, a label or a follow-up Issue), read the current state with github_read first, keep one stable key per intended write and never use it to approve a pull request unless the task explicitly asks for that. For any PR or Issue created by the bot itself, always keep its body updated to the latest complete state via PATCH whenever progress brings meaningful changes worth preserving, while using comments for stage updates and replies; never edit another author\'s body without an explicit request from its author or a maintainer in that GitHub thread. Never cite unpushed local commit SHAs; push via push_bot_branch first and cite only the confirmed remote SHA. Never push to another author\'s branch or to the default branch unless a person explicitly asked for that push (in a GitHub comment, in Feishu or in the task they created); then cite that request where you report the write. '
   + mergeBoundary(policy) + ' Your task\'s own result is still delivered by its finishing tool.';
 /** The tool of task entries and the Manager: the repository is the one of the task or event. */
 export const githubWriteTool = fn('github_write', description, properties, ['method', 'path', 'key']);
@@ -142,7 +143,7 @@ export const withMergePolicy = <T extends { function: { name: string; descriptio
   tools.map(tool => tool.function.name === 'github_write' ? { ...tool, function: { ...tool.function, description: tool.function.description + ' ' + mergeBoundary(policy) } } : tool);
 /** github_write as a generic task's delivery tool (#814): the task's grant and its source govern it, not the executing role. */
 export const grantedGithubWriteTool = fn('github_write', description.replace("Allowed only where your role has write on the route's GitHub resource (Issues, Pull requests, Contents or Actions)",
-  "Offered because this task was granted GitHub writes; each call is allowed only where the task's source (the roles that created or delegated it, a group's level) has write on the route's GitHub resource (Issues, Pull requests, Contents or Actions)"), properties, ['method', 'path', 'key']);
+  "Offered because this task was granted GitHub writes or pull_request delivery; with pull_request only (without full github write), calls are scoped strictly to this task's own bot pull request lifecycle (POST /pulls from this task's pushed bot branch, PATCH /pulls/{n}, and comments/labels on that bot PR—never merge or edits to other PRs/Issues). With full github write, each call is allowed where the task's source has write on the route's GitHub resource (Issues, Pull requests, Contents or Actions)"), properties, ['method', 'path', 'key']);
 /** The tool of assistants that serve several repositories: the repository is chosen per call and checked against their scope. */
 export const scopedGithubWriteTool = fn('github_write', writeDescription('of the selected repository', assistantMediaGuidance)
   + ' The repository argument selects one repository you may use; any other is refused.',
@@ -236,6 +237,8 @@ function summarize(value: any): any {
   if (value.object?.sha) out.object = { sha: value.object.sha, type: value.object.type ?? null };
   if (value.commit?.sha) out.commit = { sha: value.commit.sha, html_url: value.commit.html_url ?? null };
   if (value.content?.path) out.content = { path: value.content.path, sha: value.content.sha ?? null, html_url: value.content.html_url ?? null };
+  if (value.head && typeof value.head === 'object' && (value.head.ref || value.head.sha)) out.head = { ref: value.head.ref ?? null, sha: value.head.sha ?? null };
+  if (value.base && typeof value.base === 'object' && (value.base.ref || value.base.sha)) out.base = { ref: value.base.ref ?? null, sha: value.base.sha ?? null };
   if (Array.isArray(value.labels)) out.labels = value.labels.map((l: any) => typeof l === 'string' ? l : l?.name).filter(Boolean);
   return out;
 }
@@ -503,6 +506,7 @@ export async function githubWrite(context: WriteContext, args: unknown): Promise
         response = { number: merging.number, merged: false, queued: true, sha: head, merge_queue: { id: queued?.id ?? null, position: queued?.position ?? null, state: queued?.state ?? null } };
       } else {
         const value = await github.request(method, github.path(path), outgoing);
+        syncBotPullRequestAfterWrite(store, repository, context.actor, method, path, value);
         response = summarize(value); url = urlOf(value);
       }
       if (moving?.request && response && typeof response === 'object' && !Array.isArray(response)) response = { ...response, merge_request: moving.request };
@@ -589,6 +593,117 @@ async function verifyMergeRequest(context: WriteContext, reader: GitHub, number:
 }
 const auditActor = (actor: WriteActor) => actor.principal_id ? String(actor.principal_id)
   : actor.service_role_id ? 'service:' + actor.service_role_id : 'role:' + (actor.role ?? actor.kind);
+
+/**
+ * Keeps `bot_pull_requests` and `bot_pr_states` synchronized whenever `github_write` opens a PR from a bot branch
+ * (`POST /pulls`) or updates/closes a registered bot PR (`PATCH /pulls/:n` / `PATCH /issues/:n`), so anti-loop,
+ * multi-round PR continuation, wake scanning, and internal patrol work identically to legacy Publisher-created PRs.
+ */
+function upsertBotPrStateRow(store: Store, repositoryId: string, prNumber: number, owned: Row, value: any): void {
+  if (!store.hasTable('bot_pr_states')) return;
+  const prev = store.get('SELECT * FROM bot_pr_states WHERE repository_id=? AND number=?', repositoryId, prNumber);
+  const normSha = (s: unknown) => typeof s === 'string' && /^[a-f0-9]{40}$/i.test(s) ? s.toLowerCase() : null;
+  const state = typeof value?.state === 'string' && value.state ? value.state : String(prev?.state ?? 'open');
+  const draft = value?.draft !== undefined ? (value.draft === true ? 1 : 0) : Number(prev?.draft ?? 0);
+  const baseRef = typeof value?.base?.ref === 'string' && value.base.ref ? value.base.ref : (prev?.base_ref ? String(prev.base_ref) : null);
+  const baseSha = normSha(value?.base?.sha) ?? (prev?.base_sha ? String(prev.base_sha) : null);
+  const headSha = normSha(value?.head?.sha) ?? (prev?.head_sha ? String(prev.head_sha) : normSha(owned.sha));
+  const mergeable = value?.mergeable === true ? 1 : value?.mergeable === false ? 0 : value?.mergeable === null ? null : (prev?.mergeable ?? null);
+  const mergeableState = typeof value?.mergeable_state === 'string' && value.mergeable_state
+    ? value.mergeable_state
+    : (prev?.mergeable_state ? String(prev.mergeable_state) : null);
+  const title = typeof value?.title === 'string' && value.title ? value.title.slice(0, 400) : (prev?.title ? String(prev.title) : null);
+  const htmlUrl = typeof value?.html_url === 'string' && /^https?:\/\//i.test(value.html_url)
+    ? value.html_url
+    : (prev?.html_url ? String(prev.html_url) : null);
+  const clearSuppression = state !== 'open' || draft === 1 ? 1 : 0;
+  store.run(
+    `INSERT INTO bot_pr_states(repository_id,number,state,draft,base_ref,base_sha,head_sha,mergeable,mergeable_state,title,html_url,updated_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+     ON CONFLICT(repository_id,number) DO UPDATE SET
+       state=excluded.state,
+       draft=excluded.draft,
+       base_ref=coalesce(excluded.base_ref,bot_pr_states.base_ref),
+       base_sha=coalesce(excluded.base_sha,bot_pr_states.base_sha),
+       head_sha=coalesce(excluded.head_sha,bot_pr_states.head_sha),
+       mergeable=excluded.mergeable,
+       mergeable_state=excluded.mergeable_state,
+       title=coalesce(excluded.title,bot_pr_states.title),
+       html_url=coalesce(excluded.html_url,bot_pr_states.html_url),
+       updated_at=excluded.updated_at,
+       conflict_suppressed_head_sha=CASE WHEN ? THEN NULL ELSE bot_pr_states.conflict_suppressed_head_sha END,
+       conflict_suppressed_env=CASE WHEN ? THEN NULL ELSE bot_pr_states.conflict_suppressed_env END,
+       conflict_suppressed_at=CASE WHEN ? THEN NULL ELSE bot_pr_states.conflict_suppressed_at END,
+       conflict_suppressed_reason=CASE WHEN ? THEN NULL ELSE bot_pr_states.conflict_suppressed_reason END`,
+    repositoryId, prNumber, state, draft, baseRef, baseSha, headSha, mergeable, mergeableState, title, htmlUrl, new Date().toISOString(),
+    clearSuppression, clearSuppression, clearSuppression, clearSuppression,
+  );
+}
+
+function syncBotPullRequestAfterWrite(store: Store, repository: Row, actor: WriteActor, method: string, path: string, value: any): void {
+  if (!value || typeof value !== 'object') return;
+  const repositoryId = String(repository.id);
+  const prNumber = Number(value.number);
+  if (!Number.isSafeInteger(prNumber) || prNumber < 1) return;
+
+  if (method === 'POST' && path === '/pulls') {
+    const headBranch = typeof value.head?.ref === 'string' ? value.head.ref.trim() : '';
+    const headRepoId = value.head?.repo?.id != null ? String(value.head.repo.id) : repositoryId;
+    const branchRow = headBranch && store.hasTable('bot_branches')
+      ? store.get('SELECT task_id FROM bot_branches WHERE repository_id=? AND branch=?', repositoryId, headBranch)
+      : undefined;
+    if (headRepoId === repositoryId && headBranch && (branchRow || headBranch.startsWith('bot/'))) {
+      const sourceTaskId = String(actor.task_id || branchRow?.task_id || '');
+      const authorId = String(
+        value.user?.id
+        ?? (store.hasTable('github_actors') ? store.get('SELECT actor_id FROM github_actors WHERE account_id=?', repository.account_id)?.actor_id : '')
+        ?? '',
+      );
+      const headSha = typeof value.head?.sha === 'string' ? value.head.sha : '';
+      if (store.hasTable('bot_pull_requests')) {
+        store.run(
+          `INSERT INTO bot_pull_requests(repository_id,number,pr_id,author_id,head_repository_id,branch,sha,source_task_id,revisions)
+           VALUES(?,?,?,?,?,?,?,?,0)
+           ON CONFLICT(repository_id,number) DO UPDATE SET
+             sha=CASE WHEN excluded.sha<>'' THEN excluded.sha ELSE bot_pull_requests.sha END,
+             source_task_id=CASE WHEN bot_pull_requests.source_task_id='' AND excluded.source_task_id<>'' THEN excluded.source_task_id ELSE bot_pull_requests.source_task_id END`,
+          repositoryId,
+          prNumber,
+          String(value.id ?? prNumber),
+          authorId,
+          headRepoId,
+          headBranch,
+          headSha,
+          sourceTaskId,
+        );
+      }
+      if (sourceTaskId && store.hasTable('bot_branches')) {
+        store.run('INSERT INTO bot_branches(repository_id,branch,task_id) VALUES(?,?,?) ON CONFLICT DO NOTHING', repositoryId, headBranch, sourceTaskId);
+      }
+      const owned = store.hasTable('bot_pull_requests')
+        ? store.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?', repositoryId, prNumber)
+        : undefined;
+      if (owned) upsertBotPrStateRow(store, repositoryId, prNumber, owned, value);
+    }
+    return;
+  }
+
+  if (method === 'PATCH' && (/^\/pulls\/\d+$/.test(path) || /^\/issues\/\d+$/.test(path))) {
+    const owned = store.hasTable('bot_pull_requests')
+      ? store.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?', repositoryId, prNumber)
+      : undefined;
+    if (!owned) return;
+    const headSha = typeof value.head?.sha === 'string' && value.head.sha ? value.head.sha : null;
+    if (headSha && headSha !== owned.sha) {
+      store.run('UPDATE bot_pull_requests SET sha=? WHERE repository_id=? AND number=?', headSha, repositoryId, prNumber);
+    }
+    upsertBotPrStateRow(store, repositoryId, prNumber, owned, {
+      ...value,
+      number: prNumber,
+      ...(headSha ? {} : owned.sha ? { head: { ...(value.head ?? {}), ref: owned.branch, sha: owned.sha } } : {}),
+    });
+  }
+}
 
 /** The writes a scope already made, for an agent that resumes it (a retried dispatch). */
 export function earlierWrites(store: Store, scope: string) {

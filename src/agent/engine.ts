@@ -536,7 +536,7 @@ export class TaskEngine {
       // Another task's pull request: published like development's, recorded on its candidate, and the task carries on.
       const publishPullRequest=async()=>{
         log({type:'phase',phase:'pull_request',target:'pull_request',detail:'正在发布到 GitHub：创建或更新 PR…'});
-        const publisher=new Publisher(this.store,github,task,validate,undefined,log);
+        const publisher=new Publisher(this.store,github,task,validate,undefined,log,undefined,undefined,this.gitCache);
         const candidate=loadDevelopmentCandidate(this.store,id)!;
         const checked=await accept(candidate,[{source:'policy_validation',version:candidate.tree_sha,verified:candidate.validation?.source==='policy',result:candidate.validation}]);
         if(checked.error)return checked;
@@ -551,7 +551,7 @@ export class TaskEngine {
       const requestedBy=()=>(input.revision?.requests||[]).map((r:any)=>`@${r.author} (${r.url||r.type+' '+r.id})`).join(', ');
       const publishDevelopment=async()=>{
         update({status:'publishing'});log({type:'phase',phase:'publish',target:'pull_request',detail:'正在发布到 GitHub：创建或更新 PR…'});
-        const publisher=new Publisher(this.store,github,task,validate,undefined,log);
+        const publisher=new Publisher(this.store,github,task,validate,undefined,log,undefined,undefined,this.gitCache);
         const candidate=loadDevelopmentCandidate(this.store,id)!;
         const checked=await accept(candidate,[{source:'policy_validation',version:candidate.tree_sha,verified:candidate.validation?.source==='policy',result:candidate.validation}]);
         if(checked.error)return checked;

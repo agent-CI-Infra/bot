@@ -111,7 +111,7 @@ export class Workspace {
     if(request.type==='workspace_command'&&!key.startsWith('model:'))this.log({type:'phase',phase:'validate',operation_id:id,command:request.command,detail:`正在运行测试：${request.command}`});
     let response;
     // The manager answers a command only when it ends; one without timeout_ms waits as long as it runs (0 = no client timeout).
-    const wait=['workspace_restore','workspace_snapshot','workspace_finalize','workspace_blob','workspace_checkout','workspace_advance','workspace_worktree_create','workspace_worktree_bind','workspace_import_commits','workspace_verify_merge','git_import'].includes(request.type)?0:request.type!=='workspace_command'?90000:request.timeout_ms==null?0:Number(request.timeout_ms)+120000;
+    const wait=['workspace_restore','workspace_snapshot','workspace_finalize','workspace_blob','workspace_checkout','workspace_advance','workspace_worktree_create','workspace_worktree_bind','workspace_import_commits','workspace_verify_merge','workspace_git_inspect','workspace_git_export_pack','git_import'].includes(request.type)?0:request.type!=='workspace_command'?90000:request.timeout_ms==null?0:Number(request.timeout_ms)+120000;
     // A request the transport cannot carry is answered by name here, before the call (#1320 review): the manager's 413
     // runner_request_too_large used to become execution_interrupted and a restart attempt, so the model never saw the
     // refusal. The predicate and the bound are the manager's own (runner/command-policy.mjs), and JSON escaping counts in

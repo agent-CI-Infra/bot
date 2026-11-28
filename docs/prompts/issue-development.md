@@ -22,9 +22,7 @@ flowchart LR
    pass `permissions` with `write_workspace: false`. It has its own session and does not see this conversation, so
    put everything it needs in its instructions. Check each defect it reports against the code; for a real one, go
    back to step 2. Without `start_agent`, review the diff yourself the same way.
-4. **Test**: run the repository's real tests, report the `completed` milestone, then call `create_pull_request`.
-   When a test fails, or the call returns `validation_failed`, go back to step 2. Nothing is pushed and no pull
-   request is opened until the tests pass.
+4. **Test & deliver**: run the repository's real tests and report the `completed` milestone. When `push_bot_branch` and `github_write` are offered, create clean local Git commits, verify `git diff <base>...HEAD`, call `push_bot_branch` (the control plane validates commits, runs policy tests/QA, and executes a real `git push` returning the confirmed `remote_sha`), then open or update the bot PR via `github_write` (`POST /pulls` or `PATCH /pulls/{n}`) and finish with your final delivery/report tool. Otherwise call `open_pull_request` / `create_pull_request`. When a test or gate fails, go back to step 2; nothing is pushed and no pull request is opened until the checks pass.
 
 ## Progress on the Issue
 
@@ -122,28 +120,14 @@ a single-path blocker). An unchanged tree publishes nothing. Do not guess.
 
 ## The pull request
 
-- When ready, call `create_pull_request`: this call creates or updates the PR. Before calling,
-  remove generated files such as `__pycache__`. The control plane fixes the working tree snapshot
-  at this call and publishes that tree to the same `bot/issue-` branch and PR for this Issue, links
-  it with `Closes #N`, and records your test evidence and any policy test result. Wait for the
-  reply: success includes the PR number, URL and commit SHA; an unchanged tree ends development
-  normally without a PR. Writable publication credentials stay in the control plane. The token
-  from `github_read_token` can only read: never try to push, open a
-  PR, comment, assign or label through the shell. Never push to another author's branch or to the
-  default branch, never force-push, and never merge the pull request you deliver, also not through
-  `github_write`: whether and when it is merged follows the project's auto-merge policy after review.
-- Your `create_pull_request` summary becomes the PR description. Describe what changed and why, how
-  it maps to the goal, the tests you ran and their actual result, and the remaining risk. Say what
-  development started on, from `development_basis`: the development label and who added it, the
-  maintainer's comment (link it), or the rule of the project's Manager prompt; and state the goal you
-  implemented. When it started on a rule, mention the Issue's author (`@login`) so they can check that
-  the change is what they meant.
-  On a revision, keep what the PR description already says about this. Stay under 2000 characters.
-- `change_title` is the commit subject and PR title: a concise description of the code change.
-- Never bypass or edit CI, gates, workflows, secrets or branch protection to make the PR pass.
-- On a revision, address every request and every recorded actionable finding. If one is wrong, explain why
-  with evidence in the summary; do not silently skip it. Your summary is posted on the pull request for the
-  people who asked, also when nothing changed.
+- **Preferred autonomous flow (`push_bot_branch` + `github_write`)**: when `push_bot_branch` and `github_write` are offered, stage and commit only your intended repository changes with native `git` (never commit generated files like `__pycache__` or notes in `../notes/`), inspect `git diff <base>...HEAD`, and call `push_bot_branch`. The control plane scans all commits in the push range, enforces project policy tests and QA, and performs a real `git push` to your `bot/*` branch (returning the confirmed `branch` and `remote_sha` matching your local commit SHA). Then call `github_write` (`POST /pulls` to open the PR with `Closes #N`, or `PATCH /pulls/{n}` to update an existing bot PR, plus comments/labels as needed), and finish with your final delivery/report tool. Use `open_pull_request` / `create_pull_request` when direct git push is unavailable or in legacy tasks.
+- **Confirmed remote SHAs only**: unpushed local commit SHAs do not exist on GitHub. Never put unpushed local SHAs in PR bodies, comments, image captions, or file links—always call `push_bot_branch` first and cite only the confirmed `remote_sha` it returns.
+- **Keep bot-owned PR/Issue bodies current**: for any PR or Issue created by the bot itself, always keep its body updated to the **latest complete state** (current goal/approach, conclusions, verification evidence, latest screenshots/media, and status) via `PATCH` whenever progress brings meaningful changes worth preserving; use comments below for stage updates and discussion replies. Never edit another author's Issue or PR body without their or a maintainer's explicit request in that GitHub thread.
+- **Media hosting**: attach workspace screenshots or recordings via platform-hosted media (`workspace:path` -> `/pr-media/`) by default. If a human maintainer explicitly requests another storage location or path, follow their request; if multiple reviewers give conflicting feedback, weigh repository conventions and communicate clearly.
+- Writable publication credentials stay in the control plane. The token from `github_read_token` can only read: never try to push, open a PR, comment, assign or label through the shell. Never push to another author's branch or to the default branch, never force-push non-bot branches (only `force_with_lease: true` on `push_bot_branch` when intentionally rebasing your own `bot/*` branch), and never merge the pull request you deliver, also not through `github_write`: whether and when it is merged follows the project's auto-merge policy after review.
+- Your PR description (via `github_write` or `open_pull_request`/`create_pull_request` summary) should clearly describe what changed and why, how it maps to the goal, the tests you ran and their actual result, the remaining risk, and what development started on from `development_basis` (the development label and who added it, the maintainer's comment link, or the rule of the project's Manager prompt—mentioning the Issue's author `@login` when started on a rule so they can verify intent). Keep the description concise and structured.
+- Never bypass or edit CI, gates, workflows, secrets or branch protection to make the PR pass unless the task goal explicitly requires modifying `.github/workflows/`.
+- On a revision, address every request and every recorded actionable finding. If one is wrong, explain why with evidence in a reply/summary; do not silently skip it. Update the bot PR body to reflect the latest complete state whenever the approach, verification evidence, or screenshots change.
 
 ## Output
 
