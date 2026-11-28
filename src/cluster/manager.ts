@@ -507,9 +507,9 @@ export class ClusterManager implements Manager {
     if (result && typeof result === 'object' && !Array.isArray(result) && 'repository_id' in result) {
       if (result.state === 'ready' || result.state === 'busy') {
         this.clusterStore.markBindingActive(repoId, targetNodeId);
-        this.clusterStore.recordNodeVolume(repoId, targetNodeId, 'workspace', `dbot-${targetNodeId}-${repoId}-ws`);
+        this.clusterStore.ensureNodeVolume(repoId, targetNodeId, 'workspace', `dbot-${targetNodeId}-${repoId}-ws`);
         if (targetNodeId === LOCAL_NODE_ID) {
-          this.clusterStore.recordNodeVolume(repoId, targetNodeId, 'notes', `dbot-${targetNodeId}-${repoId}-notes`);
+          this.clusterStore.ensureNodeVolume(repoId, targetNodeId, 'notes', `dbot-${targetNodeId}-${repoId}-notes`);
         }
       }
       return {

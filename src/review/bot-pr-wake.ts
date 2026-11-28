@@ -1590,7 +1590,7 @@ export function botPrWakeRevisionFacts(store: Store, repositoryId: string, prNum
         if (store.hasTable('task_history')) {
           for (const tid of new Set(reqRows.map(r => String(r.task_id || '')))) {
             if (!tid) continue;
-            const cs = store.all("SELECT json_extract(data,'$.round') AS round, created_at FROM task_history WHERE task_id=? AND type='task_continued' ORDER BY id ASC", tid);
+            const cs = store.all("SELECT json_extract(data,'$.round') AS round, created_at FROM task_history WHERE task_id=? AND run_id IS NULL AND type='task_continued' ORDER BY id ASC", tid);
             if (cs.length) contsByTask.set(tid, cs.map(c => ({ round: Number(c.round) || 2, at: String(c.created_at || '') })));
           }
         }
@@ -1637,7 +1637,7 @@ export function botPrWakeRevisionFacts(store: Store, repositoryId: string, prNum
     );
     const continuedEvents = store.hasTable('task_history')
       ? store.all(
-          "SELECT id, data, created_at FROM task_history WHERE task_id=? AND type='task_continued' ORDER BY id ASC",
+          "SELECT id, data, created_at FROM task_history WHERE task_id=? AND run_id IS NULL AND type='task_continued' ORDER BY id ASC",
           t.id,
         ).map(row => {
           let d: any = {};
@@ -1645,15 +1645,29 @@ export function botPrWakeRevisionFacts(store: Store, repositoryId: string, prNum
           return { id: Number(row.id), round: Number(d.round) || 2, event_id: d.event_id ? String(d.event_id) : null, at: String(row.created_at || '') };
         })
       : [];
+    // `delivery` rows written while `attemptRun` is active receive `run_id = attemptRun.id` via `trace_history_scope`,
+    // whereas rows written outside an active run keep `run_id IS NULL`. Query both disjoint slices through existing
+    // indexes (`task_history_run` and `task_history_run_type` via `task_run_task`) without scanning child run history.
     const deliveries = store.hasTable('task_history')
-      ? store.all(
-          "SELECT id, data, created_at FROM task_history WHERE task_id=? AND type='delivery' ORDER BY id ASC",
-          t.id,
-        ).map(row => {
-          let d: any = null;
-          try { d = JSON.parse(String(row.data || 'null')); } catch {}
-          return { id: Number(row.id), data: d, at: String(row.created_at || '') };
-        })
+      ? [
+          ...store.all(
+            "SELECT id, data, created_at FROM task_history WHERE task_id=? AND run_id IS NULL AND type='delivery' ORDER BY id ASC",
+            t.id,
+          ),
+          ...(store.hasTable('task_runs')
+            ? store.all(
+                "SELECT id, data, created_at FROM task_history WHERE run_id IN (SELECT id FROM task_runs WHERE task_id=?) AND type='delivery' AND +task_id=?",
+                t.id,
+                t.id,
+              )
+            : []),
+        ]
+          .sort((a, b) => Number(a.id) - Number(b.id))
+          .map(row => {
+            let d: any = null;
+            try { d = JSON.parse(String(row.data || 'null')); } catch {}
+            return { id: Number(row.id), data: d, at: String(row.created_at || '') };
+          })
       : [];
 
     let parsedResult: any = null;

@@ -41,8 +41,8 @@ export function roleCapacity(store: Store, repositoryId: string, role: string, k
   return store.transaction(() => {
     const limit = roleConcurrency(store, repositoryId)[role] ?? null;
     if (limit === null) return null;
-    const running = Number(store.get(`SELECT count(*) n FROM task_runs r JOIN tasks t ON t.id=r.task_id
-      WHERE t.repository_id=? AND r.role=? AND r.status='running' AND r.id<>?`, repositoryId, role, exclude ?? '')?.n ?? 0);
+    const running = Number(store.get(`SELECT count(*) n FROM task_runs r CROSS JOIN tasks t ON t.id=r.task_id
+      WHERE r.status='running' AND r.role=? AND r.id<>? AND t.repository_id=?`, role, exclude ?? '', repositoryId)?.n ?? 0);
     return { limit, running };
   });
 }
@@ -151,10 +151,12 @@ export function roleBoard(store: Store, repositoryId: string, url?: URL): Json {
   }));
 
   // Active child worker runs per task so Role View knows when Manager has handed the active baton to a worker.
+  // CROSS JOIN keeps task_runs outermost via the partial index task_runs_running (only live rows, already in
+  // started_at, id order) instead of scanning every historical task of the repository.
   const allRunning = store.all(
     `SELECT r.id AS run_id,r.task_id,r.role,r.role_instance_id,r.started_at,t.object_number,t.kind,t.summary,t.priority,t.phase,${taskTargetSelectSQL('t.input')} AS target_meta
-     FROM task_runs r JOIN tasks t ON t.id=r.task_id
-     WHERE t.repository_id=? AND r.status='running' AND r.role IS NOT NULL ORDER BY r.started_at,r.id`,
+     FROM task_runs r CROSS JOIN tasks t ON t.id=r.task_id
+     WHERE r.status='running' AND r.role IS NOT NULL AND t.repository_id=? ORDER BY r.started_at,r.id`,
     repositoryId,
   );
   const workerRunningTasks = new Set(

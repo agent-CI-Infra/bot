@@ -61,7 +61,8 @@ export function dispatchStorage(store: Store) {
   if (!cols.has('rule')) store.db.exec('ALTER TABLE dispatch_events ADD COLUMN rule TEXT');
   if (!cols.has('answer_round')) store.db.exec('ALTER TABLE dispatch_events ADD COLUMN answer_round INTEGER NOT NULL DEFAULT 0');
   if (!cols.has('thread_key')) store.db.exec('ALTER TABLE dispatch_events ADD COLUMN thread_key TEXT');
-  store.db.exec('CREATE INDEX IF NOT EXISTS dispatch_events_thread ON dispatch_events(thread_key,state,created_at)');
+  store.db.exec(`CREATE INDEX IF NOT EXISTS dispatch_events_thread ON dispatch_events(thread_key,state,created_at);
+    CREATE INDEX IF NOT EXISTS dispatch_events_filtered_created ON dispatch_events(state,created_at) WHERE state='filtered';`);
 }
 
 export interface ThreadTurn {

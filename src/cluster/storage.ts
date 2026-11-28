@@ -1212,6 +1212,12 @@ export class ClusterStore {
   }
 
   markBindingActive(repositoryId: string, nodeId: string): void {
+    const existing = this.store.get(
+      'SELECT state FROM repository_node_bindings WHERE repository_id=? AND node_id=?',
+      repositoryId,
+      nodeId,
+    );
+    if (existing?.state !== 'bound') return;
     const nowIso = new Date(this.now()).toISOString();
     this.store.run(
       "UPDATE repository_node_bindings SET state='active', updated_at=? WHERE repository_id=? AND node_id=? AND state='bound'",
@@ -1225,6 +1231,38 @@ export class ClusterStore {
     return isRepositoryNodeClaimable(this.store, repositoryId);
   }
 
+  /**
+   * Ensures a volume tracking row exists without rewriting an unchanged row (or overwriting a real Docker volume name
+   * previously reported by live volume discovery) during high-frequency read-only probes.
+   */
+  ensureNodeVolume(
+    repositoryId: string,
+    nodeId: string,
+    volumeKind: 'notes' | 'workspace',
+    fallbackVolumeName: string,
+  ): void {
+    if (
+      this.store.get(
+        'SELECT 1 FROM repository_node_volumes WHERE repository_id=? AND node_id=? AND volume_kind=?',
+        repositoryId,
+        nodeId,
+        volumeKind,
+      )
+    ) {
+      return;
+    }
+    const nowIso = new Date(this.now()).toISOString();
+    this.store.run(
+      `INSERT OR IGNORE INTO repository_node_volumes(repository_id,node_id,volume_kind,volume_name,created_at,reclaim_pending,updated_at)
+       VALUES(?,?,?,?,NULL,0,?)`,
+      repositoryId,
+      nodeId,
+      volumeKind,
+      fallbackVolumeName,
+      nowIso,
+    );
+  }
+
   recordNodeVolume(
     repositoryId: string,
     nodeId: string,
@@ -1233,6 +1271,22 @@ export class ClusterStore {
     createdAt: string | null = null,
     reclaimPending = false,
   ): void {
+    const existing = this.store.get(
+      'SELECT volume_name, created_at, reclaim_pending FROM repository_node_volumes WHERE repository_id=? AND node_id=? AND volume_kind=?',
+      repositoryId,
+      nodeId,
+      volumeKind,
+    );
+    const nextCreatedAt = createdAt ?? (existing?.created_at ? String(existing.created_at) : null);
+    const nextReclaim = reclaimPending || Number(existing?.reclaim_pending ?? 0) === 1 ? 1 : 0;
+    if (
+      existing &&
+      String(existing.volume_name) === volumeName &&
+      (existing.created_at ? String(existing.created_at) : null) === nextCreatedAt &&
+      Number(existing.reclaim_pending) === nextReclaim
+    ) {
+      return;
+    }
     const nowIso = new Date(this.now()).toISOString();
     this.store.run(
       `INSERT INTO repository_node_volumes(repository_id,node_id,volume_kind,volume_name,created_at,reclaim_pending,updated_at)
@@ -1241,7 +1295,10 @@ export class ClusterStore {
          volume_name=excluded.volume_name,
          created_at=COALESCE(excluded.created_at, repository_node_volumes.created_at),
          reclaim_pending=CASE WHEN excluded.reclaim_pending=1 THEN 1 ELSE repository_node_volumes.reclaim_pending END,
-         updated_at=excluded.updated_at`,
+         updated_at=excluded.updated_at
+       WHERE repository_node_volumes.volume_name IS NOT excluded.volume_name
+          OR repository_node_volumes.created_at IS NOT COALESCE(excluded.created_at, repository_node_volumes.created_at)
+          OR repository_node_volumes.reclaim_pending IS NOT (CASE WHEN excluded.reclaim_pending=1 THEN 1 ELSE repository_node_volumes.reclaim_pending END)`,
       repositoryId,
       nodeId,
       volumeKind,
@@ -1253,11 +1310,19 @@ export class ClusterStore {
   }
 
   markVolumeReclaimPending(repositoryId: string, nodeId: string, volumeKind: 'notes' | 'workspace', volumeName?: string): void {
+    const existing = this.store.get(
+      'SELECT reclaim_pending FROM repository_node_volumes WHERE repository_id=? AND node_id=? AND volume_kind=?',
+      repositoryId,
+      nodeId,
+      volumeKind,
+    );
+    if (existing && Number(existing.reclaim_pending) === 1) return;
     const nowIso = new Date(this.now()).toISOString();
     this.store.run(
       `INSERT INTO repository_node_volumes(repository_id,node_id,volume_kind,volume_name,created_at,reclaim_pending,updated_at)
        VALUES(?,?,?,?,?,1,?)
-       ON CONFLICT(repository_id,node_id,volume_kind) DO UPDATE SET reclaim_pending=1, updated_at=excluded.updated_at`,
+       ON CONFLICT(repository_id,node_id,volume_kind) DO UPDATE SET reclaim_pending=1, updated_at=excluded.updated_at
+       WHERE repository_node_volumes.reclaim_pending IS NOT 1`,
       repositoryId,
       nodeId,
       volumeKind,

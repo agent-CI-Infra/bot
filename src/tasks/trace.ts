@@ -57,7 +57,8 @@ export function traceStorage(store:Store){
   store.db.exec(`CREATE TABLE IF NOT EXISTS task_runs(id TEXT PRIMARY KEY,task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
     kind TEXT NOT NULL,attempt INTEGER NOT NULL,revision INTEGER NOT NULL,candidate_id TEXT,parent_run_id TEXT,previous_run_id TEXT,
     started_at TEXT NOT NULL,ended_at TEXT,status TEXT NOT NULL,stop_reason TEXT,context_snapshot TEXT NOT NULL,config_snapshot TEXT NOT NULL);
-    CREATE INDEX IF NOT EXISTS task_run_task ON task_runs(task_id,started_at,id);`);
+    CREATE INDEX IF NOT EXISTS task_run_task ON task_runs(task_id,started_at,id);
+    CREATE INDEX IF NOT EXISTS task_runs_running ON task_runs(started_at,id) WHERE status='running';`);
   for(const [table,columns] of Object.entries({task_history:{run_id:'TEXT',actor:"TEXT NOT NULL DEFAULT 'legacy_unknown'",source_ref:'TEXT',caused_by:"TEXT NOT NULL DEFAULT '[]'",schema_version:'INTEGER NOT NULL DEFAULT 1'},model_requests:{run_id:'TEXT',request_snapshot:'TEXT',response_snapshot:'TEXT'}})){
     const existing=new Set(store.all(`PRAGMA table_info(${table})`).map(r=>r.name));
     for(const [name,type] of Object.entries(columns))if(!existing.has(name))store.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
@@ -71,7 +72,7 @@ export function traceStorage(store:Store){
   store.db.exec(`CREATE INDEX IF NOT EXISTS task_history_run ON task_history(task_id,run_id,id);
     DROP TRIGGER IF EXISTS trace_history_scope;
     CREATE TRIGGER trace_history_scope AFTER INSERT ON task_history BEGIN
-      UPDATE task_history SET run_id=CASE WHEN NEW.type IN ('acceptance','acceptance_staged') THEN NEW.run_id ELSE coalesce(NEW.run_id,(SELECT id FROM task_runs WHERE task_id=NEW.task_id AND (status='running' OR kind=CASE WHEN NEW.type IN ('candidate','artifact_checkpoint','checkpoint') THEN 'execution' WHEN NEW.type LIKE 'acceptance%' THEN 'verification' ELSE 'none' END) ORDER BY rowid DESC LIMIT 1)) END,actor=CASE WHEN NEW.actor NOT IN ('framework','legacy_unknown') THEN NEW.actor WHEN NEW.type='execution_evidence' THEN 'executor' WHEN NEW.type LIKE 'acceptance%' THEN 'verifier' ELSE 'framework' END,source_ref=coalesce(NEW.source_ref,'task_history:'||NEW.id) WHERE id=NEW.id;
+      UPDATE task_history SET run_id=CASE WHEN NEW.type IN ('acceptance','acceptance_staged','task_continued') THEN NEW.run_id ELSE coalesce(NEW.run_id,(SELECT id FROM task_runs WHERE task_id=NEW.task_id AND (status='running' OR kind=CASE WHEN NEW.type IN ('candidate','artifact_checkpoint','checkpoint') THEN 'execution' WHEN NEW.type LIKE 'acceptance%' THEN 'verification' ELSE 'none' END) ORDER BY rowid DESC LIMIT 1)) END,actor=CASE WHEN NEW.actor NOT IN ('framework','legacy_unknown') THEN NEW.actor WHEN NEW.type='execution_evidence' THEN 'executor' WHEN NEW.type LIKE 'acceptance%' THEN 'verifier' ELSE 'framework' END,source_ref=coalesce(NEW.source_ref,'task_history:'||NEW.id) WHERE id=NEW.id;
       UPDATE task_runs SET candidate_id=json_extract(NEW.data,'$.id') WHERE id=(SELECT run_id FROM task_history WHERE id=NEW.id) AND NEW.type='candidate';
     END;`);
   store.db.exec(`CREATE TRIGGER IF NOT EXISTS trace_audit_task AFTER INSERT ON audit WHEN EXISTS(SELECT 1 FROM tasks WHERE id=NEW.resource_id) BEGIN
