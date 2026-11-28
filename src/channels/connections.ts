@@ -58,7 +58,10 @@ export class ChannelConnections {
           }
         }
         socket.state = state;
-        store.run('UPDATE channel_connectors SET connection_state=? WHERE id=? AND connection_state<>?', state, id, state);
+        // A connector that came back drops the error our own failure paths wrote — and only that value, so nothing
+        // another writer recorded is lost. The clear rides the same update as the healthy state (#533): otherwise the
+        // console keeps reporting a healed connection as broken long after it reconnected.
+        store.run("UPDATE channel_connectors SET connection_state=?,last_error=CASE WHEN ?='connected' AND last_error='channel_connection_failed' THEN NULL ELSE last_error END WHERE id=? AND connection_state<>?", state, state, id, state);
       }
     }
     for (const c of rows) {
