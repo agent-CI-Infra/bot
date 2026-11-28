@@ -5,7 +5,8 @@ import type { Store } from '../storage/database.js';
 import { type Actor, superAdmin } from '../app/auth.js';
 import { fail, fields, randomId, text, type Json } from '../core/security.js';
 import { publicOrigin, probeGet, registrationPath, setupPath } from './public-url.js';
-import { appEvents, appJwt, appPermissions } from '../github/client.js';
+import { appJwt, appPermissions } from '../github/client.js';
+import { allEvents } from '../app/access.js';
 import { defaults } from '../rules/service.js';
 import { installationAccount, accountInstallUrl } from './installation-target.js';
 import { githubAppInstallUrl, withGithubAppInstallUrl } from '../github/app-install-url.js';
@@ -202,7 +203,7 @@ export class Onboarding {
       // console it started from.
       const manifest = { name, url: address.origin, redirect_url: consoleOrigin + registrationPath, setup_url: address.origin + setupPath, public: input.public===true,
         hook_attributes: { url: address.origin + `/hooks/github/${account}/${endpoint}`, active: true },
-        default_permissions: { ...appPermissions }, default_events: [...appEvents, 'check_run', 'status'] };
+        default_permissions: { ...appPermissions }, default_events: [...allEvents] };
       return { manifest, create_url: `https://github.com/organizations/${encodeURIComponent(org)}/settings/apps/new?state=${state}`, expires_in: 900 };
     }
     if (method === 'POST' && url.pathname === '/api/onboarding/installation') { fields(input, ['skip']); if (typeof input.skip !== 'boolean') fail(400, 'invalid_skip'); this.save('installation_skipped', input.skip); return { skipped: input.skip }; }

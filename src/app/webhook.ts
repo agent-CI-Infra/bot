@@ -4,7 +4,7 @@ import { type Store } from '../storage/database.js';
 import { randomId, verifySignature, type Json } from '../core/security.js';
 import { pullRequestNeeded, queueWebhook } from '../review/queue.js';
 import { botWakePreflightPlan, collectBotWakePreflight, type BotWakePreflight } from '../review/bot-pr-wake.js';
-import { GitHub } from '../github/client.js';
+import { GitHub, revokeInstallationToken } from '../github/client.js';
 import { Redactor } from '../agent/common.js';
 import { recordInstallationEvent } from './installations.js';
 import { enqueueForwards } from '../external/forward.js';
@@ -118,12 +118,18 @@ export async function ingest(
   let botWakePreflight: BotWakePreflight | undefined;
   const freshDelivery = status === 200 && !!owner && !!payload
     && !store.get('SELECT 1 FROM processed_deliveries WHERE account_id=? AND endpoint_id=? AND delivery_id=?', accountId, endpointId, deliveryId);
-  // A PR conversation comment (a mention or an update) is reviewed at the PR's current head, which the comment does not carry.
+  // A PR conversation comment (a mention or an update, created or edited) is reviewed at the PR's current head, which the comment does not carry.
   if (freshDelivery && pullRequestNeeded(store, repoId, event, payload!)) {
     // Read before the synchronous archive transaction; actor lookup is unnecessary for this read-only request.
     const github = new GitHub(store, owner!, new Redactor(), async () => {}, githubUrl);
     await github.connect(false, { pull_requests: 'read' }, undefined, false);
-    currentPullRequest = await github.object('review.pr', Number((payload!.issue as Json).number));
+    try {
+      currentPullRequest = await github.object('review.pr', Number((payload!.issue as Json).number));
+    } finally {
+      if (github.token && store.get('SELECT type FROM accounts WHERE id=?', owner!.account_id)?.type === 'github_app') {
+        await revokeInstallationToken(githubUrl || 'https://api.github.com', github.token).catch(() => false);
+      }
+    }
   }
   const wakePlan = freshDelivery ? botWakePreflightPlan(store, repoId, event, payload!) : null;
   if (wakePlan) {

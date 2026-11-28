@@ -1,6 +1,6 @@
 // Project-wide event intake, independent of the Manager role editor. The existing API preserves saved choices/revisions.
 const projectEventCaptions = [['actions.run_failed', '接收默认分支和版本标签的 Actions 失败事件'], ['issue.opened', 'Issue 打开'], ['issue.updated', 'Issue 修改或可信评论'], ['issue.mention', 'Issue 评论提到 bot'], ['issue.development_label', '有人加上开发标签'],
-  ['pull_request.opened', 'PR 打开或 Ready for review'], ['pull_request.synchronize', 'PR 推送新提交'], ['pull_request.updated', 'PR 修改、讨论或检视'], ['pull_request.mention', 'PR 评论提到 bot'],
+  ['pull_request.opened', 'PR 打开或 Ready for review'], ['pull_request.synchronize', 'PR 推送新提交'], ['pull_request.updated', 'PR 修改、讨论或检视'], ['pull_request.mention', 'PR 评论提到 bot'], ['pull_request.checks_failed', '他人 PR 检查失败分析'],
   ['review.published.issue', 'Issue 检视发布（可能开始开发）'], ['review.published.pr', 'bot PR 检视发布（可能修订 PR）']];
 
 function projectTriggersSection() {
@@ -70,7 +70,7 @@ function projectEventFiltersCard(manager, target, live) {
   const section = card('监听的事件来源'), form = document.createElement('form'), message = element('p', '', 'view-error'), events = manager.events;
   section.dataset.overviewAnchor = 'project-events'; form.className = 'project-form'; message.setAttribute('role', 'alert');
   section.append(note(`草稿、已关闭的对象、bot 自己写的内容和仓库外人员的评论始终不会触发自动处理。关闭的来源不会被接收，也不会产生分派调用。提到 bot 指评论里写了 ${manager.mention_names.map(name => '@' + name).join('、') || '（部署关闭了提及）'}。`));
-  section.append(note('开启 Actions 失败事件后，系统会扫描默认分支的失败运行，以及推送版本标签触发、提交在默认分支历史上的失败运行，并安排分析；关闭后停止接收和扫描。开启来源不会增加 GitHub 写权限。'));
+  section.append(note('开启 Actions 失败事件后，系统会扫描默认分支的失败运行，以及推送版本标签触发、提交在默认分支历史上的失败运行，并安排分析；关闭后停止接收和扫描。开启「他人 PR 检查失败分析」后，控制面会聚合分析他人开放非草稿 PR（含 Merge Queue）的失败检查并回复修复建议（绝不修改他人分支），实时接收依赖 GitHub App 订阅 Check run、Check suite 与 Workflow run。开启来源不会增加 GitHub 写权限。'));
   const fields = document.createElement('fieldset'); fields.disabled = !editable;
   const boxes = element('div', '', 'manager-events');
   for (const [key, caption] of projectEventCaptions) boxes.append(checkbox('event:' + key, events[key], caption));

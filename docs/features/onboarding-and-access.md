@@ -24,7 +24,7 @@
 首次登录后，超级管理员在「全局设置 → 系统初始化」（`#/settings/onboarding`）按七步完成整套部署接入：
 
 1. **公网 HTTPS 入口**：准备唯一 HTTPS 域名（控制台、登录、GitHub 回调与 Webhook 共用业务端口 `8791`）。可选自建 HTTPS 反向代理或内置 Cloudflare Tunnel（粘贴 token 或完整 `cloudflared` 命令，路由指向 `http://webhook:8791`），点击「检查并使用」校验本实例归属后生效。
-2. **仓库 GitHub App**：选用已登记 App 或通过 manifest 创建新 App（默认仅申请仓库级权限 `contents`、`issues`、`pull_requests`、`statuses`、`actions`、`checks` 写及 `metadata` 读，不申请组织级权限；订阅 `issues`、`pull_request`、`issue_comment`、`pull_request_review`、`pull_request_review_comment`、`check_run`、`status`）。已有 App 可随时使用「检查权限和事件订阅」核对缺项。
+2. **仓库 GitHub App**：选用已登记 App 或通过 manifest 创建新 App（默认仅申请仓库级权限 `contents`、`issues`、`pull_requests`、`statuses`、`actions`、`checks` 写及 `metadata` 读，不申请组织级权限；订阅 `issues`、`pull_request`、`issue_comment`、`pull_request_review`、`pull_request_review_comment`、`check_run`、`check_suite`、`status`、`workflow_run`）。已有 App 可随时使用「检查权限和事件订阅」核对缺项并按提示补齐。
 3. **GitHub 用户登录**：使用**独立的 OAuth App**（不复用仓库 GitHub App），填写 Homepage URL 与 `<统一入口>/auth/github/callback`，填入 Client ID 与 Client Secret 后启用。
 4. **安装到 GitHub 账号**：输入组织名、个人账号名或仓库链接解析目标账号，跳转到 GitHub 定向安装页选择仓库范围，返回后点击「重新检查安装」。
 5. **配置模型**：添加部署共享模型（可设置供应商名称和接口协议，名称留空时取地址主机名、重名自动加序号；支持「获取模型列表」与「测试模型」），保存为一个独立的供应商。

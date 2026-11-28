@@ -74,3 +74,17 @@ test('built-in Manager prompt defines internal pull_request.patrol boundaries an
     assert.ok(flat.includes(phrase), `missing patrol contract phrase: ${phrase}`);
   }
 });
+
+test('built-in Manager prompt covers Merge Queue failures, non-bot PR check failure analysis, and edited comment/review comparison (#1427)', () => {
+  const flat = text.replace(/\s+/g, ' ');
+  for (const phrase of [
+    'facts.merge_group',
+    'facts.merge_group_sha',
+    'facts.bot_pull_request === false',
+    'never modify or push to the author\'s branch (`writes: ["pull_request"]` is forbidden)',
+    'trigger.edited: true',
+    'trigger.previous.body',
+  ]) {
+    assert.ok(flat.includes(phrase), `missing #1427 contract phrase: ${phrase}`);
+  }
+});

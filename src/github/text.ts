@@ -70,8 +70,8 @@ export type Prompted = 'comment' | 'edit' | 'review' | 'review_comment' | 'label
 const link = (text: string, url: string) => url ? `[${text}](${url})` : text;
 /** The kind of update a review trigger records, for the summary comment's first line. */
 export function promptedBy(reason: unknown): Prompted {
-  return ['issue_edited', 'pull_request_edited'].includes(String(reason)) ? 'edit' : reason === 'review_submitted' ? 'review'
-    : ['review_comment', 'review_reply'].includes(String(reason)) ? 'review_comment' : reason === 'labeled' ? 'label' : 'comment';
+  return ['issue_edited', 'pull_request_edited'].includes(String(reason)) ? 'edit' : ['review_submitted', 'review_edited'].includes(String(reason)) ? 'review'
+    : ['review_comment', 'review_reply', 'review_comment_edited', 'review_reply_edited'].includes(String(reason)) ? 'review_comment' : reason === 'labeled' ? 'label' : 'comment';
 }
 const words = {
   zh: { review: (n: number, at: string, sha: string) => `第 ${n} 次检视，更新于 ${at}，检视提交 ${sha}`, reply: (actor: string, url: string, what: Prompted) => what === 'label' ? `；回应 @${actor} 加的标签` : `；回应 @${actor} 的${link({ comment: '评论', edit: '修改', review: '检视', review_comment: '行内评论' }[what], url)}`,

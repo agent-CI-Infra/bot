@@ -20,16 +20,30 @@ export function developmentReady(issue: any, label: string) {
 /** The logins assigned to an Issue, for the Manager's facts. */
 export const assigneesOf = (issue: any) => [...(Array.isArray(issue?.assignees) ? issue.assignees : []), ...(issue?.assignee && !issue.assignees?.length ? [issue.assignee] : [])]
   .map((a: any) => String(a?.login || '')).filter(Boolean);
-// Mentions are plain text, independent of GitHub accounts. Escape configured names before matching.
-// A new comment on an open Issue or PR that mentions one of the configured names.
-export function mentionsBot(event: string, payload: Json): boolean {
-  const issue = payload.issue as any, comment = payload.comment as any, configured = process.env.BOT_MENTION_NAMES ?? 'bot,agent-ci-infra-bot';
-  if (event !== 'issue_comment' || payload.action !== 'created' || botWrote(payload, comment?.body) || issue?.state !== 'open'
-    || !Number.isSafeInteger(issue.number) || issue.number < 1 || typeof comment?.body !== 'string'
-    || !/^[1-9]\d*$/.test(String(comment.id ?? '')) || typeof comment.id === 'number' && !Number.isSafeInteger(comment.id)
-    || configured.trim().toLowerCase() === 'off') return false;
+function bodyMentionsBot(body: string): boolean {
+  const configured = process.env.BOT_MENTION_NAMES ?? 'bot,agent-ci-infra-bot';
+  if (configured.trim().toLowerCase() === 'off') return false;
   const names = configured.split(',').map(name => name.trim()).filter(Boolean);
-  return names.some(name => new RegExp(`(^|[^a-z0-9])@${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![a-z0-9-])`, 'i').test(comment.body));
+  return names.some(name => new RegExp(`(^|[^a-z0-9])@${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![a-z0-9-])`, 'i').test(body));
+}
+function editedBodyFrom(payload: any, currentBody: unknown): string | null {
+  const bodyChange = payload?.changes?.body;
+  if (!bodyChange || typeof bodyChange !== 'object' || typeof bodyChange.from !== 'string') return null;
+  if (typeof currentBody !== 'string' || bodyChange.from === currentBody) return null;
+  return bodyChange.from;
+}
+// Mentions are plain text, independent of GitHub accounts. Escape configured names before matching.
+// A new comment (or an edit that newly adds an @bot mention not present in previous.body) on an open Issue or PR.
+export function mentionsBot(event: string, payload: Json): boolean {
+  const issue = payload.issue as any, comment = payload.comment as any;
+  if (event !== 'issue_comment' || (payload.action !== 'created' && payload.action !== 'edited') || botWrote(payload, comment?.body) || issue?.state !== 'open'
+    || !Number.isSafeInteger(issue.number) || issue.number < 1 || typeof comment?.body !== 'string'
+    || !/^[1-9]\d*$/.test(String(comment.id ?? '')) || typeof comment.id === 'number' && !Number.isSafeInteger(comment.id)) return false;
+  if (payload.action === 'edited') {
+    const previous = editedBodyFrom(payload, comment.body);
+    if (previous === null || bodyMentionsBot(previous)) return false;
+  }
+  return bodyMentionsBot(comment.body);
 }
 // What the bot writes itself carries its marker; a bot account posts as an ordinary GitHub user, so the sender type is not enough.
 const botMarker = /<!-- dept-bot[:-]/;
@@ -117,7 +131,8 @@ function revisionRequest(payload: any, trigger: any) {
   if (!source || !/^[1-9]\d*$/.test(String(source.id))) return null;
   const body = source.type === 'review' ? payload.review?.body : payload.comment?.body;
   return { type: String(source.type), id: String(source.id), author: String(trigger.actor || ''), author_id: String(trigger.actor_id || ''),
-    author_type: trigger.actor_type === 'Bot' ? 'Bot' : 'User', url: String(trigger.url || ''), body: clip(body, 4000) };
+    author_type: trigger.actor_type === 'Bot' ? 'Bot' : 'User', url: String(trigger.url || ''), body: clip(body, 4000),
+    ...(trigger.edited ? { edited: true, previous_body: clip(trigger.previous?.body, 4000) } : {}) };
 }
 const clip = (value: unknown, limit = 4000) => { const text = String(value ?? ''); return text.length > limit ? text.slice(0, limit) + '…' : text; };
 // Why a webhook delivery that a person caused reaches no Manager (#815): kept on a filtered event so the console can say it.
@@ -159,12 +174,17 @@ function updateCheck(event: string, payload: Json, otherBot: boolean): UpdateTri
     return { kind: 'review.issue', number: p.issue.number, trigger: { reason: 'issue_edited', actor, changed: edited(p.changes),
       previous: Object.fromEntries(edited(p.changes).map(key => [key, clip(p.changes[key]?.from)])) } };
   }
-  if (event === 'issue_comment' && action === 'created' && p.issue) {
+  if (event === 'issue_comment' && (action === 'created' || action === 'edited') && p.issue) {
+    const isEdited = action === 'edited';
+    const prevBody = isEdited ? editedBodyFrom(p, p.comment?.body) : null;
+    if (isEdited && prevBody === null) return null;
     if (p.issue.state !== 'open') return closedOrDraft(p.issue, !!p.issue.pull_request);
     if (!Number.isSafeInteger(p.issue.number) || p.issue.number < 1 || typeof p.comment?.body !== 'string') return null;
     if (byBot(p, p.comment.body)) return botContent();
     if (!trusted(p.comment.author_association, p.issue.user)) return outsider();
-    return { kind: p.issue.pull_request ? 'review.pr' : 'review.issue', number: p.issue.number, trigger: { reason: 'comment', actor, ...by, url: String(p.comment.html_url || ''), ...source('comment', p.comment.id) } };
+    return { kind: p.issue.pull_request ? 'review.pr' : 'review.issue', number: p.issue.number, trigger: { reason: isEdited ? 'comment_edited' : 'comment', actor, ...by,
+      ...(isEdited ? { edited: true, previous: { body: clip(prevBody) } } : {}),
+      url: String(p.comment.html_url || ''), ...source('comment', p.comment.id) } };
   }
   const pr = p.pull_request;
   if (event === 'pull_request' && action === 'edited' && pr && edited(p.changes).length) {
@@ -174,11 +194,16 @@ function updateCheck(event: string, payload: Json, otherBot: boolean): UpdateTri
     return { kind: 'review.pr', number: pr.number, pullRequest: pr, trigger: { reason: 'pull_request_edited', actor, changed: edited(p.changes),
       previous: Object.fromEntries(edited(p.changes).map(key => [key, clip(p.changes[key]?.from)])) } };
   }
-  if (event === 'pull_request_review_comment' && action === 'created' && pr && typeof p.comment?.body === 'string') {
+  if (event === 'pull_request_review_comment' && (action === 'created' || action === 'edited') && pr && typeof p.comment?.body === 'string') {
+    const isEdited = action === 'edited';
+    const prevBody = isEdited ? editedBodyFrom(p, p.comment?.body) : null;
+    if (isEdited && prevBody === null) return null;
     if (!open(pr)) return closedOrDraft(pr, true);
     if (byBot(p, p.comment.body)) return botContent();
     if (!trusted(p.comment.author_association, pr.user)) return outsider();
-    return { kind: 'review.pr', number: pr.number, pullRequest: pr, trigger: { reason: p.comment.in_reply_to_id ? 'review_reply' : 'review_comment', actor, ...by,
+    return { kind: 'review.pr', number: pr.number, pullRequest: pr, trigger: {
+      reason: isEdited ? (p.comment.in_reply_to_id ? 'review_reply_edited' : 'review_comment_edited') : (p.comment.in_reply_to_id ? 'review_reply' : 'review_comment'),
+      actor, ...by, ...(isEdited ? { edited: true, previous: { body: clip(prevBody) } } : {}),
       url: String(p.comment.html_url || ''), path: String(p.comment.path || ''), line: p.comment.line ?? null, ...source('review_comment', p.comment.id) } };
   }
   // Every reply to a review thread also arrives as a review without a body; that one is the comment event above.
@@ -188,6 +213,15 @@ function updateCheck(event: string, payload: Json, otherBot: boolean): UpdateTri
     if (!trusted(p.review?.author_association, pr.user)) return outsider();
     return { kind: 'review.pr', number: pr.number, pullRequest: pr, trigger: { reason: 'review_submitted', actor, ...by, state: String(p.review.state || ''),
       body: clip(p.review.body), url: String(p.review.html_url || ''), ...source('review', p.review.id) } };
+  }
+  if (event === 'pull_request_review' && action === 'edited' && pr) {
+    const prevBody = editedBodyFrom(p, p.review?.body);
+    if (prevBody === null) return null;
+    if (!open(pr)) return closedOrDraft(pr, true);
+    if (byBot(p, p.review?.body)) return botContent();
+    if (!trusted(p.review?.author_association, pr.user)) return outsider();
+    return { kind: 'review.pr', number: pr.number, pullRequest: pr, trigger: { reason: 'review_edited', actor, ...by, edited: true, previous: { body: clip(prevBody) },
+      state: String(p.review.state || ''), body: clip(p.review.body), url: String(p.review.html_url || ''), ...source('review', p.review.id) } };
   }
   return null;
 }
@@ -397,9 +431,15 @@ function webhookEvent(store: Store, repositoryId: string, event: string, payload
     const object = p.issue.pull_request ? 'pr' : 'issue', number = Number(p.issue.number), type = object === 'pr' ? 'pull_request.mention' : 'issue.mention';
     if (!filters[type]) mention = filterOff(object === 'pr' ? 'PR 里提到 bot' : 'Issue 里提到 bot');
     else if (object === 'issue' || pullRequestOk(commented, number)) {
-      const trigger = { event, action, reason: 'mention', actor, url: String(p.comment.html_url || ''), source: { type: 'comment', id: Number(p.comment.id) }, actor_id: String(p.sender?.id ?? '') };
+      const isEdited = action === 'edited';
+      const prevBody = isEdited ? editedBodyFrom(p, p.comment?.body) : null;
+      const trigger = { event, action, reason: 'mention', actor,
+        ...(isEdited && prevBody !== null ? { edited: true, previous: { body: clip(prevBody) } } : {}),
+        url: String(p.comment.html_url || ''), source: { type: 'comment', id: Number(p.comment.id) }, actor_id: String(p.sender?.id ?? '') };
       const kind = object === 'pr' ? 'review.pr' : 'review.issue';
-      return update(type, object, number, object === 'pr' ? commented : p.issue, trigger, `${repositoryId}:${kind}:${number}:comment:${p.comment.id}`, { commentId: String(p.comment.id) }, { comment: commentFacts(p.comment) });
+      const mergeKey = isEdited ? 'delivery:' + delivery : `${repositoryId}:${kind}:${number}:comment:${p.comment.id}`;
+      const reviewRef = isEdited ? { updateId: delivery } : { commentId: String(p.comment.id) };
+      return update(type, object, number, object === 'pr' ? commented : p.issue, trigger, mergeKey, reviewRef, { comment: commentFacts(p.comment) });
     } else mention = closedOrDraft(commented, true);
   }
   const changed = updateCheck(event, payload, otherBotOnBotPullRequest(store, repositoryId, event, payload));
@@ -513,11 +553,17 @@ function filteredEvent(repositoryId: string, event: string, payload: Json, deliv
   const p = payload as any, action = String(p.action || ''), object = p.pull_request ?? p.issue;
   const pr = !!p.pull_request || !!p.issue?.pull_request, number = Number(object?.number);
   if (!object || !Number.isSafeInteger(number) || number < 1) return null;
+  if (action === 'edited' && ['issue_comment', 'pull_request_review', 'pull_request_review_comment'].includes(event)) {
+    const currentBody = event === 'pull_request_review' ? p.review?.body : p.comment?.body;
+    if (editedBodyFrom(p, currentBody) === null) return null;
+  }
   const types: Record<string, string> = { 'issues:opened': 'issue.opened', 'issues:edited': 'issue.updated', 'issues:labeled': 'issue.labeled',
     'issue_comment:created': mentionsBot(event, payload) ? (pr ? 'pull_request.mention' : 'issue.mention') : pr ? 'pull_request.updated' : 'issue.updated',
+    'issue_comment:edited': mentionsBot(event, payload) ? (pr ? 'pull_request.mention' : 'issue.mention') : pr ? 'pull_request.updated' : 'issue.updated',
     'pull_request:opened': 'pull_request.opened', 'pull_request:ready_for_review': 'pull_request.opened', 'pull_request:synchronize': 'pull_request.synchronize',
     'pull_request:labeled': 'pull_request.labeled', 'pull_request:edited': 'pull_request.updated',
-    'pull_request_review:submitted': 'pull_request.updated', 'pull_request_review_comment:created': 'pull_request.updated' };
+    'pull_request_review:submitted': 'pull_request.updated', 'pull_request_review:edited': 'pull_request.updated',
+    'pull_request_review_comment:created': 'pull_request.updated', 'pull_request_review_comment:edited': 'pull_request.updated' };
   const type = types[`${event}:${action}`]; if (!type) return null;
   return { repositoryId, key: `${repositoryId}:filtered:${delivery}`, type, summary: `${clip(object.title, 120)} #${number}（${String(p.sender?.login || '')}）`,
     object: { type: pr ? 'pr' as const : 'issue' as const, number }, delivery, facts: { event, action, actor: String(p.sender?.login || '') } };

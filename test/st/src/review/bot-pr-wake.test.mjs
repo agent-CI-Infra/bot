@@ -457,7 +457,7 @@ const toolCall = (id, name, args) => ({
 });
 
 for (const accountType of ['github_app', 'bot_account']) {
-  test(`check failures wake only open non-draft bot_pull_requests under ${accountType}, route to root Issue or standalone PR thread, and collapse multi-job check_run + check_suite + workflow_run into one event per attempt`, async t => {
+  test(`check failures wake open non-draft bot and non-bot PRs under ${accountType}, route to root Issue or standalone PR thread, and collapse multi-job check_run + check_suite + workflow_run into one event per attempt`, async t => {
     const fx = await createBotPrWakeFixture(t, { accountType });
     const { h, acc, state } = fx;
     state.runJobs.set(7001, [
@@ -471,17 +471,12 @@ for (const accountType of ['github_app', 'bot_account']) {
       },
     ]);
 
-    // 1. Passing workflow_run, non-bot PR #90 failure, stale-SHA failure, draft PR, and spoofed fork run are all ignored.
+    // 1. Passing workflow_run, stale-SHA failure, and spoofed fork run are all ignored; open non-draft non-bot PR #90
+    //    wakes with `bot_pull_request: false` and NO `development.pr` option (#1427).
     await h.hook(acc.path, acc.secret, 'wf-pass', {
       action: 'completed',
       repository: { id: 101 },
       workflow_run: { id: 7000, name: 'CI', status: 'completed', conclusion: 'success', run_attempt: 1, head_sha: state.prHead1, pull_requests: [{ number: 88 }] },
-    }, { 'X-GitHub-Event': 'workflow_run' });
-
-    await h.hook(acc.path, acc.secret, 'wf-non-bot', {
-      action: 'completed',
-      repository: { id: 101 },
-      workflow_run: { id: 7003, name: 'CI', status: 'completed', conclusion: 'failure', run_attempt: 1, head_sha: state.pr90Head1, head_branch: 'alice/feat', pull_requests: [{ number: 90 }] },
     }, { 'X-GitHub-Event': 'workflow_run' });
 
     await h.hook(acc.path, acc.secret, 'wf-stale-sha', {
@@ -497,6 +492,18 @@ for (const accountType of ['github_app', 'bot_account']) {
     }, { 'X-GitHub-Event': 'workflow_run' });
 
     assert.equal(h.store.get("SELECT count(*) n FROM dispatch_events WHERE type='pull_request.checks_failed'").n, 0);
+
+    await h.hook(acc.path, acc.secret, 'wf-non-bot', {
+      action: 'completed',
+      repository: { id: 101 },
+      workflow_run: { id: 7003, name: 'CI', status: 'completed', conclusion: 'failure', run_attempt: 1, head_sha: state.pr90Head1, head_branch: 'alice/feat', pull_requests: [{ number: 90 }] },
+    }, { 'X-GitHub-Event': 'workflow_run' });
+    const pr90Events = h.store.all("SELECT * FROM dispatch_events WHERE object_number=90 AND type='pull_request.checks_failed'");
+    assert.equal(pr90Events.length, 1, 'open non-draft non-bot PR #90 wakes for read-only analysis');
+    assert.equal(pr90Events[0].thread_key, '101:pr:90');
+    assert.equal(JSON.parse(pr90Events[0].facts).bot_pull_request, false);
+    const pr90Opts = JSON.parse(pr90Events[0].options);
+    assert.deepEqual(pr90Opts.map(o => o.id), ['reply'], 'non-bot PR only offers reply option, never development.pr');
 
     // 2. workflow_run failure on Issue-linked bot PR #88 (even with empty pull_requests[], matched by sha/branch)
     //    routes to root Issue thread `101:issue:42` and carries rich job & PR facts.
@@ -519,7 +526,7 @@ for (const accountType of ['github_app', 'bot_account']) {
       },
     }, { 'X-GitHub-Event': 'workflow_run' });
 
-    const events1 = h.store.all("SELECT * FROM dispatch_events WHERE type='pull_request.checks_failed'");
+    const events1 = h.store.all("SELECT * FROM dispatch_events WHERE object_number=88 AND type='pull_request.checks_failed'");
     assert.equal(events1.length, 1, 'only open non-draft PR #88 wakes; draft PR #89 is skipped');
     assert.equal(events1[0].thread_key, '101:issue:42');
     assert.equal(events1[0].object_type, 'pr');
@@ -554,14 +561,14 @@ for (const accountType of ['github_app', 'bot_account']) {
       repository: { id: 101 },
       check_run: { id: 8801, name: 'unit-tests', status: 'completed', conclusion: 'failure', head_sha: state.prHead1, check_suite: { id: 5001 }, details_url: 'https://github.com/fixture/project-101/actions/runs/7001/job/8801', pull_requests: [{ number: 88 }] },
     }, { 'X-GitHub-Event': 'check_run' });
-    assert.equal(h.store.get("SELECT count(*) n FROM dispatch_events WHERE type='pull_request.checks_failed'").n, 1);
+    assert.equal(h.store.get("SELECT count(*) n FROM dispatch_events WHERE object_number=88 AND type='pull_request.checks_failed'").n, 1);
 
     await h.hook(acc.path, acc.secret, 'wf-fail-attempt-2', {
       action: 'completed',
       repository: { id: 101 },
       workflow_run: { id: 7001, check_suite_id: 5001, name: 'CI', run_attempt: 2, status: 'completed', conclusion: 'timed_out', head_sha: state.prHead1, pull_requests: [{ number: 88 }] },
     }, { 'X-GitHub-Event': 'workflow_run' });
-    assert.equal(h.store.get("SELECT count(*) n FROM dispatch_events WHERE type='pull_request.checks_failed'").n, 2);
+    assert.equal(h.store.get("SELECT count(*) n FROM dispatch_events WHERE object_number=88 AND type='pull_request.checks_failed'").n, 2);
 
     // 4. Multi-job workflow on undrafted standalone bot PR #89:
     //    Job 1 (`lint`) fails while Job 2 (`e2e`) is still `in_progress` -> deferred (0 premature events);
@@ -655,8 +662,8 @@ test('standard App installation without push/check_suite webhooks detects base-b
 
   const standardEvents = [...appEvents, 'check_run', 'status'];
   assert.ok(!standardEvents.includes('push') && !standardEvents.includes('check_suite'));
-  // Readiness: a standard App installation has zero baseline gaps (only optional workflows/workflow_run when unused).
-  const fullSubscribedGaps = accessGaps('github_app', JSON.stringify({ ...appPermissions, workflows: 'write' }), JSON.stringify([...standardEvents, 'workflow_run']));
+  // Readiness: a standard App installation has zero baseline gaps (and zero feature gaps once check_suite/workflow_run/workflows are added).
+  const fullSubscribedGaps = accessGaps('github_app', JSON.stringify({ ...appPermissions, workflows: 'write' }), JSON.stringify([...standardEvents, 'check_suite', 'workflow_run']));
   assert.deepEqual(fullSubscribedGaps, []);
 
   const fx = await createBotPrWakeFixture(t, { installationEvents: standardEvents });

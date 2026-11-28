@@ -53,7 +53,7 @@ test('the account view names its installations, its projects and the permissions
   // instead of mapping permission names to features of its own.
   // A baseline grant still leaves feature-specific permissions/events short: each gap names the exact feature it stops.
   assert.deepEqual(full.access_gaps.map(gap => [gap.kind, gap.name, gap.features]),
-    [['permission', 'workflows', ['ci_changes']], ['event', 'check_run', ['ci_checks']], ['event', 'status', ['ci_checks']], ['event', 'workflow_run', ['actions_failures']]]);
+    [['permission', 'workflows', ['ci_changes']], ['event', 'check_run', ['ci_checks']], ['event', 'check_suite', ['ci_checks']], ['event', 'status', ['ci_checks']], ['event', 'workflow_run', ['actions_failures']]]);
   assert.ok(short.access_gaps.length > 0);
   assert.ok(short.access_gaps.every(gap => gap.features.length > 0), JSON.stringify(short.access_gaps));
   assert.ok(short.access_gaps.find(gap => gap.kind === 'permission' && gap.name === 'contents').features.includes('development'));
