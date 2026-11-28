@@ -8,8 +8,14 @@ import { deliveryResult } from '../../../../dist/review/delivery.js';
 import { pruneRejectedArchive, rejectedArchiveState, rejectedAudit } from '../../../../dist/app/delivery-audit.js';
 import { ProjectService } from '../../../../dist/projects/service.js';
 import { Dispatcher } from '../../../../dist/dispatch/worker.js';
-import { pruneDispatchThreads } from '../../../../dist/dispatch/store.js';
+import { pruneDispatchThreads, pruneFiltered } from '../../../../dist/dispatch/store.js';
 import { botPrWakeRevisionFacts, BOT_PR_WAKE_TASK_ROWS_SQL } from '../../../../dist/review/bot-pr-wake.js';
+import { revisionFacts } from '../../../../dist/review/queue.js';
+import { roleBoard, roleCapacity } from '../../../../dist/roles/board.js';
+import { listBoardPrs, boardPrDetail } from '../../../../dist/board/prs.js';
+import { listBoardIssues, boardIssueDetail } from '../../../../dist/board/issues.js';
+import { beginRun, endRun, traceEvent } from '../../../../dist/tasks/trace.js';
+import { TaskRecords } from '../../../../dist/tasks/service.js';
 import { readFileSync } from 'node:fs';
 
 // Production: latestRoleCandidate joined task_history on 'task_history:'||h.id, which cannot use the key, so every call
@@ -301,16 +307,16 @@ test('bot PR wake facts read the PR’s own events and tasks, never the reposito
   assert.match(plan, /SEARCH te USING (?:COVERING )?INDEX task_events_event \(event_id=\?\)/, plan);
   assert.match(plan, /SEARCH te USING (?:COVERING )?INDEX (?:task_events_event|sqlite_autoindex_task_events_1) \(task_id=\?\)/, plan);
   assert.match(plan, /SEARCH e USING (?:COVERING )?INDEX sqlite_autoindex_dispatch_events_1 \(id=\?\)/, plan);
-  assert.doesNotMatch(plan, /SEARCH t USING INDEX board_task_(?:object|latest|cover) \(repository_id=\?\)/, plan);
+  assert.doesNotMatch(plan, /SEARCH t USING INDEX (?:board_task_(?:object|latest|cover)|tasks_repo_created) \(repository_id=\?\)/, plan);
   assert.doesNotMatch(plan, /dispatch_events_object \(repository_id=\?\)/, plan);
   assert.doesNotMatch(plan, /board_task_object \(repository_id=\?\).*dispatch_events_object \(repository_id=\?\)/, plan);
   // The rows here are enough to reproduce the statement this replaced: it reads the repository's tasks and the
   // repository's events. Both are asserted without an order, and the task index by name loosely, because a SQLite
   // version picks both itself: 3.47.2 (Node 22.13.0/22.14.0) reads the tasks through `board_task_latest`, 3.50.4 and
-  // 3.54.1 through `board_task_object`, and a version with statistics may use `board_task_cover`. What matters here is
-  // that the two full-repository reads are there.
+  // 3.54.1 through `board_task_object` or `tasks_repo_created`, and a version with statistics may use `board_task_cover`.
+  // What matters here is that the two full-repository reads are there.
   const legacyPlan = explain(legacySql, legacyArgs);
-  assert.match(legacyPlan, /SEARCH t USING INDEX board_task_(?:object|latest|cover) \(repository_id=\?\)/, legacyPlan);
+  assert.match(legacyPlan, /SEARCH t USING INDEX (?:board_task_(?:object|latest|cover)|tasks_repo_created) \(repository_id=\?\)/, legacyPlan);
   assert.match(legacyPlan, /SEARCH e USING INDEX dispatch_events_object \(repository_id=\?\)/, legacyPlan);
 });
 
@@ -383,4 +389,292 @@ test('bot PR wake facts read the comments on the PR and its Issue through the ob
   const legacySql = sql.replace(" AND object_type IN ('pr','issue')", '').replace('+created_at', 'created_at');
   const legacyPlan = all('EXPLAIN QUERY PLAN ' + legacySql, 'r1', 2468, 77).map(row => row.detail).join(' | ');
   assert.match(legacyPlan, /dispatch_events_(?:repository|object) \(repository_id=\?\)/, legacyPlan);
+});
+
+// Hard guard: never add a new index on task_history (13.6M rows in production would scan the whole table and exhaust
+// the 512 MB /tmp tmpfs during startup). Framework-level task_continued reads use task_history_run(task_id,run_id,id)
+// with run_id IS NULL, while delivery reads combine run_id IS NULL with run_id IN (SELECT id FROM task_runs WHERE task_id=?)
+// through task_history_run_type so both active-attempt deliveries (non-null run_id) and runless deliveries are found
+// without walking child run history or sorting in a temp B-tree.
+test('task_continued and delivery lookups use existing task_history indexes without adding any index on task_history', t => {
+  const store = new Store(':memory:', Buffer.alloc(32, 3)); t.after(() => store.close());
+  store.db.exec('PRAGMA foreign_keys=OFF');
+  const historyIndexes = store.all("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='task_history'").map(r => r.name).sort();
+  assert.deepEqual(historyIndexes, ['task_history_run', 'task_history_run_type'], 'no new index on task_history');
+
+  const at = i => new Date(Date.parse('2026-11-24T00:00:00Z') + i * 1000).toISOString();
+  store.run("INSERT INTO repositories(id,full_name,owner_id,account_id) VALUES('r1','o/r1','o','a')");
+  store.run(
+    "INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,input,created_at,updated_at) VALUES('t1','r1','task.request','pr_opened','fix',2468,?,?,?)",
+    JSON.stringify({ round: 2 }),
+    at(0),
+    at(50),
+  );
+  store.run(
+    `INSERT INTO dispatch_events(id,repository_id,event_key,type,source,object_type,object_number,summary,facts,options,state,created_at)
+     VALUES('wake-1','r1','r1:w1','pull_request.conflicted','github','pr',2468,'','{}','[]','decided',?),
+           ('wake-2','r1','r1:w2','pull_request.checks_failed','github','pr',2468,'','{}','[]','decided',?)`,
+    at(1),
+    at(30),
+  );
+  store.run("INSERT INTO task_events(task_id,event_id,relation,created_at) VALUES('t1','wake-1','wake',?),('t1','wake-2','wake',?)", at(1), at(30));
+
+  const records = new TaskRecords(store);
+  // Round 1 delivery written while attemptRun is running -> trace_history_scope stamps run_id = attemptRun.id (non-null!).
+  const run1 = beginRun(store, { id: 't1', repository_id: 'r1', attempt: 1, head_sha: null, workspace_id: null }, 'attempt', {});
+  assert.ok(run1?.id);
+  for (let i = 0; i < 40; i++) {
+    traceEvent(store, 't1', 'tool_observation', { i }, run1.id, 'tool');
+  }
+  records.history('t1', 'delivery', { summary: 'Round 1 PR opened', pr_url: 'https://github.com/o/r1/pull/2468' });
+  const r1Delivery = store.get("SELECT id, run_id FROM task_history WHERE task_id='t1' AND type='delivery' ORDER BY id DESC LIMIT 1");
+  assert.equal(r1Delivery.run_id, run1.id, 'delivery written during an active attemptRun keeps non-null run_id');
+  endRun(store, run1, 'succeeded');
+
+  // Even if an orphaned running run existed, trace_history_scope must keep task_continued at run_id IS NULL.
+  const strayRun = beginRun(store, { id: 't1', repository_id: 'r1', attempt: 2, head_sha: null, workspace_id: null }, 'attempt', {});
+  traceEvent(store, 't1', 'task_continued', { round: 2, event_id: 'wake-2' }, null, 'framework');
+  const contRow = store.get("SELECT id, run_id FROM task_history WHERE task_id='t1' AND type='task_continued'");
+  assert.equal(contRow.run_id, null, 'task_continued stays run_id IS NULL');
+  endRun(store, strayRun, 'succeeded');
+
+  // Round 2 delivery written outside any running run -> run_id IS NULL.
+  records.history('t1', 'delivery', { summary: 'Round 2 checks fixed', pr_url: 'https://github.com/o/r1/pull/2468' });
+  const r2Delivery = store.get("SELECT id, run_id FROM task_history WHERE task_id='t1' AND type='delivery' ORDER BY id DESC LIMIT 1");
+  assert.equal(r2Delivery.run_id, null, 'delivery written outside an active run stays run_id IS NULL');
+
+  // bot_pr_requests spanning round 1 and round 2 for revisionFacts + botPrWakeRevisionFacts.
+  const contAt = store.get("SELECT created_at FROM task_history WHERE id=?", contRow.id).created_at;
+  const beforeCont = new Date(Date.parse(contAt) - 5000).toISOString();
+  const afterCont = new Date(Date.parse(contAt) + 5000).toISOString();
+  store.run(
+    `INSERT INTO bot_pr_requests(repository_id,number,source_type,source_id,author,author_id,author_type,url,state,task_id,created_at)
+     VALUES('r1',2468,'comment','101','alice','5','User','u1','done','t1',?),
+           ('r1',2468,'comment','102','alice','5','User','u2','done','t1',?)`,
+    beforeCont,
+    afterCont,
+  );
+
+  const seen = [], all = store.all.bind(store);
+  store.all = (sql, ...args) => { seen.push({ sql, args }); return all(sql, ...args); };
+  const rev = revisionFacts(store, 'r1', 2468, '5');
+  const wake = botPrWakeRevisionFacts(store, 'r1', 2468);
+  store.all = all;
+
+  assert.equal(rev.for_requests, 2);
+  assert.equal(rev.for_this_author, 2);
+  assert.equal(wake.for_requests, 2);
+  assert.equal(wake.rounds.length, 2);
+  assert.equal(wake.rounds[0].summary, 'Round 1 PR opened', 'non-null run_id delivery is found for round 1');
+  assert.equal(wake.rounds[1].summary, 'Round 2 checks fixed', 'run_id IS NULL delivery is found for round 2');
+
+  const explain = ({ sql, args }) => all('EXPLAIN QUERY PLAN ' + sql, ...args).map(r => r.detail).join(' | ');
+  const historyReads = seen.filter(entry => /\bFROM task_history\b/.test(entry.sql));
+  assert.ok(historyReads.length >= 5, `expected revisionFacts + botPrWakeRevisionFacts history reads, got ${historyReads.length}`);
+  for (const entry of historyReads) {
+    const plan = explain(entry);
+    assert.doesNotMatch(plan, /TEMP B-TREE/, `${entry.sql}\n${plan}`);
+    assert.doesNotMatch(plan, /SEARCH task_history USING INDEX task_history_run \(task_id=\?\)/, `${entry.sql}\n${plan}`);
+    if (/run_id IS NULL/.test(entry.sql)) {
+      assert.match(plan, /SEARCH task_history USING INDEX task_history_run \(task_id=\? AND run_id=\?\)/, `${entry.sql}\n${plan}`);
+    } else {
+      assert.match(plan, /SEARCH task_history USING INDEX task_history_run_type \(run_id=\? AND type=\?\)/, `${entry.sql}\n${plan}`);
+      assert.match(plan, /SEARCH task_runs USING COVERING INDEX task_run_task \(task_id=\?\)/, `${entry.sql}\n${plan}`);
+    }
+  }
+});
+
+// Production: GET /api/repositories/:id/role-board took up to 10.98 s because SQLite drove the running-runs join from
+// every historical task of the repository. With the partial index task_runs_running (only live rows) and CROSS JOIN,
+// both roleBoard and roleCapacity drive from task_runs_running and never sort or scan tasks.
+test('roleBoard and roleCapacity drive live task_runs joins from the task_runs_running partial index', t => {
+  const store = new Store(':memory:', Buffer.alloc(32, 3)); t.after(() => store.close());
+  store.db.exec('PRAGMA foreign_keys=OFF');
+  const at = i => new Date(Date.parse('2026-11-24T00:00:00Z') + i * 1000).toISOString();
+  store.transaction(() => {
+    store.run("INSERT INTO repositories(id,full_name,owner_id,account_id) VALUES('r1','o/r1','o','a'),('r2','o/r2','o','a')");
+    store.run("INSERT INTO policies(repository_id,role_concurrency) VALUES('r1','{\"dev\":3}'),('r2','{}')");
+    const insTask = store.db.prepare("INSERT INTO tasks(id,repository_id,kind,status,summary,input,created_at,updated_at) VALUES(?,?,?,?,?,'{}',?,?)");
+    const insRun = store.db.prepare("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,context_snapshot,config_snapshot,role,role_instance_id) VALUES(?,?,'role',1,1,?,?,'{}','{}',?,?)");
+    for (let i = 0; i < 600; i++) {
+      insTask.run(`hist-${i}`, 'r1', 'task.request', 'completed', 'old', at(i), at(i));
+      insRun.run(`run-hist-${i}`, `hist-${i}`, at(i), 'succeeded', 'dev', `inst-${i}`);
+    }
+    insTask.run('live-1', 'r1', 'task.request', 'running', 'live 1', at(1000), at(1000));
+    insTask.run('live-2', 'r1', 'task.request', 'running', 'live 2', at(1001), at(1001));
+    insTask.run('live-other', 'r2', 'task.request', 'running', 'other repo', at(1002), at(1002));
+    insRun.run('run-live-2', 'live-2', at(1001), 'running', 'dev', 'inst-live-2');
+    insRun.run('run-live-1', 'live-1', at(1000), 'running', 'dev', 'inst-live-1');
+    insRun.run('run-live-other', 'live-other', at(1002), 'running', 'dev', 'inst-live-other');
+  });
+
+  const seen = [], all = store.all.bind(store), get = store.get.bind(store);
+  store.all = (sql, ...args) => { seen.push({ sql, args }); return all(sql, ...args); };
+  store.get = (sql, ...args) => { seen.push({ sql, args }); return get(sql, ...args); };
+  const board = roleBoard(store, 'r1');
+  const cap = roleCapacity(store, 'r1', 'dev', 'writer');
+  store.all = all; store.get = get;
+
+  const devRole = board.roles.find(r => r.role === 'dev');
+  assert.deepEqual(devRole.running.map(r => r.run_id), ['run-live-1', 'run-live-2'], 'ordered by started_at, id');
+  assert.deepEqual(cap, { limit: 3, running: 2 });
+
+  const joinQueries = seen.filter(entry => /FROM task_runs r\b/.test(entry.sql));
+  assert.equal(joinQueries.length, 2, joinQueries.map(q => q.sql).join('\n'));
+  for (const entry of joinQueries) {
+    const plan = all('EXPLAIN QUERY PLAN ' + entry.sql, ...entry.args).map(r => r.detail).join(' | ');
+    assert.match(plan, /^(?:SCAN|SEARCH) r USING INDEX task_runs_running/, `${entry.sql}\n${plan}`);
+    assert.match(plan, /SEARCH t USING INDEX sqlite_autoindex_tasks_1 \(id=\?\)/, `${entry.sql}\n${plan}`);
+    assert.doesNotMatch(plan, /TEMP B-TREE/, `${entry.sql}\n${plan}`);
+  }
+});
+
+// Production: hourly pruneFiltered scanned dispatch_events (~3.7 s), and GET /api/board/prs & /api/board/issues loaded
+// every historical closed PR/Issue context row across the whole repository (3.1-7.8 s).
+test('pruneFiltered uses its partial index and board context maps narrow queries to displayed object numbers across chunks', t => {
+  const store = new Store(':memory:', Buffer.alloc(32, 3)); t.after(() => store.close());
+  store.db.exec('PRAGMA foreign_keys=OFF');
+  const nowMs = Date.parse('2026-11-28T00:00:00Z');
+  const oldIso = new Date(nowMs - 40 * 86400_000).toISOString();
+  const recentIso = new Date(nowMs - 2 * 86400_000).toISOString();
+
+  store.transaction(() => {
+    store.run("INSERT INTO repositories(id,full_name,owner_id,account_id) VALUES('r1','o/r1','o','a')");
+    store.run("INSERT INTO policies(repository_id) VALUES('r1')");
+
+    const insEvent = store.db.prepare(
+      `INSERT INTO dispatch_events(id,repository_id,event_key,type,source,object_type,object_number,summary,facts,options,state,decision,reason,created_at,decided_at)
+       VALUES(?,'r1',?,?,'github',?,?,'','{}','[]',?,?,?,?,?)`,
+    );
+    for (let i = 0; i < 300; i++) {
+      insEvent.run(`dec-${i}`, `dec-${i}`, 'pull_request.opened', 'pr', 1000 + i, 'decided', 'ignore', 'old', oldIso, oldIso);
+    }
+    for (let i = 0; i < 10; i++) {
+      insEvent.run(`filt-old-${i}`, `filt-old-${i}`, 'pull_request.opened', 'pr', 2000 + i, 'filtered', 'ignore', 'old filtered', oldIso, oldIso);
+      insEvent.run(`filt-new-${i}`, `filt-new-${i}`, 'pull_request.opened', 'pr', 2100 + i, 'filtered', 'ignore', 'new filtered', recentIso, recentIso);
+    }
+
+    // Closed historical PRs and Issues (should NOT be scanned when listing open objects) + open objects + >500 closed
+    // objects to exercise multi-chunk IN batching when include_closed=1.
+    const insObj = store.db.prepare(
+      'INSERT INTO board_objects(repository_id,object_type,object_number,title,github_state,draft,last_seen) VALUES(?,?,?,?,?,?,?)',
+    );
+    const insTask = store.db.prepare(
+      "INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,head_sha,result,created_at,updated_at) VALUES(?,'r1',?,?,?,?,?,?,?,?)",
+    );
+    for (let n = 1; n <= 520; n++) {
+      const state = n <= 3 ? 'open' : 'closed';
+      insObj.run('r1', 'pr', n, `PR #${n}`, state, 0, recentIso);
+      insObj.run('r1', 'issue', n, `Issue #${n}`, state, null, recentIso);
+    }
+    // Open Issue #1 -> development task -> bot PR #1 with checks + review task + dispatch events + progress.
+    const sha1 = '1'.repeat(40);
+    const sha2 = '2'.repeat(40);
+    insTask.run('dev-issue-1', 'development.issue', 'pr_opened', 'dev 1', 1, sha1, JSON.stringify({ pr_number: 1, pr_url: 'https://github.com/o/r1/pull/1' }), recentIso, recentIso);
+    insTask.run('rev-pr-1', 'review.pr', 'succeeded', 'rev pr 1', 1, sha1, JSON.stringify({ conclusion: 'ready_for_development', recommendation: 'LGTM' }), recentIso, recentIso);
+    insTask.run('rev-pr-2', 'review.pr', 'succeeded', 'rev pr 2', 2, sha2, JSON.stringify({ conclusion: 'ready_for_development', recommendation: 'Looks fine' }), recentIso, recentIso);
+    insTask.run('rev-pr-515', 'review.pr', 'succeeded', 'rev closed 515', 515, sha2, JSON.stringify({ conclusion: 'ready_for_development', recommendation: 'Chunk 2 PR' }), recentIso, recentIso);
+    insTask.run('dev-issue-515', 'development.issue', 'pr_opened', 'dev closed 515', 515, sha2, JSON.stringify({ pr_number: 515 }), recentIso, recentIso);
+    store.run("INSERT INTO bot_pull_requests(repository_id,number,pr_id,author_id,head_repository_id,branch,sha,source_task_id,revisions) VALUES('r1',1,'PR_1','9','r1','bot/1',?,'dev-issue-1',2)", sha1);
+    store.run("INSERT INTO bot_pull_requests(repository_id,number,pr_id,author_id,head_repository_id,branch,sha,source_task_id,revisions) VALUES('r1',515,'PR_515','9','r1','bot/515',?,'dev-issue-515',1)", sha2);
+    store.run("INSERT INTO commit_checks(repository_id,head_sha,check_key,name,status,conclusion,updated_at) VALUES('r1',?,'ci','CI','completed','success',?),('r1',?,'ci','CI','completed','failure',?)", sha1, recentIso, sha2, recentIso);
+    insEvent.run('ev-pr-1', 'ev-pr-1', 'review.published', 'pr', 1, 'decided', 'ignore', 'reviewed', recentIso, recentIso);
+    insEvent.run('ev-issue-1', 'ev-issue-1', 'issue.opened', 'issue', 1, 'decided', 'create', 'started', recentIso, recentIso);
+    store.run("INSERT INTO issue_development_progress(task_id,repository_id,number,language,milestones,final,next_at,created_at,updated_at) VALUES('dev-issue-1','r1',1,'en',?,0,0,?,?)", JSON.stringify({ plan: { conclusion: 'plan ok' } }), recentIso, recentIso);
+  });
+
+  // 1. pruneFiltered partial index plan + behavior
+  const pruneSeen = [], run = store.run.bind(store);
+  store.run = (sql, ...args) => { pruneSeen.push({ sql, args }); return run(sql, ...args); };
+  const pruned = pruneFiltered(store, nowMs);
+  store.run = run;
+  assert.equal(pruned, 10, 'pruned only expired filtered events');
+  assert.equal(store.get("SELECT count(*) n FROM dispatch_events WHERE state='filtered'").n, 10);
+  const prunePlan = store.all('EXPLAIN QUERY PLAN ' + pruneSeen[0].sql, ...pruneSeen[0].args).map(r => r.detail).join(' | ');
+  assert.match(prunePlan, /SEARCH dispatch_events USING INDEX dispatch_events_filtered_created \(state=\? AND created_at<\?\)/, prunePlan);
+  assert.doesNotMatch(prunePlan, /\bSCAN dispatch_events\b/, prunePlan);
+
+  // 2. Open PR & Issue board list + detail queries narrow by object_number
+  const admin = { id: 'admin', role: 'super_admin' };
+  const seen = [], all = store.all.bind(store);
+  store.all = (sql, ...args) => { seen.push({ sql, args }); return all(sql, ...args); };
+  const openPrs = listBoardPrs(store, admin, new URL('http://local/api/board/prs?repository_id=r1&limit=20'));
+  const prDetail = boardPrDetail(store, admin, 'r1', 1);
+  const openIssues = listBoardIssues(store, admin, new URL('http://local/api/board/issues?repository_id=r1&limit=20'));
+  const issueDetail = boardIssueDetail(store, admin, 'r1', 1);
+  // Multi-chunk include_closed=1 (>500 objects) exercises batching and verifies chunk-2 data (PR/Issue #515).
+  const allPrs = listBoardPrs(store, admin, new URL('http://local/api/board/prs?repository_id=r1&include_closed=1&q=515'));
+  const allClosedPrs = listBoardPrs(store, admin, new URL('http://local/api/board/prs?repository_id=r1&include_closed=1&limit=100'));
+  const allClosedIssues = listBoardIssues(store, admin, new URL('http://local/api/board/issues?repository_id=r1&include_closed=1&limit=100'));
+  store.all = all;
+
+  assert.equal(openPrs.total, 3);
+  const openPr1 = openPrs.prs.find(p => p.number === 1);
+  assert.equal(openPr1.is_bot_pr, true);
+  assert.equal(openPr1.bot_pr.source_issue_number, 1);
+  assert.equal(openPr1.checks.passed, 1);
+  assert.equal(openPr1.review.recommendation, 'LGTM');
+  assert.equal(openPrs.prs.find(p => p.number === 2).checks.failed, 1);
+  assert.equal(prDetail.pr.number, 1);
+  assert.equal(prDetail.pr.checks.passed, 1);
+
+  assert.equal(openIssues.total, 3);
+  const openIssue1 = openIssues.issues.find(i => i.number === 1);
+  assert.equal(openIssue1.pr.number, 1);
+  assert.equal(openIssue1.pr.checks.passed, 1);
+  assert.equal(issueDetail.issue.pr.number, 1);
+
+  assert.equal(allPrs.prs[0].review.recommendation, 'Chunk 2 PR');
+  assert.equal(allClosedPrs.total, 520, 'multi-chunk include_closed PR list returns all 520 objects');
+  assert.equal(allClosedIssues.total, 520, 'multi-chunk include_closed Issue list returns all 520 objects');
+
+  const explain = ({ sql, args }) => all('EXPLAIN QUERY PLAN ' + sql, ...args).map(r => r.detail).join(' | ');
+  const contextQueries = seen.filter(entry =>
+    /FROM (?:board_pr_tasks|board_issue_tasks|bot_pull_requests|commit_checks)\b/.test(entry.sql)
+    || (/FROM dispatch_events\b/.test(entry.sql) && /row_number\(\)/.test(entry.sql)),
+  );
+  assert.ok(contextQueries.length >= 12, `expected narrowed context queries, got ${contextQueries.length}`);
+  for (const entry of contextQueries) {
+    const plan = explain(entry);
+    assert.doesNotMatch(plan, /\bSCAN (?:board_pr_tasks|board_issue_tasks|bot_pull_requests|commit_checks|dispatch_events|t|p)\b/, `${entry.sql}\n${plan}`);
+    if (/FROM board_pr_tasks t\b/.test(entry.sql)) {
+      assert.match(plan, /SEARCH t USING INDEX board_pr_tasks_repo_num \(repository_id=\? AND object_number=\?\)/, `${entry.sql}\n${plan}`);
+    } else if (/FROM board_issue_tasks t\b/.test(entry.sql) && /CROSS JOIN bot_pull_requests p/.test(entry.sql)) {
+      assert.match(plan, /SEARCH t USING INDEX board_issue_tasks_repo_num \(repository_id=\? AND object_number=\? AND role_kind=\?\)/, `${entry.sql}\n${plan}`);
+      assert.match(plan, /SEARCH p USING INDEX bot_pull_requests_source_task \(source_task_id=\?\)/, `${entry.sql}\n${plan}`);
+    } else if (/FROM board_issue_tasks t\b/.test(entry.sql)) {
+      assert.match(plan, /SEARCH t USING INDEX board_issue_tasks_repo_num \(repository_id=\? AND object_number=\?\)/, `${entry.sql}\n${plan}`);
+    } else if (/FROM bot_pull_requests p\b/.test(entry.sql)) {
+      assert.match(plan, /SEARCH p USING INDEX sqlite_autoindex_bot_pull_requests_1 \(repository_id=\? AND number=\?\)/, `${entry.sql}\n${plan}`);
+    } else if (/FROM commit_checks\b/.test(entry.sql)) {
+      assert.match(plan, /SEARCH commit_checks USING INDEX sqlite_autoindex_commit_checks_1 \(repository_id=\? AND head_sha=\?\)/, `${entry.sql}\n${plan}`);
+    } else if (/FROM dispatch_events\b/.test(entry.sql)) {
+      assert.match(plan, /SEARCH dispatch_events USING INDEX dispatch_events_object \(repository_id=\? AND object_type=\? AND object_number=\?\)/, `${entry.sql}\n${plan}`);
+    }
+  }
+});
+
+// Production: GET /api/environments/:id sorted a repository's tasks with TEMP B-TREE FOR ORDER BY (2.28 s).
+test('repository task history pages read tasks_repo_created in order without a temp B-tree', async t => {
+  const store = new Store(':memory:', Buffer.alloc(32, 3)); t.after(() => store.close());
+  store.db.exec('PRAGMA foreign_keys=OFF');
+  store.run("INSERT INTO repositories(id,full_name,owner_id,account_id) VALUES('repo','o/r','o','a')");
+  store.run("INSERT INTO policies(repository_id) VALUES('repo')");
+  for (let i = 0; i < 30; i++) {
+    const ts = new Date(Date.parse('2026-11-24T00:00:00Z') + i * 1000).toISOString();
+    store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,created_at,updated_at) VALUES(?,'repo','review.pr','succeeded','s',?,?)", `t-${i}`, ts, ts);
+  }
+  const seen = [], all = store.all.bind(store);
+  store.all = (sql, ...args) => { seen.push({ sql, args }); return all(sql, ...args); };
+  await new ProjectService(store, { call: async () => null }).detail('repo');
+  queries(store, { id: 'admin', role: 'super_admin' }, new URL('http://local/api/tasks?repository_id=repo&limit=20'));
+  store.all = all;
+
+  const taskPages = seen.filter(entry => /FROM tasks WHERE (?:1=1 AND )?repository_id=\?/.test(entry.sql) && /ORDER BY created_at DESC,\s*id DESC LIMIT/.test(entry.sql));
+  assert.equal(taskPages.length, 2, taskPages.map(e => e.sql).join('\n'));
+  for (const entry of taskPages) {
+    const plan = all('EXPLAIN QUERY PLAN ' + entry.sql, ...entry.args).map(r => r.detail).join(' | ');
+    assert.match(plan, /SEARCH tasks USING INDEX tasks_repo_created \(repository_id=\?\)/, `${entry.sql}\n${plan}`);
+    assert.doesNotMatch(plan, /TEMP B-TREE/, `${entry.sql}\n${plan}`);
+  }
 });

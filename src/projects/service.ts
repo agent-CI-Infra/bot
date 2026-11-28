@@ -122,11 +122,35 @@ export class ProjectService {
   }
   save(row: Row): void {
     if (!row) return;
+    const error = row.error || null;
+    const startedAt = row.started_at || null;
+    const revision = row.revision || 0;
+    const toolchainPending = (row as any).computer?.toolchain_pending ? 1 : 0;
+    const existing = this.store.get(
+      'SELECT generation,state,desired,error,started_at,revision,toolchain_pending FROM project_environments WHERE repository_id=?',
+      row.repository_id,
+    );
+    if (existing) {
+      if (existing.generation > row.generation || (existing.generation === row.generation && existing.revision > revision)) {
+        return;
+      }
+      if (
+        existing.generation === row.generation &&
+        existing.state === row.state &&
+        existing.desired === row.desired &&
+        (existing.error ?? null) === error &&
+        (existing.started_at ?? null) === startedAt &&
+        existing.revision === revision &&
+        existing.toolchain_pending === toolchainPending
+      ) {
+        return;
+      }
+    }
     this.store.run(`INSERT INTO project_environments(repository_id,generation,state,desired,error,started_at,revision,toolchain_pending) VALUES(?,?,?,?,?,?,?,?)
       ON CONFLICT(repository_id) DO UPDATE SET generation=excluded.generation,state=excluded.state,desired=excluded.desired,error=excluded.error,
       started_at=excluded.started_at,revision=excluded.revision,toolchain_pending=excluded.toolchain_pending WHERE excluded.generation>project_environments.generation
       OR (excluded.generation=project_environments.generation AND excluded.revision>=project_environments.revision)`,
-    row.repository_id, row.generation, row.state, row.desired, row.error || null, row.started_at || null, row.revision || 0, (row as any).computer?.toolchain_pending ? 1 : 0);
+    row.repository_id, row.generation, row.state, row.desired, error, startedAt, revision, toolchainPending);
   }
   /**
    * Fast read-only state sync across repositories, decoupled from long-running pending environment_operations
@@ -290,8 +314,12 @@ export class ProjectService {
       const answered = error instanceof HttpError && !unreachable;
       const state = answered ? await this.manager.call('GET', '/v1/projects/' + repo.id).catch(() => null) : null;
       if (state) { this.save(state); return; }
-      this.store.run(`INSERT INTO project_environments(repository_id,state,error) VALUES(?,'unavailable',?)
-        ON CONFLICT(repository_id) DO UPDATE SET state='unavailable',error=excluded.error`, repo.id, error instanceof HttpError ? error.code : 'manager_unavailable');
+      const unavailableError = error instanceof HttpError ? error.code : 'manager_unavailable';
+      const currentEnv = this.store.get('SELECT state,error FROM project_environments WHERE repository_id=?', repo.id);
+      if (!currentEnv || currentEnv.state !== 'unavailable' || (currentEnv.error ?? null) !== unavailableError) {
+        this.store.run(`INSERT INTO project_environments(repository_id,state,error) VALUES(?,'unavailable',?)
+          ON CONFLICT(repository_id) DO UPDATE SET state='unavailable',error=excluded.error`, repo.id, unavailableError);
+      }
     }
   }
   // Deleting a project runs the existing environment deletion: the containers and networks of every generation go, and the

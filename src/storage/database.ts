@@ -218,6 +218,7 @@ export class Store {
     // each event row scanned every task through its input's overflow pages, ~1 s per row and ~55 s per page.
     this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS task_unique_key ON tasks(unique_key);
       CREATE INDEX IF NOT EXISTS task_source_delivery ON tasks(source_delivery_id,created_at,id,kind,object_number,status);
+      CREATE INDEX IF NOT EXISTS tasks_repo_created ON tasks(repository_id,created_at DESC,id DESC);
       DROP TABLE IF EXISTS task_locks;
       CREATE TABLE IF NOT EXISTS task_claims(task_id TEXT PRIMARY KEY REFERENCES tasks(id),repository_id TEXT NOT NULL,token TEXT NOT NULL,claimed_at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS task_claims_repository ON task_claims(repository_id);

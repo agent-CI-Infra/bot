@@ -231,62 +231,97 @@ function derivePrRow(
   };
 }
 
-function loadPrContextMaps(store: Store, repoIds: string[]) {
-  const uniqueRepos = [...new Set(repoIds)];
+const sqlInChunkSize = 500;
+function chunkArray<T>(items: T[], size = sqlInChunkSize): T[][] {
+  const result: T[][] = [];
+  for (let i = 0; i < items.length; i += size) result.push(items.slice(i, i + size));
+  return result;
+}
+
+function groupObjectNumbersByRepo(objects: Row[]): Map<string, number[]> {
+  const byRepo = new Map<string, number[]>();
+  const seen = new Map<string, Set<number>>();
+  for (const obj of objects) {
+    const repoId = String(obj.repository_id ?? '');
+    const num = Number(obj.object_number);
+    if (!repoId || !Number.isSafeInteger(num) || num < 1) continue;
+    let nums = seen.get(repoId);
+    if (!nums) seen.set(repoId, nums = new Set());
+    if (nums.has(num)) continue;
+    nums.add(num);
+    let list = byRepo.get(repoId);
+    if (!list) byRepo.set(repoId, list = []);
+    list.push(num);
+  }
+  return byRepo;
+}
+
+function loadPrContextMaps(store: Store, objects: Row[]) {
+  const numbersByRepo = groupObjectNumbersByRepo(objects);
   const latestReview = new Map<string, Row>();
   const latestDev = new Map<string, Row>();
   const botPrMap = new Map<string, BotPrInfo>();
   const checksByPr = new Map<string, CheckSummary>();
   const latestReviewDispatch = new Map<string, Row>();
   const latestIntakeDispatch = new Map<string, Row>();
-  if (!uniqueRepos.length) return { latestReview, latestDev, botPrMap, checksByPr, latestReviewDispatch, latestIntakeDispatch };
-
-  const marks = uniqueRepos.map(() => '?').join(',');
+  if (!numbersByRepo.size) return { latestReview, latestDev, botPrMap, checksByPr, latestReviewDispatch, latestIntakeDispatch };
 
   if (store.hasTable('board_pr_tasks')) {
-    const taskRows = store.all(
-      `SELECT * FROM (
-         SELECT t.*, row_number() OVER (
-           PARTITION BY t.repository_id, t.object_number, t.role_kind
-           ORDER BY t.updated_at DESC, t.created_at DESC, t.rowid DESC
-         ) AS rn
-         FROM board_pr_tasks t
-         WHERE t.repository_id IN (${marks})
-       ) WHERE rn=1`,
-      ...uniqueRepos,
-    );
-    for (const row of taskRows) {
-      const key = `${row.repository_id}:${row.object_number}`;
-      if (row.role_kind === 'review') latestReview.set(key, row);
-      else if (row.role_kind === 'development') latestDev.set(key, row);
+    for (const [repoId, nums] of numbersByRepo.entries()) {
+      for (const batch of chunkArray(nums)) {
+        const numMarks = batch.map(() => '?').join(',');
+        const taskRows = store.all(
+          `SELECT * FROM (
+             SELECT t.*, row_number() OVER (
+               PARTITION BY t.repository_id, t.object_number, t.role_kind
+               ORDER BY t.updated_at DESC, t.created_at DESC, t.rowid DESC
+             ) AS rn
+             FROM board_pr_tasks t
+             WHERE t.repository_id=? AND t.object_number IN (${numMarks})
+           ) WHERE rn=1`,
+          repoId,
+          ...batch,
+        );
+        for (const row of taskRows) {
+          const key = `${row.repository_id}:${row.object_number}`;
+          if (row.role_kind === 'review') latestReview.set(key, row);
+          else if (row.role_kind === 'development') latestDev.set(key, row);
+        }
+      }
     }
   }
 
   const shaByPr = new Map<string, { repoId: string; sha: string }>();
   if (store.hasTable('bot_pull_requests')) {
     const hasIssueTasks = store.hasTable('board_issue_tasks');
-    const botRows = store.all(
-      hasIssueTasks
-        ? `SELECT p.repository_id, p.number, p.branch, p.sha, p.revisions, p.source_task_id, it.object_number AS source_issue_number
-           FROM bot_pull_requests p
-           LEFT JOIN board_issue_tasks it ON it.task_id=p.source_task_id AND it.role_kind='development'
-           WHERE p.repository_id IN (${marks})`
-        : `SELECT p.repository_id, p.number, p.branch, p.sha, p.revisions, p.source_task_id, NULL AS source_issue_number
-           FROM bot_pull_requests p
-           WHERE p.repository_id IN (${marks})`,
-      ...uniqueRepos,
-    );
-    for (const r of botRows) {
-      const key = `${r.repository_id}:${r.number}`;
-      const sha = r.sha ? String(r.sha) : null;
-      botPrMap.set(key, {
-        branch: r.branch ? String(r.branch) : null,
-        sha,
-        revisions: Number(r.revisions ?? 0),
-        source_task_id: r.source_task_id ? String(r.source_task_id) : null,
-        source_issue_number: r.source_issue_number ? Number(r.source_issue_number) : null,
-      });
-      if (sha) shaByPr.set(key, { repoId: String(r.repository_id), sha });
+    for (const [repoId, nums] of numbersByRepo.entries()) {
+      for (const batch of chunkArray(nums)) {
+        const numMarks = batch.map(() => '?').join(',');
+        const botRows = store.all(
+          hasIssueTasks
+            ? `SELECT p.repository_id, p.number, p.branch, p.sha, p.revisions, p.source_task_id, it.object_number AS source_issue_number
+               FROM bot_pull_requests p
+               LEFT JOIN board_issue_tasks it ON it.task_id=p.source_task_id AND it.role_kind='development'
+               WHERE p.repository_id=? AND p.number IN (${numMarks})`
+            : `SELECT p.repository_id, p.number, p.branch, p.sha, p.revisions, p.source_task_id, NULL AS source_issue_number
+               FROM bot_pull_requests p
+               WHERE p.repository_id=? AND p.number IN (${numMarks})`,
+          repoId,
+          ...batch,
+        );
+        for (const r of botRows) {
+          const key = `${r.repository_id}:${r.number}`;
+          const sha = r.sha ? String(r.sha) : null;
+          botPrMap.set(key, {
+            branch: r.branch ? String(r.branch) : null,
+            sha,
+            revisions: Number(r.revisions ?? 0),
+            source_task_id: r.source_task_id ? String(r.source_task_id) : null,
+            source_issue_number: r.source_issue_number ? Number(r.source_issue_number) : null,
+          });
+          if (sha) shaByPr.set(key, { repoId: String(r.repository_id), sha });
+        }
+      }
     }
   }
 
@@ -307,22 +342,32 @@ function loadPrContextMaps(store: Store, repoIds: string[]) {
     }
   }
 
-  const shas = [...new Set([...shaByPr.values()].map(v => v.sha))];
-  if (shas.length && store.hasTable('commit_checks')) {
-    const shaMarks = shas.map(() => '?').join(',');
+  if (shaByPr.size && store.hasTable('commit_checks')) {
+    const shasByRepo = new Map<string, Set<string>>();
+    for (const { repoId, sha } of shaByPr.values()) {
+      let set = shasByRepo.get(repoId);
+      if (!set) shasByRepo.set(repoId, set = new Set());
+      set.add(sha);
+    }
     const checksBySha = new Map<string, CheckSummary>();
-    for (const c of store.all(
-      `SELECT repository_id, head_sha, status, conclusion FROM commit_checks WHERE repository_id IN (${marks}) AND head_sha IN (${shaMarks})`,
-      ...uniqueRepos, ...shas,
-    )) {
-      const ck = `${c.repository_id}:${c.head_sha}`;
-      const acc = checksBySha.get(ck) ?? { total: 0, passed: 0, failed: 0, running: 0 };
-      acc.total++;
-      const st = String(c.status || '').toLowerCase(), conc = String(c.conclusion || '').toLowerCase();
-      if (st !== 'completed') acc.running++;
-      else if (['success', 'neutral', 'skipped'].includes(conc)) acc.passed++;
-      else acc.failed++;
-      checksBySha.set(ck, acc);
+    for (const [repoId, shaSet] of shasByRepo.entries()) {
+      for (const batch of chunkArray([...shaSet])) {
+        const shaMarks = batch.map(() => '?').join(',');
+        for (const c of store.all(
+          `SELECT repository_id, head_sha, status, conclusion FROM commit_checks WHERE repository_id=? AND head_sha IN (${shaMarks})`,
+          repoId,
+          ...batch,
+        )) {
+          const ck = `${c.repository_id}:${c.head_sha}`;
+          const acc = checksBySha.get(ck) ?? { total: 0, passed: 0, failed: 0, running: 0 };
+          acc.total++;
+          const st = String(c.status || '').toLowerCase(), conc = String(c.conclusion || '').toLowerCase();
+          if (st !== 'completed') acc.running++;
+          else if (['success', 'neutral', 'skipped'].includes(conc)) acc.passed++;
+          else acc.failed++;
+          checksBySha.set(ck, acc);
+        }
+      }
     }
     for (const [key, { repoId, sha }] of shaByPr.entries()) {
       const found = checksBySha.get(`${repoId}:${sha}`);
@@ -331,25 +376,31 @@ function loadPrContextMaps(store: Store, repoIds: string[]) {
   }
 
   if (store.hasTable('dispatch_events')) {
-    const dispatchRows = store.all(
-      `SELECT id, repository_id, object_number, type, state, decision, reason, summary, created_at, decided_at, bucket
-       FROM (
-         SELECT id, repository_id, object_number, type, state, decision, reason, summary, created_at, decided_at,
-           CASE WHEN type='review.published' THEN 'review' ELSE 'intake' END AS bucket,
-           row_number() OVER (
-             PARTITION BY repository_id, object_number, CASE WHEN type='review.published' THEN 'review' ELSE 'intake' END
-             ORDER BY coalesce(nullif(decided_at,''), created_at) DESC, created_at DESC, rowid DESC
-           ) AS rn
-         FROM dispatch_events
-         WHERE repository_id IN (${marks}) AND object_type='pr' AND object_number IS NOT NULL
-           AND type IN ('review.published','pull_request.opened','pull_request.reopened','pull_request.ready_for_review','pull_request.synchronize')
-       ) WHERE rn=1`,
-      ...uniqueRepos,
-    );
-    for (const row of dispatchRows) {
-      const key = `${row.repository_id}:${row.object_number}`;
-      if (row.bucket === 'review') latestReviewDispatch.set(key, row);
-      else latestIntakeDispatch.set(key, row);
+    for (const [repoId, nums] of numbersByRepo.entries()) {
+      for (const batch of chunkArray(nums)) {
+        const numMarks = batch.map(() => '?').join(',');
+        const dispatchRows = store.all(
+          `SELECT id, repository_id, object_number, type, state, decision, reason, summary, created_at, decided_at, bucket
+           FROM (
+             SELECT id, repository_id, object_number, type, state, decision, reason, summary, created_at, decided_at,
+               CASE WHEN type='review.published' THEN 'review' ELSE 'intake' END AS bucket,
+               row_number() OVER (
+                 PARTITION BY repository_id, object_number, CASE WHEN type='review.published' THEN 'review' ELSE 'intake' END
+                 ORDER BY coalesce(nullif(decided_at,''), created_at) DESC, created_at DESC, rowid DESC
+               ) AS rn
+             FROM dispatch_events
+             WHERE repository_id=? AND object_type='pr' AND object_number IN (${numMarks})
+               AND type IN ('review.published','pull_request.opened','pull_request.reopened','pull_request.ready_for_review','pull_request.synchronize')
+           ) WHERE rn=1`,
+          repoId,
+          ...batch,
+        );
+        for (const row of dispatchRows) {
+          const key = `${row.repository_id}:${row.object_number}`;
+          if (row.bucket === 'review') latestReviewDispatch.set(key, row);
+          else latestIntakeDispatch.set(key, row);
+        }
+      }
     }
   }
 
@@ -405,7 +456,7 @@ export function listBoardPrs(store: Store, user: Actor, url: URL): Json {
       ...args,
     );
 
-    const maps = loadPrContextMaps(store, objects.map(o => String(o.repository_id)));
+    const maps = loadPrContextMaps(store, objects);
     const allDerived = objects.map(obj => {
       const key = `${obj.repository_id}:${obj.object_number}`;
       return derivePrRow(
@@ -466,7 +517,7 @@ export function boardPrDetail(store: Store, user: Actor, repoId: string, prNumbe
     );
     if (!obj) return fail(404, 'board_pr_not_found');
 
-    const maps = loadPrContextMaps(store, [repoId]);
+    const maps = loadPrContextMaps(store, [obj]);
     const key = `${repoId}:${prNumber}`;
     const pr = derivePrRow(
       obj,

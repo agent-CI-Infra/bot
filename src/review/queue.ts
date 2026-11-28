@@ -84,7 +84,7 @@ export function revisionFacts(store: Store, repositoryId: string, number: number
       for (const taskId of new Set(rows.map(r => String(r.task_id || '')))) {
         if (!taskId) continue;
         const conts = store.all(
-          "SELECT json_extract(data,'$.round') AS round, created_at FROM task_history WHERE task_id=? AND type='task_continued' ORDER BY id ASC",
+          "SELECT json_extract(data,'$.round') AS round, created_at FROM task_history WHERE task_id=? AND run_id IS NULL AND type='task_continued' ORDER BY id ASC",
           taskId,
         );
         if (conts.length) {

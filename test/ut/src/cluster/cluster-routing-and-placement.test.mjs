@@ -5,8 +5,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../../../../dist/storage/database.js';
-import { classifyManagerRoute } from '../../../../dist/cluster/manager.js';
+import { classifyManagerRoute, ClusterManager } from '../../../../dist/cluster/manager.js';
 import { ClusterStore, isRepositoryNodeClaimable, LOCAL_NODE_ID } from '../../../../dist/cluster/storage.js';
+import { ProjectService } from '../../../../dist/projects/service.js';
 import { configuredRedactor, publicText } from '../../../../dist/core/redaction.js';
 import { checkProtocolCompatibility, NODE_AGENT_PROTOCOL_VERSION } from '../../../../runner/node-protocol.mjs';
 import { createComputeDriver } from '../../../../manager/compute-driver.mjs';
@@ -305,4 +306,82 @@ test('protocol compatibility check, bnode_/bnsess_ redaction, and host compute d
     () => cs.createRemoteNode({ name: 'Mac Host', driver: 'host', actor: 'admin' }),
     err => err.status === 501 && err.code === 'host_driver_not_implemented',
   );
+});
+
+test('read-only project probes and environment saves skip unchanged SQLite writes', async t => {
+  let now = 1_700_000_000_000;
+  const store = tempStore(t);
+  store.run("INSERT INTO accounts(id,name,type,credentials,created_at) VALUES('acc-1','A','bot_account','{}',?)", new Date(now).toISOString());
+  store.run("INSERT INTO repositories(id,full_name,owner_id,account_id) VALUES('101','o/r','10','acc-1')");
+  store.run("INSERT INTO policies(repository_id) VALUES('101')");
+
+  const cs = new ClusterStore(store, () => now);
+  const liveState = { repository_id: '101', generation: 1, state: 'ready', desired: 'ready', error: null, started_at: '2026-11-28T00:00:00Z', revision: 3, computer: { toolchain_pending: false } };
+  const cm = new ClusterManager({
+    store,
+    clusterStore: cs,
+    localManager: { call: async () => liveState },
+    clock: () => now,
+  });
+  t.after(() => cm.close());
+
+  const writes = [];
+  const origRun = store.run.bind(store);
+  store.run = (sql, ...args) => { writes.push(sql); return origRun(sql, ...args); };
+
+  // First GET /v1/projects/101 initializes workspace + notes tracking rows once.
+  await cm.call('GET', '/v1/projects/101');
+  assert.equal(writes.filter(s => /repository_node_volumes/.test(s)).length, 2);
+  writes.length = 0;
+
+  // Subsequent read-only probes with unchanged state perform ZERO SQLite writes.
+  now += 5_000;
+  await cm.call('GET', '/v1/projects/101');
+  now += 5_000;
+  await cm.call('GET', '/v1/projects/101');
+  assert.deepEqual(writes, [], 'steady-state GET /v1/projects/:id must not write to SQLite');
+
+  // Real volume discovery updates volume_name + created_at once; repeated discovery and probes skip writes and preserve real name.
+  cs.recordNodeVolume('101', LOCAL_NODE_ID, 'notes', 'dbot-prod-101-notes', '2026-11-20T00:00:00Z');
+  assert.equal(writes.length, 1);
+  writes.length = 0;
+  now += 5_000;
+  cs.recordNodeVolume('101', LOCAL_NODE_ID, 'notes', 'dbot-prod-101-notes', '2026-11-20T00:00:00Z');
+  await cm.call('GET', '/v1/projects/101');
+  assert.deepEqual(writes, [], 'unchanged recordNodeVolume and subsequent GET probe must skip writes');
+  const notesRow = cs.listNodeVolumes({ repositoryId: '101', volumeKind: 'notes' })[0];
+  assert.equal(notesRow.volume_name, 'dbot-prod-101-notes', 'probe must not clobber discovered Docker volume name');
+  assert.equal(notesRow.created_at, '2026-11-20T00:00:00Z');
+
+  // markVolumeReclaimPending writes once, then skips repeated calls.
+  cs.markVolumeReclaimPending('101', LOCAL_NODE_ID, 'workspace');
+  assert.equal(writes.length, 1);
+  writes.length = 0;
+  cs.markVolumeReclaimPending('101', LOCAL_NODE_ID, 'workspace');
+  assert.deepEqual(writes, []);
+
+  // markBindingActive transitions bound -> active once, then skips when already active.
+  store.run("INSERT OR REPLACE INTO repository_node_bindings(repository_id,node_id,state,binding_epoch,notes_node_id,updated_at) VALUES('101','local','bound',1,'local',?)", new Date(now).toISOString());
+  writes.length = 0;
+  cs.markBindingActive('101', LOCAL_NODE_ID);
+  assert.equal(writes.length, 1);
+  assert.equal(cs.getRepositoryBinding('101').state, 'active');
+  writes.length = 0;
+  cs.markBindingActive('101', LOCAL_NODE_ID);
+  assert.deepEqual(writes, []);
+
+  // ProjectService.save writes once, then skips identical or older revisions, and writes when state changes.
+  const projects = new ProjectService(store, cm);
+  writes.length = 0;
+  projects.save(liveState);
+  assert.equal(writes.length, 1);
+  writes.length = 0;
+  projects.save(liveState);
+  projects.save({ ...liveState, revision: 2 });
+  assert.deepEqual(writes, [], 'identical or stale ProjectService.save must skip SQLite writes');
+  projects.save({ ...liveState, state: 'busy', revision: 4 });
+  assert.equal(writes.length, 1);
+  assert.equal(store.get("SELECT state FROM project_environments WHERE repository_id='101'").state, 'busy');
+
+  store.run = origRun;
 });
