@@ -9,6 +9,7 @@ import { mergeQueue } from './merge-queue.js';
 import { hostedMediaUrl } from './hosted-pr-media.js';
 import { assistantCommentMediaSchema, commentMediaSchema, planMarkdownMedia, publishHostedMedia, type MediaPlanMode, type StoredMedia } from './pull-request-media.js';
 import { formatWorkflowPaths, isWorkflowPath } from './workflow-changes.js';
+import { computeBotPrBranchCleanupPlan, ensureBotPrBranchCleanupColumns, resolveBotPrBranchCleanupConfig } from '../review/bot-pr-branch-cleanup.js';
 
 /**
  * github_write: one GitHub write tool for every agent, shaped like the GitHub REST API (#381).
@@ -601,6 +602,7 @@ const auditActor = (actor: WriteActor) => actor.principal_id ? String(actor.prin
  */
 function upsertBotPrStateRow(store: Store, repositoryId: string, prNumber: number, owned: Row, value: any): void {
   if (!store.hasTable('bot_pr_states')) return;
+  ensureBotPrBranchCleanupColumns(store);
   const prev = store.get('SELECT * FROM bot_pr_states WHERE repository_id=? AND number=?', repositoryId, prNumber);
   const normSha = (s: unknown) => typeof s === 'string' && /^[a-f0-9]{40}$/i.test(s) ? s.toLowerCase() : null;
   const state = typeof value?.state === 'string' && value.state ? value.state : String(prev?.state ?? 'open');
@@ -617,9 +619,16 @@ function upsertBotPrStateRow(store: Store, repositoryId: string, prNumber: numbe
     ? value.html_url
     : (prev?.html_url ? String(prev.html_url) : null);
   const clearSuppression = state !== 'open' || draft === 1 ? 1 : 0;
+  const cleanupCfg = resolveBotPrBranchCleanupConfig();
+  const nowMs = cleanupCfg.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const cleanupPlan = computeBotPrBranchCleanupPlan(prev, state, value, nowIso, nowMs, cleanupCfg.retentionMs);
   store.run(
-    `INSERT INTO bot_pr_states(repository_id,number,state,draft,base_ref,base_sha,head_sha,mergeable,mergeable_state,title,html_url,updated_at)
-     VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+    `INSERT INTO bot_pr_states(
+       repository_id,number,state,draft,base_ref,base_sha,head_sha,mergeable,mergeable_state,title,html_url,updated_at,
+       merged,closed_at,branch_delete_due_at,branch_cleanup_status,branch_cleanup_reason,branch_cleanup_at,branch_cleanup_attempts
+     )
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
      ON CONFLICT(repository_id,number) DO UPDATE SET
        state=excluded.state,
        draft=excluded.draft,
@@ -631,18 +640,55 @@ function upsertBotPrStateRow(store: Store, repositoryId: string, prNumber: numbe
        title=coalesce(excluded.title,bot_pr_states.title),
        html_url=coalesce(excluded.html_url,bot_pr_states.html_url),
        updated_at=excluded.updated_at,
+       merged=excluded.merged,
+       closed_at=excluded.closed_at,
+       branch_delete_due_at=excluded.branch_delete_due_at,
+       branch_cleanup_status=excluded.branch_cleanup_status,
+       branch_cleanup_reason=excluded.branch_cleanup_reason,
+       branch_cleanup_at=excluded.branch_cleanup_at,
+       branch_cleanup_attempts=excluded.branch_cleanup_attempts,
        conflict_suppressed_head_sha=CASE WHEN ? THEN NULL ELSE bot_pr_states.conflict_suppressed_head_sha END,
        conflict_suppressed_env=CASE WHEN ? THEN NULL ELSE bot_pr_states.conflict_suppressed_env END,
        conflict_suppressed_at=CASE WHEN ? THEN NULL ELSE bot_pr_states.conflict_suppressed_at END,
        conflict_suppressed_reason=CASE WHEN ? THEN NULL ELSE bot_pr_states.conflict_suppressed_reason END`,
-    repositoryId, prNumber, state, draft, baseRef, baseSha, headSha, mergeable, mergeableState, title, htmlUrl, new Date().toISOString(),
+    repositoryId, prNumber, state, draft, baseRef, baseSha, headSha, mergeable, mergeableState, title, htmlUrl, nowIso,
+    cleanupPlan.merged, cleanupPlan.closedAt, cleanupPlan.branchDeleteDueAt, cleanupPlan.branchCleanupStatus,
+    cleanupPlan.branchCleanupReason, cleanupPlan.branchCleanupAt, cleanupPlan.branchCleanupAttempts,
     clearSuppression, clearSuppression, clearSuppression, clearSuppression,
   );
+  if (cleanupPlan.cancelledPending) {
+    store.audit(
+      'system',
+      'bot_pr.branch_cleanup_cancelled',
+      `pr#${prNumber}:${String(owned.branch || 'unknown').slice(0, 200)}:reopened`,
+      repositoryId,
+    );
+  }
 }
 
 function syncBotPullRequestAfterWrite(store: Store, repository: Row, actor: WriteActor, method: string, path: string, value: any): void {
   if (!value || typeof value !== 'object') return;
   const repositoryId = String(repository.id);
+  const mergeMatch = method === 'PUT' ? /^\/pulls\/(\d+)\/merge$/.exec(path) : null;
+  if (mergeMatch && value.merged === true) {
+    const mergedPrNumber = Number(mergeMatch[1]);
+    const owned = Number.isSafeInteger(mergedPrNumber) && mergedPrNumber >= 1 && store.hasTable('bot_pull_requests')
+      ? store.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?', repositoryId, mergedPrNumber)
+      : undefined;
+    if (owned) {
+      const nowIso = new Date(resolveBotPrBranchCleanupConfig().now()).toISOString();
+      upsertBotPrStateRow(store, repositoryId, mergedPrNumber, owned, {
+        number: mergedPrNumber,
+        state: 'closed',
+        merged: true,
+        merged_at: nowIso,
+        closed_at: nowIso,
+        ...(owned.sha ? { head: { ref: owned.branch, sha: owned.sha } } : {}),
+      });
+      cancelResidualTasksOnBotPrClosed(store, repositoryId, mergedPrNumber, owned, actor);
+    }
+    return;
+  }
   const prNumber = Number(value.number);
   if (!Number.isSafeInteger(prNumber) || prNumber < 1) return;
 

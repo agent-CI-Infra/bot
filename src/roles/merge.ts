@@ -11,6 +11,7 @@ import {mergeQueue} from '../github/merge-queue.js';
 import {recordRetryFailure,resolveRetry} from '../tasks/retries.js';
 import {covers,projectCeiling} from '../projects/ceiling.js';
 import {recordMergeChecks} from '../tasks/external-links.js';
+import {syncBotPullRequestState} from '../review/bot-pr-wake.js';
 
 async function checks(s:Store,github:GitHub,taskId:string,head:string){
  const runs:any[]=[];
@@ -41,6 +42,9 @@ const evolved=(s:Store,task:any,head:string,merged:any,actor:Actor)=>{
  s.transaction(()=>{
   if(!s.get("SELECT id FROM task_history WHERE task_id=? AND type='repository_evolved' AND json_extract(data,'$.head_sha')=? AND json_extract(data,'$.merge_sha')=?",task.id,head,merged.sha))traceEvent(s,task.id,'repository_evolved',{pr:merged.pr_number,head_sha:head,merge_sha:merged.sha,authorized_by:actor.id},null,'framework');
   s.run("UPDATE task_merge_requests SET state='merged',error=NULL,updated_at=? WHERE task_id=?",new Date().toISOString(),task.id);
+  if(Number.isSafeInteger(Number(merged.pr_number))&&Number(merged.pr_number)>=1){
+   syncBotPullRequestState(s,String(task.repository_id),{number:Number(merged.pr_number),state:'closed',merged:true,head:{sha:head}});
+  }
  });return merged;
 };
 /** Explicit operator intent, not an agent tool. Intent persists through same-contract integration and fresh QA. */

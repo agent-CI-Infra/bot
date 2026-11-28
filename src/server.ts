@@ -13,6 +13,7 @@ import { taskChecksApi } from './tasks/external-links.js';
 import { boardApi } from './board/api.js';
 import { costsApi } from './metrics/api.js';
 import { ingest } from './app/webhook.js';
+import { scheduleBotPrBranchCleanup } from './review/bot-pr-branch-cleanup.js';
 import { type ProjectService } from './projects/service.js';
 import { type TaskEngine } from './agent/engine.js';
 import { ExternalService } from './external/service.js';
@@ -308,6 +309,13 @@ export function createControlPlane(options: Options, security: { trustedProxies?
       respond(res, result.status, result.response);
       // Installation changes are already recorded; full scope and member-cache refreshes follow outside the delivery path (#1158).
       if (result.status === 200) {
+        if ('branchCleanup' in result && result.branchCleanup) {
+          if (options.engine?.botPrWake) {
+            void options.engine.botPrWake.scheduleBranchCleanup(result.branchCleanup.repositoryId, result.branchCleanup.prNumber);
+          } else {
+            void scheduleBotPrBranchCleanup(store, result.branchCleanup.repositoryId, result.branchCleanup.prNumber, options.githubUrl);
+          }
+        }
         const refs = 'memberSync' in result ? result.memberSync : [];
         if ('sync' in result && result.sync && options.installations) {
           void options.installations.sync(match[1]!).then(
