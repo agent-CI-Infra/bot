@@ -22,9 +22,14 @@
 launchpad 放弃对外部 GitHub Pages 仓库与 `PRIVATE_SOURCE_TOKEN` 的依赖，直接在控制面 `8791` 端口内置托管公开看板（`/dashboard/`、`/boards/`、`/boards/<owner>/<repo>/`）：
 
 - **可见性授权模型**：`public_board_settings` 按仓库持久化开关（公开仓默认开、私有仓默认关）；关闭开关、仓库卸载或删除后公开路由立即拦截并返回 404，杜绝历史快照泄漏。公开路由使用独立内容安全策略，与需登录的控制台会话完全隔离。
-- **代次驱动的异步采集队列**：
-  - 已验签 Webhook 在入库事务内递增目标仓库的采集代数（即使仓库未启动检视项目也生效）；后台持久化队列合并同仓高频投递、串行采集并在失败时退避重试且保留上一份有效快照。
+- **事件过滤与冷却防抖的异步采集队列**：
+  - 已验签 Webhook 在入库事务内先实时同步 `repository.private` 可见性变化（确保私有化立即生效），再按白名单过滤不影响看板数据的噪音事件（忽略 `ping`、`status`、`check_run`、`check_suite`、`workflow_job`、`deployment*`、未完成的 `workflow_run` 等），仅对影响看板数据的事件（含 `label` 标签变更映射到 `issues`/`pulls`）合并脏域（`dirty_scopes`）并递增采集代次。
+  - `public_board_jobs` 记录上次成功完成时间（`last_collected_at`）：首次无快照（`active_path IS NULL`）与控制台手动开启立即采集；已有快照时在冷却窗口内（默认 5 分钟，通过 `BOT_PUBLIC_BOARD_COOLDOWN_MS` 配置，整数 `>= 0`，`0` 关闭冷却；启动时强校验并在 `docker/compose.yaml` 透传）将多次投递合并推迟至冷却到期统一重建，且不打断冷却期或失败指数退避。
   - 采集仅使用源仓最小只读安装令牌（`contents`、`issues`、`pull_requests`、`actions`、`checks`、`metadata` read），采集完成即撤销令牌。
+- **增量重建、历史分片复用与离主线程脱敏**：
+  - 每次采集写入干净的临时 `staging` 目录，不再整目录深度拷贝历史分片；单仓 Python 采集器仅写回变更分片与变化后的 `snapshot.json`（全部原子写替换），多仓社区采集器按 `dirty_scopes` 与 `sort=updated&direction=desc` / `since` 增量拉取并合并变更项（同时保留 24 小时兜底全量对账，通过 `BOT_PUBLIC_BOARD_RECONCILE_MS` 配置，接受 `0` 关闭定时对账或整数 `>= 60000`，启动时强校验并在 `docker/compose.yaml` 透传，防止漂移）。
+  - 导出校验、脱敏与历史分片复用全部在 `node:worker_threads` 独立 Worker 线程（`src/public-board/redaction-worker.ts`）内执行，仅通过进程内内存传递已登记凭据集合（绝不落盘或入日志），避免阻塞控制面主事件循环。
+  - 控制面为已登记部署凭据集合计算单向 SHA-256 指纹（`redaction_fingerprint`）：当指纹未变时，未变更的历史分片直接硬链接复用（跨设备或超硬链上限自动退回拷贝，保证旧快照 60 秒延迟清理期间的并发读不可变），跳过重复 `JSON.parse` 与正则脱敏；一旦凭据集合变化，自动退回全量重新脱敏并写出新文件，HTTP 读取亦在指纹失配时实时兜底脱敏，安全红线不退化。
 - **通用 GitHub 原生指标采集器**：
   - Dashboard React 前端、单仓静态页与纯标准库 Python 增量采集器随镜像一并构建，数据落盘在数据库旁的 `public-boards/` 目录；
   - 仅采集任何仓库通用的 GitHub 原生数据（Issue/PR/贡献者/Release/近 30 天 Actions 运行态势与各 workflow/job 耗时统计），并对定时 workflow 自动解析 Check Run Markdown 表格、JUnit XML 或标准 JSON 指标产物，不依赖仓库私有门禁格式。

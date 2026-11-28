@@ -22,6 +22,7 @@
  *   npm run collect
  */
 
+import { createHash } from 'node:crypto'
 import { readFileSync, writeFileSync, existsSync, renameSync, mkdirSync } from 'node:fs'
 import path from 'node:path'
 
@@ -31,9 +32,12 @@ import { classify, isBot, toComposition, hoursBetween } from './lib/metrics.mjs'
 
 const OUT_DIR = path.join(process.cwd(), 'public', 'data')
 const DAY_MS = 24 * 60 * 60 * 1000
+const INCREMENTAL_OVERLAP_MS = 5 * 60 * 1000
+const DEFAULT_FULL_RECONCILE_MS = DAY_MS
+const COMMUNITY_SCOPES = new Set(['repo', 'issues', 'pulls', 'contributors', 'releases'])
 
 function readJson(file, fallback = null) {
-  if (!existsSync(file)) return fallback
+  if (!file || !existsSync(file)) return fallback
   try {
     return JSON.parse(readFileSync(file, 'utf8'))
   } catch {
@@ -42,7 +46,8 @@ function readJson(file, fallback = null) {
 }
 
 function writeJson(file, data) {
-  const tmp = `${file}.tmp`
+  mkdirSync(path.dirname(file), { recursive: true })
+  const tmp = `${file}.${process.pid}.tmp`
   writeFileSync(tmp, `${JSON.stringify(data, null, 2)}\n`, 'utf8')
   renameSync(tmp, file)
 }
@@ -53,6 +58,97 @@ function dayKey(date) {
 
 function refOf(repo) {
   return { owner: repo.owner, name: repo.name, fullName: repo.fullName }
+}
+
+function normalizeScopes(dirtyScopes) {
+  if (!dirtyScopes) return new Set(['all'])
+  const list = Array.isArray(dirtyScopes) ? dirtyScopes : [...dirtyScopes]
+  const clean = list.map((s) => String(s).trim()).filter(Boolean)
+  if (!clean.length || clean.includes('all')) return new Set(['all'])
+  return new Set(clean)
+}
+
+function configFingerprint(cfg, full) {
+  return createHash('sha256')
+    .update(
+      JSON.stringify({
+        schemaVersion: cfg.schemaVersion,
+        maxListPages: cfg.maxListPages,
+        bots: cfg.config.bots,
+        longOpenIssueDays: cfg.config.longOpenIssueDays,
+        internalContributors: internalContributorsFor(cfg.config, full),
+        releaseOverride: cfg.releaseOverrides?.[full] ?? {},
+      })
+    )
+    .digest('hex')
+}
+
+function sortByCreatedDesc(records) {
+  return [...records].sort((a, b) => {
+    const cmp = (b.createdAt ?? '').localeCompare(a.createdAt ?? '')
+    return cmp !== 0 ? cmp : (b.number ?? 0) - (a.number ?? 0)
+  })
+}
+
+function buildPullRecord(p, internal, cfg, nowIso, comments) {
+  const author = p.user?.login ?? 'unknown'
+  const mergedAt = p.merged_at ?? null
+  const state = mergedAt ? 'merged' : p.state === 'open' ? 'open' : 'closed'
+  return {
+    number: p.number,
+    title: p.title ?? '',
+    author,
+    contributionType: classify(author, internal, cfg.config, p.user?.type),
+    state,
+    isDraft: Boolean(p.draft),
+    createdAt: p.created_at,
+    mergedAt,
+    closedAt: p.closed_at ?? null,
+    waitingHours: state === 'open' ? hoursBetween(p.created_at, nowIso) : null,
+    comments,
+    labels: (p.labels ?? []).map((l) => l.name),
+    url: p.html_url,
+  }
+}
+
+function buildIssueRecord(i, internal, cfg, nowIso) {
+  const author = i.user?.login ?? 'unknown'
+  return {
+    number: i.number,
+    title: i.title ?? '',
+    author,
+    contributionType: classify(author, internal, cfg.config, i.user?.type),
+    state: i.state === 'open' ? 'open' : 'closed',
+    isPullRequest: false,
+    createdAt: i.created_at,
+    closedAt: i.closed_at ?? null,
+    waitingHours: i.state === 'open' ? hoursBetween(i.created_at, nowIso) : null,
+    comments: i.comments ?? 0,
+    labels: (i.labels ?? []).map((l) => l.name),
+    url: i.html_url,
+  }
+}
+
+function refreshWaitingHours(records, nowIso) {
+  return records.map((r) =>
+    r.state === 'open'
+      ? { ...r, waitingHours: hoursBetween(r.createdAt, nowIso) }
+      : r
+  )
+}
+
+function overlapIso(iso) {
+  const parsed = Date.parse(iso)
+  if (!Number.isFinite(parsed)) return null
+  return new Date(Math.max(0, parsed - INCREMENTAL_OVERLAP_MS)).toISOString()
+}
+
+function updatedStopWhen(sinceIso) {
+  return (batch) => {
+    if (!batch.length) return true
+    const last = batch[batch.length - 1]
+    return Boolean(last?.updated_at && last.updated_at < sinceIso)
+  }
 }
 
 async function main() {
@@ -80,23 +176,95 @@ async function main() {
   log(`Wrote ${OUT_DIR}`)
 }
 
-export async function collectRepo(repo, cfg, client, now, log) {
+export async function collectRepo(repo, cfg, client, now, log, options = {}) {
   const repoRef = refOf(repo)
   const full = repoRef.fullName
   const nowIso = now.toISOString()
   const repoDir = path.join(cfg.outDir, repo.owner, repo.name)
-  mkdirSync(repoDir, { recursive: true })
+  const prevRepoDir = options.prevDir
+    ? path.join(options.prevDir, repo.owner, repo.name)
+    : null
+  const stateFile = options.stateFile || null
+  const fullReconcileMs =
+    typeof options.fullReconcileMs === 'number' &&
+    Number.isFinite(options.fullReconcileMs) &&
+    options.fullReconcileMs >= 0
+      ? options.fullReconcileMs
+      : DEFAULT_FULL_RECONCILE_MS
+
+  const readPrev = (name, fallback = null) => {
+    const currentFile = path.join(repoDir, name)
+    if (existsSync(currentFile)) return readJson(currentFile, fallback)
+    if (prevRepoDir) return readJson(path.join(prevRepoDir, name), fallback)
+    return fallback
+  }
+  const hasPrevFile = (name) =>
+    Boolean(prevRepoDir && existsSync(path.join(prevRepoDir, name)))
 
   const internal = internalContributorsFor(cfg.config, full)
+  const dirtySet = normalizeScopes(options.dirtyScopes)
+  const cfgFp = configFingerprint(cfg, full)
 
   log(`Collecting ${full} (token: ${client.authenticated ? 'yes' : 'no'})`)
 
-  const prevMeta = readJson(path.join(repoDir, 'meta.json'))
-  const prevLatest = readJson(path.join(repoDir, 'latest.json'))
-  const prevHistory = readJson(path.join(repoDir, 'history.json'), []) ?? []
-  const prevPulls = readJson(path.join(repoDir, 'pulls.json'), { items: [] })
-  const prevIssues = readJson(path.join(repoDir, 'issues.json'), { items: [] })
-  const prevReleases = readJson(path.join(repoDir, 'releases.json'), { items: [] })
+  const prevMeta = readPrev('meta.json')
+  const prevLatest = readPrev('latest.json')
+  const prevHistory = readPrev('history.json', []) ?? []
+  const prevPulls = readPrev('pulls.json', { items: [] })
+  const prevIssues = readPrev('issues.json', { items: [] })
+  const prevContributors = readPrev('contributors.json', { generatedAt: null, items: [] })
+  const prevReleases = readPrev('releases.json', { generatedAt: null, items: [] })
+  const syncState = readJson(stateFile)
+
+  const hasValidBaseline = Boolean(
+    prevMeta &&
+      prevLatest &&
+      Array.isArray(prevPulls?.items) &&
+      Array.isArray(prevIssues?.items) &&
+      Array.isArray(prevReleases?.items) &&
+      prevMeta.status === 'ok' &&
+      syncState?.schemaVersion === 1 &&
+      syncState.lastFullReconcileAt &&
+      syncState.configFingerprint === cfgFp
+  )
+  const lastFullAt = hasValidBaseline ? Date.parse(syncState.lastFullReconcileAt) : NaN
+  const reconcileDue =
+    !hasValidBaseline ||
+    !Number.isFinite(lastFullAt) ||
+    (fullReconcileMs > 0 && now.getTime() - lastFullAt >= fullReconcileMs)
+  const fullReconcile = dirtySet.has('all') || reconcileDue
+
+  const hasCommunityDirty = [...dirtySet].some((scope) => COMMUNITY_SCOPES.has(scope))
+  const today = dayKey(now)
+  const sameDay =
+    prevHistory.length > 0 && prevHistory[prevHistory.length - 1]?.date === today
+
+  // Single-repo-only events (such as workflow_run or pull_request_review) do not change
+  // multi-repository community data; reuse all previous community files untouched.
+  if (
+    !fullReconcile &&
+    !hasCommunityDirty &&
+    sameDay &&
+    prevRepoDir &&
+    hasPrevFile('meta.json') &&
+    hasPrevFile('latest.json') &&
+    hasPrevFile('history.json') &&
+    hasPrevFile('pulls.json') &&
+    hasPrevFile('issues.json') &&
+    hasPrevFile('contributors.json') &&
+    hasPrevFile('releases.json')
+  ) {
+    return {
+      owner: repoRef.owner,
+      name: repoRef.name,
+      fullName: repoRef.fullName,
+      htmlUrl: prevMeta.repo?.htmlUrl ?? `https://github.com/${full}`,
+      description: prevMeta.repo?.description ?? null,
+      defaultBranch: prevMeta.repo?.defaultBranch ?? 'main',
+    }
+  }
+
+  mkdirSync(repoDir, { recursive: true })
 
   /** @type {{ at: string, scope: string, message: string }[]} */
   const errors = []
@@ -107,128 +275,241 @@ export async function collectRepo(repo, cfg, client, now, log) {
     log(`  ! ${scope}: ${message}`)
   }
 
+  const needRepo = fullReconcile || hasCommunityDirty || !prevMeta
+  const needPulls = fullReconcile || dirtySet.has('pulls') || !syncState?.lastPullsSyncAt
+  const needIssues = fullReconcile || dirtySet.has('issues') || !syncState?.lastIssuesSyncAt
+  const needContributors =
+    fullReconcile ||
+    dirtySet.has('contributors') ||
+    !Array.isArray(syncState?.contributorsRaw)
+  let needReleases =
+    fullReconcile || dirtySet.has('releases') || !syncState?.lastReleasesSyncAt
+
   // --- repository -----------------------------------------------------------
   let repoInfo = null
-  try {
-    repoInfo = await client.getJson(`/repos/${full}`)
-  } catch (error) {
-    fail('repo', error)
+  if (needRepo) {
+    try {
+      repoInfo = await client.getJson(`/repos/${full}`)
+    } catch (error) {
+      fail('repo', error)
+    }
+  }
+
+  // Release records embed homepage and defaultBranch; refresh releases if either changed.
+  if (
+    repoInfo &&
+    prevMeta?.repo &&
+    ((repoInfo.homepage ?? null) !== (prevMeta.repo.homepage ?? null) ||
+      (repoInfo.default_branch ?? 'main') !== (prevMeta.repo.defaultBranch ?? 'main'))
+  ) {
+    needReleases = true
   }
 
   // --- contributors ---------------------------------------------------------
   let contributorRaw = null
-  try {
-    const { items, truncated } = await client.paginate(
-      `/repos/${full}/contributors?anon=0`,
-      { maxPages: cfg.maxListPages }
-    )
-    contributorRaw = items
-    if (truncated) notes.push('Contributor list truncated by MONITOR_MAX_LIST_PAGES.')
-  } catch (error) {
-    fail('contributors', error)
+  let contributorsFetched = false
+  if (needContributors) {
+    try {
+      const { items, truncated } = await client.paginate(
+        `/repos/${full}/contributors?anon=0`,
+        { maxPages: cfg.maxListPages }
+      )
+      contributorRaw = items
+      contributorsFetched = true
+      if (truncated) notes.push('Contributor list truncated by MONITOR_MAX_LIST_PAGES.')
+    } catch (error) {
+      fail('contributors', error)
+    }
+  } else {
+    contributorRaw = syncState.contributorsRaw
   }
 
   // --- pull requests --------------------------------------------------------
   let pullsRaw = null
-  try {
-    const { items, truncated } = await client.paginate(
-      `/repos/${full}/pulls?state=all&sort=created&direction=desc`,
-      { maxPages: cfg.maxListPages }
-    )
-    pullsRaw = items
-    if (truncated) notes.push('Pull request list truncated by MONITOR_MAX_LIST_PAGES.')
-  } catch (error) {
-    fail('pulls', error)
+  let pullsIncremental = false
+  let pullsFetched = false
+  if (needPulls) {
+    const pullsSince = !fullReconcile ? overlapIso(syncState?.lastPullsSyncAt) : null
+    try {
+      if (pullsSince) {
+        pullsIncremental = true
+        const { items, truncated } = await client.paginate(
+          `/repos/${full}/pulls?state=all&sort=updated&direction=desc`,
+          { maxPages: cfg.maxListPages, stopWhen: updatedStopWhen(pullsSince) }
+        )
+        pullsRaw = items
+        pullsFetched = true
+        if (truncated) notes.push('Pull request list truncated by MONITOR_MAX_LIST_PAGES.')
+      } else {
+        const { items, truncated } = await client.paginate(
+          `/repos/${full}/pulls?state=all&sort=created&direction=desc`,
+          { maxPages: cfg.maxListPages }
+        )
+        pullsRaw = items
+        pullsFetched = true
+        if (truncated) notes.push('Pull request list truncated by MONITOR_MAX_LIST_PAGES.')
+      }
+    } catch (error) {
+      fail('pulls', error)
+    }
   }
 
   // --- issues (PRs are filtered out; GitHub numbers PRs as issues) ----------
   let issuesRaw = null
+  let issuesIncremental = false
+  let issuesFetched = false
   /**
    * Conversation-comment counts for pull requests, keyed by number. The
    * `/pulls` feed omits `comments` entirely, but the `/issues` feed returns
    * PRs too and exposes it — so we harvest it here before filtering.
    */
   let prComments = null
-  try {
-    const { items, truncated } = await client.paginate(
-      `/repos/${full}/issues?state=all&sort=created&direction=desc`,
-      { maxPages: cfg.maxListPages }
-    )
-    prComments = new Map(
-      items.filter((i) => i.pull_request).map((i) => [i.number, i.comments ?? 0])
-    )
-    issuesRaw = items.filter((i) => !i.pull_request)
-    if (truncated) notes.push('Issue list truncated by MONITOR_MAX_LIST_PAGES.')
-  } catch (error) {
-    fail('issues', error)
+  const mergedPrComments = new Map()
+  for (const item of prevPulls?.items ?? []) {
+    if (typeof item?.number === 'number') {
+      mergedPrComments.set(item.number, item.comments ?? 0)
+    }
+  }
+  if (syncState?.prComments && typeof syncState.prComments === 'object') {
+    for (const [k, v] of Object.entries(syncState.prComments)) {
+      mergedPrComments.set(Number(k), Number(v) || 0)
+    }
+  }
+  let prCommentsChanged = false
+
+  if (needIssues) {
+    const issuesSince = !fullReconcile ? overlapIso(syncState?.lastIssuesSyncAt) : null
+    try {
+      if (issuesSince) {
+        issuesIncremental = true
+        const { items, truncated } = await client.paginate(
+          `/repos/${full}/issues?state=all&sort=updated&direction=desc&since=${encodeURIComponent(issuesSince)}`,
+          { maxPages: cfg.maxListPages, stopWhen: updatedStopWhen(issuesSince) }
+        )
+        prComments = new Map()
+        for (const item of items) {
+          if (item.pull_request) {
+            const count = item.comments ?? 0
+            prComments.set(item.number, count)
+            if (mergedPrComments.get(item.number) !== count) {
+              prCommentsChanged = true
+            }
+            mergedPrComments.set(item.number, count)
+          }
+        }
+        issuesRaw = items.filter((i) => !i.pull_request)
+        issuesFetched = true
+        if (truncated) notes.push('Issue list truncated by MONITOR_MAX_LIST_PAGES.')
+      } else {
+        const { items, truncated } = await client.paginate(
+          `/repos/${full}/issues?state=all&sort=created&direction=desc`,
+          { maxPages: cfg.maxListPages }
+        )
+        prComments = new Map(
+          items.filter((i) => i.pull_request).map((i) => [i.number, i.comments ?? 0])
+        )
+        mergedPrComments.clear()
+        for (const [num, count] of prComments) mergedPrComments.set(num, count)
+        issuesRaw = items.filter((i) => !i.pull_request)
+        issuesFetched = true
+        if (truncated) notes.push('Issue list truncated by MONITOR_MAX_LIST_PAGES.')
+      }
+    } catch (error) {
+      fail('issues', error)
+    }
   }
 
   // --- releases (versions) ---------------------------------------------------
   let releasesRaw = null
-  try {
-    const { items, truncated } = await client.paginate(
-      `/repos/${full}/releases`,
-      { maxPages: cfg.maxListPages }
-    )
-    releasesRaw = items
-    if (truncated) notes.push('Release list truncated by MONITOR_MAX_LIST_PAGES.')
-  } catch (error) {
-    fail('releases', error)
+  let releasesFetched = false
+  if (needReleases) {
+    try {
+      const { items, truncated } = await client.paginate(
+        `/repos/${full}/releases`,
+        { maxPages: cfg.maxListPages }
+      )
+      releasesRaw = items
+      releasesFetched = true
+      if (truncated) notes.push('Release list truncated by MONITOR_MAX_LIST_PAGES.')
+    } catch (error) {
+      fail('releases', error)
+    }
   }
 
   // --- build records --------------------------------------------------------
   let pullRecords = null
+  let pullsUpdated = false
   if (pullsRaw) {
-    pullRecords = pullsRaw.map((p) => {
-      const author = p.user?.login ?? 'unknown'
-      const mergedAt = p.merged_at ?? null
-      const state = mergedAt ? 'merged' : p.state === 'open' ? 'open' : 'closed'
-      return {
-        number: p.number,
-        title: p.title ?? '',
-        author,
-        contributionType: classify(author, internal, cfg.config, p.user?.type),
-        state,
-        isDraft: Boolean(p.draft),
-        createdAt: p.created_at,
-        mergedAt,
-        closedAt: p.closed_at ?? null,
-        waitingHours: state === 'open' ? hoursBetween(p.created_at, nowIso) : null,
-        comments: prComments?.get(p.number) ?? 0,
-        labels: (p.labels ?? []).map((l) => l.name),
-        url: p.html_url,
+    if (pullsIncremental) {
+      const byNumber = new Map(
+        refreshWaitingHours(prevPulls?.items ?? [], nowIso).map((r) => [r.number, r])
+      )
+      for (const p of pullsRaw) {
+        const existing = byNumber.get(p.number)
+        const comments = prComments?.has(p.number)
+          ? prComments.get(p.number)
+          : (mergedPrComments.get(p.number) ?? existing?.comments ?? 0)
+        byNumber.set(p.number, buildPullRecord(p, internal, cfg, nowIso, comments))
       }
-    })
-    if (prComments) {
-      const missing = pullsRaw.filter((p) => !prComments.has(p.number)).length
-      if (missing > 0) {
-        notes.push(
-          `${missing} pull request comment counts unavailable (issues feed truncated).`
-        )
+      if (prCommentsChanged) {
+        for (const [num, rec] of byNumber) {
+          if (mergedPrComments.has(num) && rec.comments !== mergedPrComments.get(num)) {
+            byNumber.set(num, { ...rec, comments: mergedPrComments.get(num) })
+          }
+        }
       }
+      pullRecords = sortByCreatedDesc(byNumber.values())
+    } else {
+      pullRecords = pullsRaw.map((p) => {
+        const comments = prComments
+          ? (prComments.get(p.number) ?? 0)
+          : (mergedPrComments.get(p.number) ?? 0)
+        return buildPullRecord(p, internal, cfg, nowIso, comments)
+      })
+      if (prComments && !issuesIncremental) {
+        const missing = pullsRaw.filter((p) => !prComments.has(p.number)).length
+        if (missing > 0) {
+          notes.push(
+            `${missing} pull request comment counts unavailable (issues feed truncated).`
+          )
+        }
+      }
+    }
+    pullsUpdated = true
+  } else if (!needPulls && Array.isArray(prevPulls?.items)) {
+    if (prCommentsChanged) {
+      pullRecords = refreshWaitingHours(prevPulls.items, nowIso).map((r) =>
+        mergedPrComments.has(r.number)
+          ? { ...r, comments: mergedPrComments.get(r.number) }
+          : r
+      )
+      pullsUpdated = true
     }
   }
 
   let issueRecords = null
+  let issuesUpdated = false
   if (issuesRaw) {
-    issueRecords = issuesRaw.map((i) => {
-      const author = i.user?.login ?? 'unknown'
-      return {
-        number: i.number,
-        title: i.title ?? '',
-        author,
-        contributionType: classify(author, internal, cfg.config, i.user?.type),
-        state: i.state === 'open' ? 'open' : 'closed',
-        isPullRequest: false,
-        createdAt: i.created_at,
-        closedAt: i.closed_at ?? null,
-        waitingHours: i.state === 'open' ? hoursBetween(i.created_at, nowIso) : null,
-        comments: i.comments ?? 0,
-        labels: (i.labels ?? []).map((l) => l.name),
-        url: i.html_url,
+    if (issuesIncremental) {
+      const byNumber = new Map(
+        refreshWaitingHours(prevIssues?.items ?? [], nowIso).map((r) => [r.number, r])
+      )
+      for (const i of issuesRaw) {
+        byNumber.set(i.number, buildIssueRecord(i, internal, cfg, nowIso))
       }
-    })
+      issueRecords = sortByCreatedDesc(byNumber.values())
+    } else {
+      issueRecords = issuesRaw.map((i) => buildIssueRecord(i, internal, cfg, nowIso))
+    }
+    issuesUpdated = true
   }
+
+  // Complete views used for cross-domain computations (contributors & daily history):
+  // when a domain was intentionally skipped (not failed), reuse its previous complete records.
+  const effectivePullRecords =
+    pullRecords ?? (!needPulls && Array.isArray(prevPulls?.items) ? prevPulls.items : null)
+  const effectiveIssueRecords =
+    issueRecords ?? (!needIssues && Array.isArray(prevIssues?.items) ? prevIssues.items : null)
 
   // --- metrics --------------------------------------------------------------
   const pullsSection = pullRecords
@@ -237,16 +518,26 @@ export async function collectRepo(repo, cfg, client, now, log) {
   const issuesSection = issueRecords
     ? computeIssueMetrics(issueRecords, cfg.config)
     : (prevLatest?.issues ?? null)
+  const shouldRecomputeContributors =
+    Boolean(pullRecords || issueRecords || contributorsFetched) || !prevLatest?.contributors
   const contributorsSection =
-    pullRecords || issueRecords
-      ? computeContributors(pullRecords ?? [], issueRecords ?? [], contributorRaw, internal, cfg, now)
+    shouldRecomputeContributors && (effectivePullRecords || effectiveIssueRecords)
+      ? computeContributors(
+          effectivePullRecords ?? [],
+          effectiveIssueRecords ?? [],
+          contributorRaw,
+          internal,
+          cfg,
+          now
+        )
       : (prevLatest?.contributors ?? null)
 
   const counters = {
     stars: repoInfo?.stargazers_count ?? prevLatest?.repo?.stars ?? 0,
     forks: repoInfo?.forks_count ?? prevLatest?.repo?.forks ?? 0,
     watchers: repoInfo?.subscribers_count ?? prevLatest?.repo?.watchers ?? 0,
-    openIssuesAndPrs: repoInfo?.open_issues_count ?? prevLatest?.repo?.openIssuesAndPrs ?? 0,
+    openIssuesAndPrs:
+      repoInfo?.open_issues_count ?? prevLatest?.repo?.openIssuesAndPrs ?? 0,
   }
 
   const generatedAt = nowIso
@@ -260,15 +551,17 @@ export async function collectRepo(repo, cfg, client, now, log) {
 
   // --- history (append/replace today's point) -------------------------------
   const history = appendHistory(prevHistory, {
-    date: dayKey(now),
+    date: today,
     counters,
-    pullRecords,
-    issueRecords,
+    pullRecords: effectivePullRecords,
+    issueRecords: effectiveIssueRecords,
     collectedAt: generatedAt,
   })
 
   // --- status ---------------------------------------------------------------
-  const anyData = Boolean(pullRecords || issueRecords)
+  const anyData = Boolean(
+    effectivePullRecords || effectiveIssueRecords || repoInfo || releasesRaw
+  )
   const anyError = errors.length > 0
   const status = !anyData
     ? anyError
@@ -284,7 +577,7 @@ export async function collectRepo(repo, cfg, client, now, log) {
     schemaVersion: cfg.schemaVersion,
     repo: {
       ...repoRef,
-      htmlUrl: repoInfo?.html_url ?? `https://github.com/${full}`,
+      htmlUrl: repoInfo?.html_url ?? prevMeta?.repo?.htmlUrl ?? `https://github.com/${full}`,
       description: repoInfo?.description ?? prevMeta?.repo?.description ?? null,
       homepage: repoInfo?.homepage ?? prevMeta?.repo?.homepage ?? null,
       defaultBranch: repoInfo?.default_branch ?? prevMeta?.repo?.defaultBranch ?? 'main',
@@ -311,29 +604,77 @@ export async function collectRepo(repo, cfg, client, now, log) {
     meta.repo.defaultBranch,
     cfg.releaseOverrides?.[full] ?? {}
   )
+  const releasesUpdated = Boolean(releaseRecords)
 
   // --- persist --------------------------------------------------------------
   writeJson(path.join(repoDir, 'meta.json'), meta)
   writeJson(path.join(repoDir, 'latest.json'), latest)
   writeJson(path.join(repoDir, 'history.json'), history)
-  writeJson(
-    path.join(repoDir, 'pulls.json'),
-    pullRecords ? { generatedAt, items: pullRecords } : prevPulls
+  if (pullsUpdated || !hasPrevFile('pulls.json')) {
+    writeJson(
+      path.join(repoDir, 'pulls.json'),
+      pullRecords ? { generatedAt, items: pullRecords } : prevPulls
+    )
+  }
+  if (issuesUpdated || !hasPrevFile('issues.json')) {
+    writeJson(
+      path.join(repoDir, 'issues.json'),
+      issueRecords ? { generatedAt, items: issueRecords } : prevIssues
+    )
+  }
+  const contributorsUpdated = Boolean(
+    shouldRecomputeContributors && contributorsSection && (effectivePullRecords || effectiveIssueRecords)
   )
-  writeJson(
-    path.join(repoDir, 'issues.json'),
-    issueRecords ? { generatedAt, items: issueRecords } : prevIssues
-  )
-  writeJson(path.join(repoDir, 'contributors.json'), {
-    generatedAt: contributorsSection ? generatedAt : (readJson(path.join(repoDir, 'contributors.json'))?.generatedAt ?? null),
-    items: contributorsSection ? buildContributorRecords(pullRecords ?? [], issueRecords ?? [], contributorRaw, internal, cfg) : (readJson(path.join(repoDir, 'contributors.json'))?.items ?? []),
-  })
-  writeJson(path.join(repoDir, 'releases.json'), {
-    generatedAt: releaseRecords ? generatedAt : (prevReleases?.generatedAt ?? null),
-    items: releaseRecords ? releaseRecords : (prevReleases?.items ?? []),
-  })
+  if (contributorsUpdated || !hasPrevFile('contributors.json')) {
+    writeJson(path.join(repoDir, 'contributors.json'), {
+      generatedAt: contributorsUpdated
+        ? generatedAt
+        : (prevContributors?.generatedAt ?? null),
+      items: contributorsUpdated
+        ? buildContributorRecords(
+            effectivePullRecords ?? [],
+            effectiveIssueRecords ?? [],
+            contributorRaw,
+            internal,
+            cfg
+          )
+        : (prevContributors?.items ?? []),
+    })
+  }
+  if (releasesUpdated || !hasPrevFile('releases.json')) {
+    writeJson(path.join(repoDir, 'releases.json'), {
+      generatedAt: releaseRecords ? generatedAt : (prevReleases?.generatedAt ?? null),
+      items: releaseRecords ? releaseRecords : (prevReleases?.items ?? []),
+    })
+  }
 
-  log(`Status: ${status} | PRs: ${pullsSection?.total ?? '-'} | Issues: ${issuesSection?.total ?? '-'} | Releases: ${releaseRecords?.length ?? '-'}`)
+  if (stateFile) {
+    const nextState = {
+      schemaVersion: 1,
+      configFingerprint: cfgFp,
+      lastFullReconcileAt:
+        fullReconcile && errors.length === 0
+          ? nowIso
+          : (syncState?.lastFullReconcileAt ?? null),
+      lastPullsSyncAt: pullsFetched ? nowIso : (syncState?.lastPullsSyncAt ?? null),
+      lastIssuesSyncAt: issuesFetched ? nowIso : (syncState?.lastIssuesSyncAt ?? null),
+      lastContributorsSyncAt: contributorsFetched
+        ? nowIso
+        : (syncState?.lastContributorsSyncAt ?? null),
+      lastReleasesSyncAt: releasesFetched
+        ? nowIso
+        : (syncState?.lastReleasesSyncAt ?? null),
+      contributorsRaw: contributorsFetched
+        ? (contributorRaw ?? []).map((c) => ({ login: c.login, type: c.type }))
+        : (syncState?.contributorsRaw ?? null),
+      prComments: Object.fromEntries(mergedPrComments),
+    }
+    writeJson(stateFile, nextState)
+  }
+
+  log(
+    `Status: ${status} | PRs: ${pullsSection?.total ?? '-'} | Issues: ${issuesSection?.total ?? '-'} | Releases: ${(releaseRecords ?? prevReleases?.items)?.length ?? '-'}`
+  )
 
   // Summary used to build the multi-repo `index.json`.
   return {

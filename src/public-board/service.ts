@@ -1,6 +1,6 @@
-import { configuredRedactor, publicContent, publicText, registeredRedactor } from '../core/redaction.js';
+import { configuredRedactor, configuredRedactorFingerprint, publicContent, publicText, registeredRedactor } from '../core/redaction.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { readFile, readdir, writeFile, mkdir, mkdtemp, cp, rm } from 'node:fs/promises';
+import { readFile, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { resolve, join, extname } from 'node:path';
 import { execFile } from 'node:child_process';
@@ -9,57 +9,103 @@ import type { Store, Row } from '../storage/database.js';
 import { GitHub, revokeInstallationToken } from '../github/client.js';
 import { Redactor } from '../agent/common.js';
 import { fail } from '../core/security.js';
-import { publishedRepositories, queueBoard } from './state.js';
+import {
+  configurePublicBoard,
+  parseBoardScopes,
+  publishedRepositories,
+  queueBoard,
+  resolveBoardCooldownMs,
+  resolveBoardNow,
+  resolveBoardReconcileMs,
+  type BoardScope,
+} from './state.js';
+import {
+  runFinalizeBoardStagingWorker,
+  type FinalizeBoardStagingInput,
+  type FinalizeBoardStagingResult,
+} from './redaction-worker.js';
 
 const run = promisify(execFile);
 // checks: what a scheduled run reports in its check runs (#938); dropped where the installation does not grant it.
 const readPermissions = { contents: 'read', issues: 'read', pull_requests: 'read', actions: 'read', checks: 'read', metadata: 'read' };
-export interface Collection { repository: Row; token: string; apiUrl: string; directory: string; stateDirectory: string; allowPrivate: boolean; }
+export interface Collection {
+  repository: Row;
+  token: string;
+  apiUrl: string;
+  directory: string;
+  stateDirectory: string;
+  allowPrivate: boolean;
+  prevDirectory?: string;
+  dirtyScopes?: readonly BoardScope[];
+  reconcileMs?: number;
+}
+export interface PublicBoardsOptions {
+  cooldownMs?: number;
+  reconcileMs?: number;
+  now?: () => number;
+  finalizer?: (input: FinalizeBoardStagingInput) => Promise<FinalizeBoardStagingResult>;
+  onFinalized?: (info: { repositoryId: string; fullName: string; fullRedaction: boolean; result: FinalizeBoardStagingResult }) => void;
+}
 export async function collectBoard(input: Collection): Promise<void> {
   // Only the source read token enters the subprocess. App keys and the host's credentials stay in the control plane.
-  const env = { PATH: process.env.PATH, LANG: 'C.UTF-8', PYTHONDONTWRITEBYTECODE: '1',
-    GITHUB_TOKEN: input.token, BOT_GITHUB_API_URL: input.apiUrl,
-    GSB_ALLOW_PRIVATE: input.allowPrivate ? '1' : '0', GSB_DATA_DIR: join(input.stateDirectory, '.data'),
-    GSB_CACHE_DIR: join(input.stateDirectory, '.cache') };
+  const env: Record<string, string | undefined> = {
+    PATH: process.env.PATH,
+    LANG: 'C.UTF-8',
+    PYTHONDONTWRITEBYTECODE: '1',
+    GITHUB_TOKEN: input.token,
+    BOT_GITHUB_API_URL: input.apiUrl,
+    GSB_ALLOW_PRIVATE: input.allowPrivate ? '1' : '0',
+    GSB_DATA_DIR: join(input.stateDirectory, '.data'),
+    GSB_CACHE_DIR: join(input.stateDirectory, '.cache'),
+  };
+  if (input.prevDirectory) env.BOT_PUBLIC_BOARD_PREV_DIR = input.prevDirectory;
+  if (input.dirtyScopes?.length) env.BOT_PUBLIC_BOARD_DIRTY_SCOPES = input.dirtyScopes.join(',');
+  env.BOT_PUBLIC_BOARD_RECONCILE_MS = String(input.reconcileMs ?? resolveBoardReconcileMs());
   await run(process.execPath, [resolve('public-board/collect.mjs'), String(input.repository.full_name), input.directory, input.stateDirectory],
     { env, timeout: 12 * 60_000, maxBuffer: 1024 * 1024 });
-}
-
-// Both collectors produce JSON data, including historical shards copied from the previous generation.
-async function redactBoardExport(directory: string, redactor: Redactor) {
-  for (const entry of await readdir(directory, {withFileTypes:true})) {
-    const path = join(directory, entry.name);
-    if (entry.isDirectory()) await redactBoardExport(path, redactor);
-    else if (entry.isFile() && entry.name.endsWith('.json')) {
-      const raw = await readFile(path, 'utf8');
-      // JSON escaping on disk must not hide newlines or quotes inside a registered value.
-      const original = JSON.parse(raw), safe = JSON.stringify(publicContent(original, redactor));
-      if (safe !== JSON.stringify(original)) await writeFile(path, safe);
-    }
-  }
 }
 
 /** A durable, coalescing queue: collection never holds up GitHub's delivery response. */
 export class PublicBoards {
   private timer?: ReturnType<typeof setInterval>;
   private running?: Promise<void>;
-  constructor(readonly store: Store, readonly directory: string,
-    readonly apiUrl = 'https://api.github.com', readonly collector = collectBoard) {}
+  constructor(
+    readonly store: Store,
+    readonly directory: string,
+    readonly apiUrl = 'https://api.github.com',
+    readonly collector = collectBoard,
+    readonly options: PublicBoardsOptions = {},
+  ) {
+    if (options.cooldownMs !== undefined || options.reconcileMs !== undefined || options.now !== undefined) {
+      configurePublicBoard(store, { cooldownMs: options.cooldownMs, reconcileMs: options.reconcileMs, now: options.now });
+    }
+  }
   start(): void {
     this.seed();
     this.timer = setInterval(() => { this.seed(); void this.drain(); }, 1000);
     this.timer.unref(); void this.drain();
   }
   seed(): void {
-    for (const repo of publishedRepositories(this.store)) if (repo.generation == null) queueBoard(this.store, repo.account_id, repo.repository_id);
+    for (const repo of publishedRepositories(this.store)) {
+      if (repo.generation == null) queueBoard(this.store, repo.account_id, repo.repository_id, { immediate: true, scopes: ['all'] });
+    }
   }
   drain(): Promise<void> {
     return this.running ||= this.work().finally(() => { this.running = undefined; });
   }
+  private now(): number {
+    return resolveBoardNow(this.store, this.options.now?.());
+  }
+  private cooldownMs(): number {
+    return resolveBoardCooldownMs(this.store, this.options.cooldownMs);
+  }
+  private reconcileMs(): number {
+    return resolveBoardReconcileMs(this.store, this.options.reconcileMs);
+  }
   private async work(): Promise<void> {
     for (const repo of publishedRepositories(this.store)) {
       const job = this.store.get(`SELECT * FROM public_board_jobs WHERE account_id=? AND repository_id=?
-        AND generation>collected_generation AND next_attempt<=?`, repo.account_id, repo.repository_id, Date.now());
+        AND generation>collected_generation AND next_attempt<=?`, repo.account_id, repo.repository_id, this.now());
       if (!job) continue;
       const root = resolve(this.directory, repo.account_id, repo.repository_id), github = new GitHub(this.store, { ...repo, id: repo.repository_id }, new Redactor(), async () => {}, this.apiUrl);
       let staging: string | undefined;
@@ -71,22 +117,62 @@ export class PublicBoards {
         const eligible = () => publishedRepositories(this.store).some(row => row.account_id === repo.account_id && row.repository_id === repo.repository_id);
         if (!eligible()) continue;
         await mkdir(root, { recursive: true }); staging = await mkdtemp(join(root, 'snapshot-'));
-        if (job.active_path) await cp(job.active_path, staging, { recursive: true });
-        await this.collector({ repository: repo, token: github.token, apiUrl: this.apiUrl, directory: staging, stateDirectory: join(root, 'state'), allowPrivate: !!meta.private });
-        // Validate before publishing. Failed collection leaves the last good snapshot readable.
-        const snapshot = JSON.parse(await readFile(join(staging, 'board/data/snapshot.json'), 'utf8'));
-        if (String(snapshot.repository?.name).toLowerCase() !== String(repo.full_name).toLowerCase()) throw new Error('snapshot_scope_changed');
-        await redactBoardExport(staging, registeredRedactor(this.store, github.redactor));
+        const prevDirectory = job.active_path ? String(job.active_path) : undefined;
+        const dirtyScopes = parseBoardScopes(job.dirty_scopes);
+        await this.collector({
+          repository: repo,
+          token: github.token,
+          apiUrl: this.apiUrl,
+          directory: staging,
+          stateDirectory: join(root, 'state'),
+          allowPrivate: !!meta.private,
+          prevDirectory,
+          dirtyScopes,
+          reconcileMs: this.reconcileMs(),
+        });
+        // Redact new files, reuse unchanged historical shards via hard links, and validate snapshot scope off the main thread.
+        const fingerprint = configuredRedactorFingerprint(this.store);
+        const fullRedaction = !prevDirectory || job.redaction_fingerprint !== fingerprint;
+        const redactor = registeredRedactor(this.store, github.redactor);
+        const finalize = this.options.finalizer ?? runFinalizeBoardStagingWorker;
+        const finalized = await finalize({
+          stagingDir: staging,
+          prevDir: prevDirectory,
+          redactorValues: [...redactor.values],
+          fullRedaction,
+        });
+        this.options.onFinalized?.({ repositoryId: String(repo.repository_id), fullName: String(repo.full_name), fullRedaction, result: finalized });
+        if (String(finalized.snapshotRepoName || '').toLowerCase() !== String(repo.full_name).toLowerCase()) throw new Error('snapshot_scope_changed');
         if (!eligible()) continue;
-        this.store.run(`UPDATE public_board_jobs SET active_path=?,collected_generation=?,attempts=0,next_attempt=0,last_error=NULL
-          WHERE account_id=? AND repository_id=?`, staging, job.generation, repo.account_id, repo.repository_id);
+        const completedAt = this.now(), cd = this.cooldownMs();
+        this.store.run(
+          `UPDATE public_board_jobs
+              SET active_path=?,
+                  collected_generation=?,
+                  attempts=0,
+                  last_error=NULL,
+                  last_collected_at=?,
+                  redaction_fingerprint=?,
+                  next_attempt=CASE WHEN generation>? THEN ? ELSE 0 END,
+                  dirty_scopes=CASE WHEN generation>? THEN dirty_scopes ELSE '' END
+            WHERE account_id=? AND repository_id=?`,
+          staging,
+          job.generation,
+          completedAt,
+          fingerprint,
+          job.generation,
+          cd > 0 ? completedAt + cd : 0,
+          job.generation,
+          repo.account_id,
+          repo.repository_id,
+        );
         staging = undefined;
         // Let requests which already selected the previous generation finish reading it.
-        if (job.active_path) setTimeout(() => { void rm(job.active_path, { recursive: true, force: true }).catch(() => {}); }, 60_000).unref();
+        if (prevDirectory) setTimeout(() => { void rm(prevDirectory, { recursive: true, force: true }).catch(() => {}); }, 60_000).unref();
       } catch {
         const attempts = Number(job.attempts) + 1;
         this.store.run(`UPDATE public_board_jobs SET attempts=?,next_attempt=?,last_error='collection_failed' WHERE account_id=? AND repository_id=?`,
-          attempts, Date.now() + Math.min(15 * 60_000, 1000 * 2 ** Math.min(attempts, 10)), repo.account_id, repo.repository_id);
+          attempts, this.now() + Math.min(15 * 60_000, 1000 * 2 ** Math.min(attempts, 10)), repo.account_id, repo.repository_id);
       } finally {
         if (staging) await rm(staging, { recursive: true, force: true });
         if (github.token && this.store.get('SELECT type FROM accounts WHERE id=?', repo.account_id)?.type === 'github_app') await revokeInstallationToken(this.apiUrl, github.token).catch(() => false);
@@ -142,9 +228,11 @@ export class PublicBoards {
     const community = /^\/dashboard\/data\/([^/]+\/[^/]+)\/(meta|latest|history|pulls|issues|contributors|releases)\.json$/.exec(path);
     const board = /^\/boards\/([^/]+\/[^/]+)(?:\/(.*))?$/.exec(path);
     let file: string;
+    let matchedRepo: Row | undefined;
     if (community || board) {
       const key = (community?.[1] || board?.[1] || '').toLowerCase(), repo = repos.find(row => String(row.full_name).toLowerCase() === key);
       if (!repo) return fail(404, 'not_found');
+      matchedRepo = repo;
       if (community) {
         if (!repo.active_path) return fail(503, 'board_collecting');
         file = join(repo.active_path, 'public/data', repo.full_name, community[2] + '.json');
@@ -168,7 +256,15 @@ export class PublicBoards {
     try {
       const bytes = await readFile(file);
       const exported = community || board?.[2]?.startsWith('data/');
-      if (exported && extname(file) === '.json') return json(JSON.parse(bytes.toString('utf8')));
+      if (exported && extname(file) === '.json') {
+        // Exported JSON already passed publicContent() under this exact credential fingerprint; serve without re-parsing on the main thread.
+        if (matchedRepo?.redaction_fingerprint && matchedRepo.redaction_fingerprint === configuredRedactorFingerprint(this.store)) {
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(req.method === 'HEAD' ? undefined : bytes);
+          return true;
+        }
+        return json(JSON.parse(bytes.toString('utf8')));
+      }
       const body = exported && ['.txt','.log','.csv','.md'].includes(extname(file))
         ? publicText(bytes.toString('utf8'), configuredRedactor(this.store)) : bytes;
       const mime: Record<string,string> = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2', '.jpg': 'image/jpeg', '.webp': 'image/webp', '.wasm': 'application/wasm', '.zip': 'application/zip', '.txt': 'text/plain' };

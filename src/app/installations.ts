@@ -403,7 +403,7 @@ export async function installationApi(store: Store, sync: InstallationSync | und
         enabled=excluded.enabled`, id, Number(input.enabled));
       if (input.enabled) {
         const source = publishedRepositories(store).find(row => String(row.repository_id) === id);
-        if (source) queueBoard(store, String(source.account_id), id);
+        if (source) queueBoard(store, String(source.account_id), id, { immediate: true, scopes: ['all'] });
       }
       store.audit(user.id, 'repository.board.updated', id, id);
       return { board: boardStatus(store, id) };

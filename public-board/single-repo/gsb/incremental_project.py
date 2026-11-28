@@ -79,19 +79,23 @@ def _scheduled(history, rows, scheduled_workflows, limit=60):
     return sorted(out, key=lambda w: (w["name"] or "", w["workflow_id"] or 0))
 
 
-def build_snapshot(sync):
+def build_snapshot(sync, old_snapshot=None):
     history, state, meta = sync.history, sync.state, sync.meta
-    old = read_json(history.root / "site/data/snapshot.json", {})
+    old = old_snapshot if old_snapshot is not None else read_json(history.root / "site/data/snapshot.json", {})
     supplements = read_json(history.root / ".sync/supplements.json", {})
     midnight = sync.now.replace(hour=0, minute=0, second=0)
     cutoff = stamp(midnight - timedelta(days=30))
     progress = sync.progress()
     lines = configured_lines(sync.settings, meta["default_branch"])
-    # A successful poll with no changed records does not manufacture a new snapshot. Daily aging and
-    # health metadata still get a regular refresh, and an older layout is rebuilt once.
+    repo = {k: meta.get(k) for k in ("description", "default_branch", "language", "pushed_at")}
+    repo.update(stars=meta.get("stargazers_count"), forks=meta.get("forks_count"), license=(meta.get("license") or {}).get("spdx_id"))
+    old_repo = (old.get("sections") or {}).get("repo", {}).get("data")
+    # A successful poll with no changed records or repository metadata does not manufacture a new snapshot.
+    # Daily aging and health metadata still get a regular refresh, and an older layout is rebuilt once.
     generated = parse_ts(old.get("generated_at"))
     if (not history.changed and old.get("schema_version") == SCHEMA_VERSION and old.get("lines") == lines
-            and old.get("sync") == progress and generated and generated.date() == midnight.date()
+            and old.get("sync") == progress and old_repo == repo
+            and generated and generated.date() == midnight.date()
             and generated.astimezone(ZONE).date() == sync.now.astimezone(ZONE).date()):
         return old
     cfg = sync.cfg
@@ -179,8 +183,6 @@ def build_snapshot(sync):
     releases = history.select("releases", limit=30)
     for release in releases:
         release["validation_run_ids"] = [r["id"] for r in runs if r["sha"] == release["sha"] and r["channel"] == "release"]
-    repo = {k: meta.get(k) for k in ("description", "default_branch", "language", "pushed_at")}
-    repo.update(stars=meta.get("stargazers_count"), forks=meta.get("forks_count"), license=(meta.get("license") or {}).get("spdx_id"))
     doc = {"schema_version": SCHEMA_VERSION, "generated_at": stamp(sync.now), "repo": sync.repo, "repo_url": meta["html_url"],
            "repository": {"name": sync.repo, "url": meta["html_url"], **repo}, "sync": progress,
            "history": {"manifest": "./data/history/manifest.json", "totals": history.manifest["totals"]},
