@@ -59,6 +59,8 @@ BOT_BUILD_CONTEXT=. docker compose --project-directory . -f docker/compose.yaml 
 | `BOT_COMMAND_TIMEOUT_MAX_SECONDS` | `600` | 模型命令显式超时的统一上限（秒，1–2147363） |
 | `BOT_MENTION_NAMES` | `bot,agent-ci-infra-bot` | 评论中 `@` 触发检视的名字（逗号分隔，`off` 关闭） |
 | `BOT_OBSOLETE_FAILURE_DAYS` | `7` | 临时/平台类失败自动移出「待处理」的天数 |
+| `BOT_PUBLIC_BOARD_COOLDOWN_MS` | `300000` | 公开看板按仓库的 Webhook 刷新冷却窗口（毫秒，整数 `>= 0`；设为 `0` 关闭冷却防抖） |
+| `BOT_PUBLIC_BOARD_RECONCILE_MS` | `86400000` | 公开看板社区数据定期兜底全量对账周期（毫秒，`0` 或整数 `>= 60000`；设为 `0` 关闭定时全量对账，仍保留首次采集、配置变更与手动触发的全量采集） |
 | `BOT_TRUSTED_PROXIES` | 空 | 密码登录限流信任的代理 IP/CIDR（逗号分隔；仅填受控代理，切勿填 `0.0.0.0/0`） |
 | `BOT_FORWARD_PRIVATE_HOSTS` | 空 | 外部执行端允许 Webhook 转发的内网主机名白名单（逗号分隔，不支持通配符） |
 | `BOT_AGENT_TOOLS_DIR` | `/opt/agent-tools` | 非 Compose 启动时可指定的控制面工具卷目录。标准 Compose 固定在 `/opt/agent-tools` 挂载该卷，项目电脑只读挂载 |

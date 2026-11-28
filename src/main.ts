@@ -13,6 +13,7 @@ import { Onboarding } from './onboarding/service.js';
 import { IntegrationChecker } from './projects/integrations.js';
 import { GitCache } from './agent/git-cache.js';
 import { PublicBoards } from './public-board/service.js';
+import { resolveBoardCooldownMs, resolveBoardReconcileMs } from './public-board/state.js';
 import { ReleaseService } from './releases/service.js';
 import { ActionsFailures } from './actions/service.js';
 import { GitHubLogin } from './identity/github-login.js';
@@ -84,6 +85,14 @@ const patrolIntervalMs = (() => {
   return value;
 })();
 const patrolCooldownMs = count('BOT_PR_PATROL_COOLDOWN_MS', 24 * 60 * 60 * 1000, 60_000);
+const publicBoardCooldownMs = (() => {
+  try { return resolveBoardCooldownMs(); }
+  catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exit(1); }
+})();
+const publicBoardReconcileMs = (() => {
+  try { return resolveBoardReconcileMs(); }
+  catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exit(1); }
+})();
 // Tasks in 待处理 that nobody needs to act on any more leave it in small batches (#713).
 engine.obsolete.start();
 engine.botPrWake.start(60_000, { intervalMs: patrolIntervalMs, cooldownMs: patrolCooldownMs });
@@ -109,7 +118,10 @@ installations.start();
 const onboarding = new Onboarding(store, { tunnelFile: process.env.BOT_TUNNEL_TOKEN_FILE, tunnelMetrics: process.env.BOT_TUNNEL_METRICS_URL, githubUrl: process.env.BOT_GITHUB_API_URL });
 setTimeout(() => void installations.syncAll(), 5000).unref();
 const syncTimer = setInterval(() => void installations.syncAll(), 10 * 60_000);
-const boards = new PublicBoards(store, resolve(dirname(databasePath), 'public-boards'), process.env.BOT_GITHUB_API_URL); boards.start();
+const boards = new PublicBoards(store, resolve(dirname(databasePath), 'public-boards'), process.env.BOT_GITHUB_API_URL, undefined, {
+  cooldownMs: publicBoardCooldownMs,
+  reconcileMs: publicBoardReconcileMs,
+}); boards.start();
 const integrations = new IntegrationChecker(store, process.env.BOT_GITHUB_API_URL || undefined);
 const releases = new ReleaseService(store, process.env.BOT_GITHUB_API_URL); releases.start();
 const actionsFailures = new ActionsFailures(store, process.env.BOT_GITHUB_API_URL); actionsFailures.start();

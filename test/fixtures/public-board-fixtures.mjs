@@ -9,7 +9,8 @@ import { PublicBoards } from '../../dist/public-board/service.js';
 import { commitInstallationProjection } from '../../dist/installations/projection.js';
 
 const privateKey = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' });
-export async function publicBoardFixture(t, collector) {
+export async function publicBoardFixture(t, collector, options = {}) {
+  const boardOptions = { cooldownMs: 0, ...options };
   // extraRuns, jobs (by run id), checkRuns (by check suite id), artifacts (by run id) and blobs (by artifact id): what
   // a test adds to the one CI run every fixture repository has, such as scheduled runs and the results they report.
   const state = { stars: 1, private: false, requests: [], tokens: 0, revoked: 0, fail: false, runs: true,
@@ -53,7 +54,7 @@ export async function publicBoardFixture(t, collector) {
   const directory = mkdtempSync(join(tmpdir(), 'public-boards-'));
   let boards;
   const h = await harness(t, undefined, store => ({ githubUrl: api,
-    boards: boards = new PublicBoards(store, directory, api, collector) }));
+    boards: boards = new PublicBoards(store, directory, api, collector, boardOptions) }));
   const stop = h.stop; h.stop = async () => { await boards.close(); await stop(); };
   // A service restart preserves snapshots; remove them only when the entire test finishes.
   t.after(() => rmSync(directory, { recursive: true, force: true }));

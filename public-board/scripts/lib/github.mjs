@@ -109,7 +109,7 @@ export class GitHubClient {
    * Iterate paginated results following the `Link` header.
    * Returns `{ items, truncated }`.
    */
-  async paginate(path, { maxPages = 20, perPage = 100, allow403 = false } = {}) {
+  async paginate(path, { maxPages = 20, perPage = 100, allow403 = false, stopWhen } = {}) {
     const items = []
     let url = `${path}${path.includes('?') ? '&' : '?'}per_page=${perPage}`
     let page = 0
@@ -126,6 +126,7 @@ export class GitHubClient {
       const batch = await res.json()
       if (!Array.isArray(batch)) break
       items.push(...batch)
+      if (stopWhen && stopWhen(batch)) break
       url = links(res.headers.get('link')).next
     }
 

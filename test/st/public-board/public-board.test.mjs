@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { credentialExamples, maskedExamples } from '../../fixtures/public-credentials.mjs';
-import { readFile, readdir, mkdir, writeFile } from 'node:fs/promises';
+import { readFile, readdir, mkdir, stat, writeFile } from 'node:fs/promises';
 import { calendarRuns, publicBoardFixture } from '../../fixtures/public-board-fixtures.mjs';
 import { PublicBoards } from '../../../dist/public-board/service.js';
 import { testPassword } from '../../fixtures/helpers.mjs';
@@ -280,4 +280,90 @@ test('collecting again after the upgrade removes what the gate, coverage and E2E
     }
   }
   assert.equal((await get('/boards/octo/hello/data/snapshot.json')).data.schema_version, 5);
+});
+
+test('noise events are filtered, cooldown coalesces repeated webhooks, and unchanged shards reuse hard links until credentials rotate', async t => {
+  let clock = 10_000_000;
+  const finalized = [];
+  let runCount = 0;
+  const rotatedSecret = 'newly_registered_model_secret_987654321';
+  const { h, boards, admin, hook, get } = await publicBoardFixture(t, async input => {
+    runCount++;
+    await mkdir(input.directory + '/board/data/history/records/issues', { recursive: true });
+    await writeFile(input.directory + '/board/data/snapshot.json', JSON.stringify({
+      repository: { name: input.repository.full_name },
+      run: runCount,
+      scopes: input.dirtyScopes,
+    }));
+    await writeFile(input.directory + '/summary.json', JSON.stringify({ fullName: input.repository.full_name, run: runCount }));
+    // Only write the historical shard on run 1; later runs inherit it via hard link.
+    if (runCount === 1) {
+      await writeFile(input.directory + '/board/data/history/records/issues/000000000000.json', JSON.stringify({
+        '1': { body: `historical shard mentioning ${rotatedSecret}` },
+      }));
+    }
+  }, {
+    cooldownMs: 5 * 60_000,
+    now: () => clock,
+    onFinalized: info => finalized.push(info),
+  });
+
+  // Noise events never enqueue a job.
+  for (const [id, event] of [['n1', 'check_run'], ['n2', 'status'], ['n3', 'workflow_job'], ['n4', 'deployment_status']]) {
+    assert.equal((await hook(id, { 'X-GitHub-Event': event })).status, 200);
+  }
+  assert.equal(h.store.get('SELECT count(*) n FROM public_board_jobs').n, 0);
+
+  // First real webhook runs immediately (active_path IS NULL), even with a 5-minute cooldown configured.
+  assert.equal((await hook('first-issue', { 'X-GitHub-Event': 'issues' })).status, 200);
+  await boards.drain();
+  assert.equal(runCount, 1);
+  assert.equal(finalized.length, 1);
+  assert.equal(finalized[0].fullRedaction, true);
+  const firstActive = h.store.get('SELECT active_path FROM public_board_jobs').active_path;
+  const firstShardStat = await stat(firstActive + '/board/data/history/records/issues/000000000000.json');
+
+  // Webhooks within the 5-minute cooldown coalesce and do not trigger collection early.
+  clock += 30_000;
+  assert.equal((await hook('pr-1', { 'X-GitHub-Event': 'pull_request' })).status, 200);
+  clock += 30_000;
+  assert.equal((await hook('issue-2', { 'X-GitHub-Event': 'issues' })).status, 200);
+  await boards.drain();
+  assert.equal(runCount, 1, 'drain within cooldown window performs no collection');
+
+  // Advancing past cooldown runs a single coalesced collection with merged scopes and hard-linked untouched shard.
+  clock = 10_000_000 + 5 * 60_000;
+  await boards.drain();
+  assert.equal(runCount, 2);
+  assert.equal(finalized.length, 2);
+  assert.equal(finalized[1].fullRedaction, false);
+  assert.equal(finalized[1].result.reusedFiles, 1, 'unchanged historical shard skipped re-redaction');
+  const secondActive = h.store.get('SELECT active_path FROM public_board_jobs').active_path;
+  const secondShardStat = await stat(secondActive + '/board/data/history/records/issues/000000000000.json');
+  assert.equal(secondShardStat.ino, firstShardStat.ino, 'unchanged historical shard shares inode via hard link');
+  assert.deepEqual((await get('/boards/octo/hello/data/snapshot.json')).data.scopes, ['issues', 'pulls']);
+
+  // Adding a new deployment credential immediately protects live reads AND forces full re-redaction on next build.
+  const modelId = 'm'.repeat(48);
+  h.store.run(
+    `INSERT INTO models(id,repository_id,api_url,model_name,api_key,version,updated_at) VALUES(?,NULL,'https://api.example','gpt',?,1,?)`,
+    modelId, h.store.secrets.seal({ value: rotatedSecret }, `model:${modelId}`), new Date().toISOString(),
+  );
+  // Before the next collection runs, HTTP serve detects the fingerprint mismatch and redacts live.
+  const liveShard = (await get('/boards/octo/hello/data/history/records/issues/000000000000.json')).data;
+  assert.equal(liveShard['1'].body, 'historical shard mentioning [REDACTED]');
+
+  // Manual board enable bypasses cooldown immediately and re-redacts the historical shard off the main thread.
+  clock += 5_000;
+  assert.equal((await admin('/api/installations/101/board', 'PATCH', { enabled: true })).status, 200);
+  await boards.drain();
+  assert.equal(runCount, 3);
+  assert.equal(finalized[2].fullRedaction, true);
+  assert.equal(finalized[2].result.rewrittenFiles, 1);
+  const thirdActive = h.store.get('SELECT active_path FROM public_board_jobs').active_path;
+  const thirdDisk = JSON.parse(await readFile(thirdActive + '/board/data/history/records/issues/000000000000.json', 'utf8'));
+  assert.equal(thirdDisk['1'].body, 'historical shard mentioning [REDACTED]');
+  // The previous snapshot remains immutable on disk during its 60s concurrent-read grace period.
+  const secondDisk = JSON.parse(await readFile(secondActive + '/board/data/history/records/issues/000000000000.json', 'utf8'));
+  assert.equal(secondDisk['1'].body, `historical shard mentioning ${rotatedSecret}`);
 });
