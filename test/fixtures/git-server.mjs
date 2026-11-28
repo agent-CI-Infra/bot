@@ -6,10 +6,21 @@ import { spawn, execFileSync } from 'node:child_process';
 // installation token as GitHub expects it; `requests` records each one so tests can tell whether GitHub was contacted.
 // version0 drops the client's protocol request, so the server answers in protocol v0, which refuses unadvertised commits.
 export async function gitServer(t, root, token, { version0 = false } = {}) {
-  const requests = [], expected = 'Basic ' + Buffer.from('x-access-token:' + token).toString('base64');
+  const requests = [];
+  const checkAuth = typeof token === 'function'
+    ? auth => {
+        if (!auth.startsWith('Basic ')) return false;
+        const decoded = Buffer.from(auth.slice(6), 'base64').toString('utf8');
+        const sep = decoded.indexOf(':');
+        return sep >= 0 && decoded.slice(0, sep) === 'x-access-token' && Boolean(token(decoded.slice(sep + 1)));
+      }
+    : (() => {
+        const expected = 'Basic ' + Buffer.from('x-access-token:' + token).toString('base64');
+        return auth => auth === expected;
+      })();
   const server = createServer((req, res) => {
     const url = new URL(req.url, 'http://git'); requests.push({ method: req.method, path: url.pathname + url.search });
-    if (req.headers.authorization !== expected) { res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="fixture"' }); res.end(); return; }
+    if (!checkAuth(String(req.headers.authorization || ''))) { res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="fixture"' }); res.end(); return; }
     const child = spawn('git', ['http-backend'], { env: { PATH: process.env.PATH, GIT_PROJECT_ROOT: root, GIT_HTTP_EXPORT_ALL: '1', PATH_INFO: url.pathname,
       QUERY_STRING: url.search.slice(1), REQUEST_METHOD: req.method, CONTENT_TYPE: req.headers['content-type'] || '', REMOTE_USER: 'fixture', REMOTE_ADDR: '127.0.0.1',
       HTTP_GIT_PROTOCOL: version0 ? '' : req.headers['git-protocol'] || '', HTTP_CONTENT_ENCODING: req.headers['content-encoding'] || '', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });

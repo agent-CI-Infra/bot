@@ -130,6 +130,7 @@ export async function deterministicCandidateIssues(store: Store, task: Row, work
         conflictResolved: Boolean(content.conflict_resolved),
         rebased: Boolean(content.rebase),
         integration: Boolean(content.integration),
+        commitAncestryVerified: Boolean(content.commit_ancestry_verified),
       });
       if (drift.drifted) {
         const branchNote = content.base_branch ? ` on branch '${content.base_branch}'` : '';
@@ -278,10 +279,30 @@ async function evaluateCandidate(store: Store, task: Row, workspace: Workspace, 
       // candidate's tree (#1121 review): another role or a resumed run may have changed it since the submission. A runner
       // without the tree operation leaves it unknown, and the result is recorded as before.
       const expected = String((snapshot as any)?.tree_sha || sourceTree || '');
-      const live = await verification.call(`accept:${evaluationId}:tree`, { type: 'workspace_tree' }).catch(() => null);
-      const tested = typeof live?.tree_sha === 'string' && /^[0-9a-f]{40,64}$/.test(live.tree_sha) ? live.tree_sha : null;
-      if (expected && tested && tested !== expected) {
-        const gap = `The shared task workspace changed after this candidate was submitted (candidate tree ${expected.slice(0, 12)}, workspace tree ${tested.slice(0, 12)}), so the project check \`${required}\` cannot certify it. Submit the delivery again from the current workspace, or restore the candidate's files first.`;
+      const pushedHeadSha = Boolean((snapshot as any)?.commit_ancestry_verified) && typeof (snapshot as any)?.head_sha === 'string' && /^[0-9a-f]{40}$/i.test((snapshot as any).head_sha)
+        ? String((snapshot as any).head_sha).toLowerCase()
+        : null;
+      let tested: string | null = null;
+      let workspaceDrifted = false;
+      if (pushedHeadSha) {
+        // For a pushed Git commit candidate, verify HEAD, committed tree, and tracked cleanliness via workspace_git_inspect
+        // so untracked workspace artifacts (e.g. screenshots for hosted PR media) do not falsely invalidate the commit.
+        const inspect = await verification.call(`accept:${evaluationId}:inspect`, { type: 'workspace_git_inspect' }).catch(() => null);
+        const liveHead = typeof inspect?.head_sha === 'string' && /^[0-9a-f]{40}$/i.test(inspect.head_sha) ? inspect.head_sha.toLowerCase() : null;
+        const liveTree = typeof inspect?.tree_sha === 'string' && /^[0-9a-f]{40,64}$/i.test(inspect.tree_sha) ? inspect.tree_sha.toLowerCase() : null;
+        const dirtyTracked = Array.isArray(inspect?.tracked_dirty_files) ? inspect.tracked_dirty_files : [];
+        const unmerged = Array.isArray(inspect?.unmerged_files) ? inspect.unmerged_files : [];
+        tested = liveTree;
+        if (liveHead && (liveHead !== pushedHeadSha || (expected && liveTree && liveTree !== expected) || dirtyTracked.length > 0 || unmerged.length > 0)) {
+          workspaceDrifted = true;
+        }
+      } else {
+        const live = await verification.call(`accept:${evaluationId}:tree`, { type: 'workspace_tree' }).catch(() => null);
+        tested = typeof live?.tree_sha === 'string' && /^[0-9a-f]{40,64}$/.test(live.tree_sha) ? live.tree_sha : null;
+        if (expected && tested && tested !== expected) workspaceDrifted = true;
+      }
+      if (workspaceDrifted) {
+        const gap = `The shared task workspace changed after this candidate was submitted (candidate tree ${expected.slice(0, 12)}, workspace tree ${(tested || 'dirty').slice(0, 12)}), so the project check \`${required}\` cannot certify it. Submit the delivery again from the current workspace, or restore the candidate's files first.`;
         records.history(task.id, 'acceptance_evidence', { evaluation_id: evaluationId, name: 'policy_validation', version: tested, candidate_version: expected, command: required, skipped: 'workspace_changed' });
         const verdict: Verdict = { pass: false, issues: [gap], outcome: 'return', reason: 'The workspace no longer holds the submitted candidate', gaps: [gap], residuals: [], core_complete: false, required_evidence_complete: false, acceptable_risk: true };
         records.history(task.id, 'acceptance_evaluated', { evaluation_id: evaluationId, candidate_id: candidate.id, elapsed_ms: Date.now() - start, verdict, method: 'deterministic_policy' }, verificationRun?.id);

@@ -166,6 +166,38 @@ export class GitCache {
     const run = await this.git(['cat-file', 'blob', sha], { cwd: this.path(repository) }).catch(() => null);
     return run?.code === 0 ? run.stdout : null;
   }
+  // Commits currently pinned in the control-plane mirror (newest first) so container pack exports omit shared history.
+  async haveCommits(repository: string, maxCount = 500): Promise<string[]> {
+    const dir = this.path(repository);
+    if (!await access(join(dir, 'HEAD')).then(() => true, () => false)) return [];
+    const run = await this.git(['for-each-ref', '--sort=-committerdate', `--count=${Math.max(1, Math.min(512, maxCount))}`, '--format=%(objectname)', 'refs/bot/commits/'], { cwd: dir }).catch(() => null);
+    if (!run || run.code !== 0) return [];
+    return run.stdout.toString('utf8').split('\n').map(s => s.trim()).filter(s => objectId.test(s));
+  }
+  // Path to the mirror's objects directory when initialized, for read-only alternates during push staging.
+  async mirrorObjectsDir(repository: string): Promise<string | null> {
+    const dir = this.path(repository);
+    return await access(join(dir, 'HEAD')).then(() => join(dir, 'objects'), () => null);
+  }
+  // Imports a verified, already-pushed commit from an isolated staging repository into the shared mirror and pins it.
+  async pinFromStage(repository: string, stageDir: string, commitSha: string): Promise<boolean> {
+    if (!objectId.test(commitSha)) return false;
+    try {
+      return await this.serial(repository, async () => {
+        const dir = this.path(repository);
+        await this.ensure(dir);
+        if (!await this.hasCommit(dir, commitSha)) {
+          const run = await this.git(['fetch', '--no-tags', '--no-write-fetch-head', '--quiet', '--', stageDir, `+${commitSha}:refs/bot/commits/${commitSha}`], { cwd: dir });
+          if (run.code !== 0) return false;
+        } else {
+          await this.checked(['update-ref', 'refs/bot/commits/' + commitSha, commitSha], dir);
+        }
+        return this.hasCommit(dir, commitSha);
+      });
+    } catch {
+      return false;
+    }
+  }
   // Exports a fixed commit's tree as a compressed tar.gz archive (no .git directory or remote config).
   // Streams stdout with an optional hard byte cap so oversized repositories never fill the control-plane volume.
   // Written to a temporary file next to the cache; the caller removes it.

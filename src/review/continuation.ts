@@ -95,7 +95,7 @@ export function developmentContinuationContext(input: any, head: string, resumed
       + `${resumed ? ' (earlier in this conversation)' : ', summarized in previous_delivery'}`
       + ` and continues as round ${Number(input.round || 2)} with the new events (trigger, merged_updates, wake_events, revision_requests, or conflict_resolution).`
       + `${moved ? ' The remote PR head moved since the previous round (see changed_since); inspect those commits so human changes are preserved.' : ''}`
-      + ' Reuse the aligned task workspace and live PR facts in ../context/, address the new feedback/failures/conflicts without regressing earlier work, and deliver via open_pull_request (to update the same PR) or submit_report (when no code edit is needed, such as a pure comment/reply or actions rerun).',
+      + ' Reuse the aligned task workspace and live PR facts in ../context/, address the new feedback/failures/conflicts without regressing earlier work, and deliver by committing cleanly, calling push_bot_branch, updating the bot PR body via github_write PATCH /pulls/{n} whenever progress brings meaningful changes (using comments for stage updates and replies), and finishing with submit_report — or use open_pull_request fallback, or submit_report directly when no code edit is needed (such as a pure comment/reply or actions rerun). Never cite unpushed local commit SHAs.',
   };
 }
 

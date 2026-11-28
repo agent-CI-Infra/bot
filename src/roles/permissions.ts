@@ -49,7 +49,7 @@ export const basicTools = ['read_file','read_version_file','compare_versions','w
   // An Issue development's milestones on the Issue's status comment (#1047), written by the control plane.
   'report_development_milestone',
   // Delivery tools of generic tasks (#814): offered by the writes the task was granted, checked again at every call.
-  'submit_report','open_pull_request','post_review',
+  'submit_report','push_bot_branch','open_pull_request','post_review',
   // The task's own workspace choice (#769): which worktree of the project computer it works in. They read and write no
   // files themselves, so they need no computer permission.
   'list_workspaces','use_workspace','create_workspace',

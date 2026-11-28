@@ -112,6 +112,7 @@ export const codeActions: Record<string,string> = {
   delivery_refused:'执行者多次调用了这个任务现在不能用的交付工具（没有授权、项目上限或开关、来源上限），什么都没写；点「重试」重新执行，或由 Manager 用 grant_writes 授予后再重试。',
   conflict_not_integrated:'执行者在解决 PR 合并冲突时多次提交了未真正合并目标分支变更或仍含冲突标记的工作区树，什么都没写；点「重试」重新执行并完成分支合并与测试验证。',
   workspace_head_drifted:'执行期间工作区 HEAD 脱离了控制面记录的发布基线（例如手动执行了 git checkout 切换分支），为防止发出跨分支全量差异 PR 已拦截；请恢复到任务基线或按目标分支新建任务后重试。',
+  unpushed_workspace_changes:'执行者在调用 push_bot_branch 之后又改动了工作区已跟踪文件或切换了提交，尚未推送便尝试结束交付；为防止后续改动被静默丢弃已拦截，请提交并重新推送（或清理未打算提交的改动）后重试。',
   task_external_write_forbidden:'创建或委派这个任务的角色（或群的档位）没有要做的这项写入，不能借给任务；由项目管理员调整来源的权限，或改为交报告。',
   delivery_not_granted:'这个任务没有被授予要做的交付（例如开 PR），什么都没写。需要时由 Manager 用 grant_writes 或在任务详情里授予，再点「重试」；不需要时可以取消。',
   pull_request_labels_refused:'模型多次给 PR 选了仓库里没有或保留的标签；点「重试」重新执行，必要时在仓库的贡献规则或 skill 里写清要用的标签。',

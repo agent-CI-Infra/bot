@@ -4,6 +4,7 @@ import { loadDevelopmentCandidate, stripPublishedCandidateBodies } from '../stor
 import { stop, sha, type Redactor } from '../agent/common.js';
 import { GitHub } from '../github/client.js';
 import { Publisher } from '../github/publisher.js';
+import type { GitCache } from '../agent/git-cache.js';
 import { changedWorkflowPaths, isWorkflowPath, type CandidateFileEntry } from '../github/workflow-changes.js';
 import { pullRequestSummaryForProgress } from '../github/pull-request-media.js';
 import { roleConfiguration } from '../roles/definition.js';
@@ -135,7 +136,7 @@ export function requestPolicyHash(store: Store, task: Row): string {
   return sha(String(store.get('SELECT test_command FROM policies WHERE repository_id=?', task.repository_id)?.test_command || ''));
 }
 
-export async function publishRequestPullRequest(store: Store, task: Row, redactor: Redactor, guard: () => Promise<void>, log: (value: any) => void, apiUrl?: string) {
+export async function publishRequestPullRequest(store: Store, task: Row, redactor: Redactor, guard: () => Promise<void>, log: (value: any) => void, apiUrl?: string, gitCache?: GitCache) {
   const validate = async () => { await guard(); check(); };
   const check = () => {
     assertRequestPullRequest(store, task);
@@ -166,7 +167,7 @@ export async function publishRequestPullRequest(store: Store, task: Row, redacto
   try {
     const candidate = loadDevelopmentCandidate(store, String(task.id))!;
     await github.connect(true, undefined, pullRequestPermissions(candidate));
-    const publisher = new Publisher(store, github, task, validate, undefined, log);
+    const publisher = new Publisher(store, github, task, validate, undefined, log, undefined, undefined, gitCache);
     const commit = await publisher.branch(candidate);
     const pr = await publisher.pullRequest(candidate, commit);
     await validate();

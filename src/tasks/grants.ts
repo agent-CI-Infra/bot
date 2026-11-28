@@ -23,7 +23,8 @@ export const grantCatalog: GrantDefinition[] = [
 ];
 export const grantIds = grantCatalog.map(grant => grant.id);
 /** The write a delivery tool needs, or undefined for tools that grants do not govern. */
-export const toolGrant = (tool: string) => grantCatalog.find(grant => grant.tool === tool)?.id;
+export const toolGrant = (tool: string) =>
+  tool === 'push_bot_branch' ? 'pull_request' : grantCatalog.find(grant => grant.tool === tool)?.id;
 
 export function grantStorage(store: Store) {
   store.db.exec(`CREATE TABLE IF NOT EXISTS task_write_grants(task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,

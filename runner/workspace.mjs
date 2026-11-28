@@ -2,7 +2,7 @@ import { cp,mkdir,readFile,writeFile,open,realpath,symlink,unlink,readlink,chmod
 import { constants } from 'node:fs';
 import { resolve,dirname,sep } from 'node:path';
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
 import { command,environment,operationTag,workspaceTag } from './command.mjs';
 import { outputLimit } from './command-output.mjs';
@@ -70,6 +70,35 @@ async function changedFiles(dir){
   const tracked=names(await storeGit(['diff','--name-only','-z','HEAD'],{cwd:dir})),untracked=names(await storeGit(['ls-files','-z','--others','--exclude-standard'],{cwd:dir}));
   return [...new Set([...tracked,...untracked])];
 }
+// Ensures the local repository/worktree config has user.name and user.email set so native `git commit`, `git merge`,
+// and `git rebase` work under GIT_CONFIG_GLOBAL=/dev/null + GIT_CONFIG_NOSYSTEM=1 across all harnesses.
+// Shared worktrees share `/workspace/git/repo.git/config`, so retry briefly on transient config.lock contention.
+async function ensureGitAuthor(dir, email) {
+  const desiredName = 'Department Bot';
+  const desiredEmail = (typeof email === 'string' && email.trim()) ? email.trim() : 'department-bot@invalid.local';
+  const currentName = await storeGit(['config', '--get', 'user.name'], { cwd: dir }).then(b => b.toString().trim(), () => '');
+  const currentEmail = await storeGit(['config', '--get', 'user.email'], { cwd: dir }).then(b => b.toString().trim(), () => '');
+  const setConfig = async (key, value) => {
+    for (let attempt = 1; attempt <= 6; attempt++) {
+      try {
+        await storeGit(['config', key, value], { cwd: dir });
+        return;
+      } catch (error) {
+        const msg = String(error?.message || '');
+        if (attempt < 6 && /could not lock config file|File exists|Unable to create .*config\.lock/i.test(msg)) {
+          await new Promise(resolve => setTimeout(resolve, attempt * 50));
+          continue;
+        }
+        throw error;
+      }
+    }
+  };
+  if (!currentName) await setConfig('user.name', desiredName);
+  if (!currentEmail || (desiredEmail !== 'department-bot@invalid.local' && currentEmail === 'department-bot@invalid.local')) {
+    await setConfig('user.email', desiredEmail);
+  }
+}
+
 // A worktree's state as a handover checks it, or as list_workspaces shows it.
 async function worktreeState(dir){
   const head=(await storeGit(['rev-parse','HEAD'],{cwd:dir})).toString().trim(),tree=(await storeGit(['rev-parse','HEAD^{tree}'],{cwd:dir})).toString().trim();
@@ -155,15 +184,36 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
   const author=await readFile(authorFile,'utf8').then(JSON.parse).catch(()=>({email:'department-bot@invalid.local'}));
   // Snapshot plumbing has no command timeout or execFile output cap. Large cat-file output goes to disk.
   // The model's shell command timeout is still controlled by command().
-  const git=(args,data,output)=>new Promise((res,rej)=>{
+  const git=(args,data,output,extraEnv)=>new Promise((res,rej)=>{
     const chunks=[],errors=[],child=spawn('git',['-c','core.hooksPath=/dev/null','-c','core.fsmonitor=false','-c','commit.gpgsign=false',...args],
-      {cwd:repo,env:{...environment,...operationTag(input.operation_id),...workspaceTag(input.workspace_id),GIT_AUTHOR_NAME:'Department Bot',GIT_AUTHOR_EMAIL:author.email,GIT_COMMITTER_NAME:'Department Bot',GIT_COMMITTER_EMAIL:author.email},stdio:['pipe',output?.fd??'pipe','pipe']});
+      {cwd:repo,env:{...environment,...operationTag(input.operation_id),...workspaceTag(input.workspace_id),GIT_AUTHOR_NAME:'Department Bot',GIT_AUTHOR_EMAIL:author.email,GIT_COMMITTER_NAME:'Department Bot',GIT_COMMITTER_EMAIL:author.email,...extraEnv},stdio:['pipe',output?.fd??'pipe','pipe']});
     child.stdout?.on('data',chunk=>chunks.push(chunk));
     let errorBytes=0;child.stderr.on('data',chunk=>{if(errorBytes<8000)errors.push(chunk.subarray(0,8000-errorBytes));errorBytes+=chunk.length;});
     child.on('error',()=>rej(new Error(`git ${args[0]} could not start`)));
     child.on('close',(code,signal)=>code===0?res(Buffer.concat(chunks)):rej(new Error(`git ${args[0]} failed: ${signal||code}; ${Buffer.concat(errors).toString('utf8').trim()}`)));
     child.stdin.on('error',()=>{});child.stdin.end(data);
   });
+  // Snapshots the full working tree using a temporary GIT_INDEX_FILE so workspace_tree, workspace_finalize, and
+  // workspace_verify_merge never mutate the live .git/index (preserving untracked files and the agent's staging state).
+  const snapshotWorkingTree=async()=>{
+    const indexPath=(await git(['rev-parse','--git-path','index'])).toString().trim();
+    const absIndex=resolve(repo,indexPath);
+    const idxInfo=await lstat(absIndex).catch(()=>null);
+    if(idxInfo&&!idxInfo.isFile()){
+      // Corrupted non-file index (e.g. a directory): invoke git directly so git's exact stderr is surfaced.
+      await git(['add','--all']);
+      return (await git(['write-tree'])).toString().trim();
+    }
+    const tmpIndex=root+'/.snapshot-index-'+randomBytes(8).toString('hex');
+    try{
+      if(idxInfo)await cp(absIndex,tmpIndex);
+      const idxEnv={GIT_INDEX_FILE:tmpIndex};
+      await git(['add','--all'],undefined,undefined,idxEnv);
+      return (await git(['write-tree'],undefined,undefined,idxEnv)).toString().trim();
+    }finally{
+      await rm(tmpIndex,{force:true}).catch(()=>{});
+    }
+  };
   // Before an operation writes the worktree's index or HEAD, the locks a git process that ended abnormally left there are
   // removed and named in the result; while a git process works on the worktree the operation stops as busy, and the
   // control plane retries it (#712).
@@ -195,6 +245,7 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     if(current!==input.sha){await rm(repo,{recursive:true,force:true});await storeGit(['worktree','prune'],{cwd:gitRoot+'/repo.git'}).catch(()=>{});await storeGit(['worktree','add','--detach','--force',repo,input.sha],{cwd:gitRoot+'/repo.git'});}
     const tree=(await storeGit(['rev-parse','HEAD^{tree}'],{cwd:repo})).toString().trim(),head=(await storeGit(['rev-parse','HEAD'],{cwd:repo})).toString().trim();
     if(tree!==input.tree_sha)throw new Error(`checkout_tree_mismatch: expected ${input.tree_sha}, actual ${tree}`);
+    await ensureGitAuthor(repo,input.author_email||author.email);
     return {tree_sha:tree,local_sha:head};
   }
   // The computer's worktrees as list_workspaces shows them (#769): HEAD, its tree and the changed files of each, and when
@@ -248,6 +299,7 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     if(state.head!==input.sha||state.tree_sha!==input.tree_sha)return {refused:'workspace_mismatch',...state};
     if(state.changed_count&&input.on_changes!=='keep_changes')return {refused:'workspace_dirty',...state};
     await mkdir(root,{recursive:true});await linkNotes();await writeAuthor(input.author_email);
+    await ensureGitAuthor(target,input.author_email||author.email);
     await dropCheckout();await symlink(target,repo);
     if(source&&await stat(source+'/context').then(s=>s.isDirectory(),()=>false))await cp(source+'/context',context,{recursive:true,dereference:false});
     // The handover counts as activity of the worktree: the cleanup leaves a worktree alone that was used since it listed it.
@@ -392,11 +444,12 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     }
     const tree=(await git(['write-tree'])).toString().trim();if(tree!==input.tree_sha)throw new Error(`snapshot_tree_mismatch: expected ${input.tree_sha}, actual ${tree}`);
     const commit=(await git(['commit-tree',tree],Buffer.from('Prepare repository snapshot\n'))).toString().trim();await git(['update-ref','refs/heads/bot-local',commit]);
+    await ensureGitAuthor(repo,author.email);
     return {tree_sha:tree,local_sha:commit,...unlocked};
   }
   // The tree a finalize would record now, without a commit or a ref (#1121 review): acceptance compares it with the submitted
   // candidate's tree before the project's test_command runs in this shared workspace.
-  if(input.type==='workspace_tree')return withWorkspaceLock(root+'/finalize.lock',async()=>{const unlocked=await unlock();await git(['add','--all']);return {tree_sha:(await git(['write-tree'])).toString().trim(),...unlocked};});
+  if(input.type==='workspace_tree')return withWorkspaceLock(root+'/finalize.lock',async()=>{const unlocked=await unlock();return {tree_sha:await snapshotWorkingTree(),...unlocked};});
   if(input.type==='workspace_source'){
     const local_sha=(await git(['rev-parse','HEAD'])).toString().trim(),tree_sha=(await git(['rev-parse','HEAD^{tree}'])).toString().trim();
     if(input.tree_sha&&tree_sha!==input.tree_sha)throw new Error('source_snapshot_changed');return {local_sha,tree_sha};
@@ -546,8 +599,7 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
       const unlocked=await unlock();
       const unmerged=(await git(['diff','--name-only','--diff-filter=U','-z'])).toString().split('\0').filter(Boolean);
       if(unmerged.length)return {ok:false,reason:'unmerged_index',files:unmerged.slice(0,50),...unlocked};
-      await git(['add','--all']);
-      const candidateTree=(await git(['write-tree'])).toString().trim();
+      const candidateTree=await snapshotWorkingTree();
       const resolveRef=async ref=>{
         const resolved=await git(['rev-parse','--verify','--quiet',ref+'^{commit}']).then(b=>b.toString().trim(),()=>'');
         return /^[a-f0-9]{40}$/.test(resolved)?resolved:null;
@@ -600,6 +652,27 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
         }
       }
       if(markerFiles.length)return {ok:false,reason:'conflict_markers_present',files:markerFiles.slice(0,50),candidate_tree:candidateTree,...unlocked};
+      if(!alreadyAncestor&&!prAlreadyInBase&&!gitMerged&&!rebased){
+        const lca=await git(['merge-base',baseCommit,prCommit]).then(b=>b.toString().trim(),()=>'');
+        if(!/^[a-f0-9]{40}$/.test(lca)){
+          return {ok:false,reason:'base_not_integrated',files:[],candidate_tree:candidateTree,git_merged:false,rebased:false,...unlocked};
+        }
+        const lcaMap=await treeMap(lca);
+        const missingBase=[];
+        const baseChanged=[];
+        for(const name of new Set([...bMap.keys(),...lcaMap.keys()])){
+          const bVal=bMap.get(name),lVal=lcaMap.get(name);
+          if(bVal===lVal)continue;
+          baseChanged.push(name);
+          if(pMap.get(name)===lVal&&cMap.get(name)!==bVal)missingBase.push(name);
+        }
+        if(missingBase.length){
+          return {ok:false,reason:'base_not_integrated',files:missingBase.slice(0,50),candidate_tree:candidateTree,git_merged:false,rebased:false,...unlocked};
+        }
+        if(baseChanged.length&&baseChanged.every(name=>cMap.get(name)===pMap.get(name))){
+          return {ok:false,reason:'base_not_integrated',files:baseChanged.slice(0,50),candidate_tree:candidateTree,git_merged:false,rebased:false,...unlocked};
+        }
+      }
       return {ok:true,candidate_tree:candidateTree,git_merged:gitMerged,rebased,...unlocked};
     });
   }
@@ -637,9 +710,69 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
   if(input.type==='workspace_export')return exportFile(await path(input.path));
   // secret_env comes only from the agent process in this container; the manager forwards no such field.
   if(input.type==='workspace_command')return command(input.command,repo,input.timeout_ms,{outputFile:input.output_file,keepBackground:input.keep_background===true,secretEnv:input.secret_env,workspaceId:input.workspace_id,operationId:input.operation_id,backgroundDirectory:root+'/logs',onOutput:input._onOutput,onSpawn:input._onSpawn,sshEnv:input._sshEnv});
+  if(input.type==='workspace_git_inspect')return withWorkspaceLock(root+'/finalize.lock',async()=>{
+    const unlocked=await unlock();
+    const ref=input.ref===undefined?'HEAD':String(input.ref).trim();
+    if(!ref||ref.length>256||ref.startsWith('-')||/[\0\r\n\s]/.test(ref))throw new Error('invalid_git_ref');
+    const headSha=(await git(['rev-parse','--verify','--quiet','--end-of-options',ref+'^{commit}'])).toString().trim();
+    if(!/^[a-f0-9]{40}$/.test(headSha))throw new Error('git_commit_not_found');
+    const treeSha=(await git(['rev-parse','--verify','--quiet',headSha+'^{tree}'])).toString().trim();
+    const parents=(await git(['rev-list','--parents','-n','1',headSha])).toString().trim().split(/\s+/).slice(1);
+    const subject=(await git(['show','-s','--format=%s',headSha])).toString().trim();
+    const unmerged=names(await git(['diff','--name-only','--diff-filter=U','-z']));
+    const dirtyWorking=names(await git(['diff','--name-only','-z','HEAD']));
+    const dirtyIndex=names(await git(['diff','--cached','--name-only','-z','HEAD']));
+    const trackedDirty=[...new Set([...dirtyWorking,...dirtyIndex])];
+    const untracked=names(await git(['ls-files','-z','--others','--exclude-standard']));
+    const isWorktree=await stat(repo+'/.git').then(s=>s.isFile(),()=>false);
+    return {
+      head_sha:headSha,
+      tree_sha:treeSha,
+      parents,
+      subject,
+      unmerged_files:unmerged.slice(0,200),
+      tracked_dirty_files:trackedDirty.slice(0,200),
+      untracked_files:untracked.slice(0,200),
+      untracked_count:untracked.length,
+      is_worktree:isWorktree,
+      ...unlocked,
+    };
+  });
+  if(input.type==='workspace_git_export_pack'){
+    if(!/^[a-f0-9]{40}$/.test(input.sha||'')||!id48.test(input.pack_id||'')||!Number.isSafeInteger(input.offset)||input.offset<0)throw new Error('invalid_git_export');
+    const maxPackBytes=128*1024*1024;
+    const out=root+'/.git-export-'+input.pack_id;
+    if(input.offset===0){
+      await git(['cat-file','-e',input.sha+'^{commit}']);
+      const haves=Array.isArray(input.have_commits)?input.have_commits.filter(s=>typeof s==='string'&&/^[a-f0-9]{40}$/.test(s)).slice(0,512):[];
+      let present=[];
+      if(haves.length){
+        const checked=(await git(['cat-file','--batch-check=%(objectname) %(objecttype)'],Buffer.from(haves.join('\n')+'\n'))).toString();
+        present=checked.split('\n').filter(line=>line.endsWith(' commit')).map(line=>line.split(' ')[0]);
+      }
+      const revs=[input.sha,...present.map(s=>'^'+s)].join('\n')+'\n';
+      const handle=await open(out,constants.O_WRONLY|constants.O_CREAT|constants.O_TRUNC|constants.O_NOFOLLOW,0o600);
+      let createdSize=0;
+      try{
+        await git(['pack-objects','--revs','--thin','--stdout','-q'],Buffer.from(revs),handle);
+        createdSize=(await handle.stat()).size;
+      }
+      catch(error){await rm(out,{force:true}).catch(()=>{});throw error;}
+      finally{await handle.close();}
+      if(createdSize>maxPackBytes){await rm(out,{force:true}).catch(()=>{});throw new Error('git_export_pack_too_large');}
+    }
+    const handle=await open(out,constants.O_RDONLY|constants.O_NOFOLLOW);
+    try{
+      const chunkLimit=Number.isSafeInteger(input.limit)&&input.limit>=1?Math.min(input.limit,4*1024*1024):45000;
+      const size=(await handle.stat()).size,buffer=Buffer.alloc(Math.max(0,Math.min(chunkLimit,size-input.offset)));
+      const {bytesRead}=await handle.read(buffer,0,buffer.length,input.offset),next=input.offset+bytesRead;
+      if(next>=size)await rm(out,{force:true}).catch(()=>{});
+      return {base64:buffer.subarray(0,bytesRead).toString('base64'),offset:input.offset,size,done:next>=size};
+    }finally{await handle.close();}
+  }
   if(input.type==='workspace_finalize')return withWorkspaceLock(root+'/finalize.lock',async()=>{
     const unlocked=await unlock();
-    await git(['add','--all']);const tree=(await git(['write-tree'])).toString().trim();
+    const tree=await snapshotWorkingTree();
     const raw=(await git(['ls-tree','-r','-l','-z',tree])).toString();const files=[];
     for(const row of raw.split('\0').filter(Boolean)){
       const tab=row.indexOf('\t'),[mode,type,hash,size]=row.slice(0,tab).trim().split(/\s+/),name=safe(row.slice(tab+1));

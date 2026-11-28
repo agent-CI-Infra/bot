@@ -533,13 +533,25 @@ test('the project computer accepts conflict import and merge check calls through
   const verifyReq = { type: 'workspace_verify_merge', workspace_id: workspace, base_sha: base, head_sha: head, head_tree_sha: tree };
   await f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request: verifyReq });
   assert.deepEqual([call().type, call().base_sha, call().head_sha, call().head_tree_sha], ['workspace_verify_merge', base, head, tree]);
+  const inspectReq = { type: 'workspace_git_inspect', workspace_id: workspace, ref: 'HEAD' };
+  await f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request: inspectReq });
+  assert.deepEqual([call().type, call().ref], ['workspace_git_inspect', 'HEAD']);
+  const exportReq = { type: 'workspace_git_export_pack', workspace_id: workspace, sha: head, pack_id: 'e'.repeat(48), offset: 0, limit: 65536, have_commits: [base] };
+  await f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request: exportReq });
+  assert.deepEqual([call().type, call().sha, call().have_commits], ['workspace_git_export_pack', head, [base]]);
   const count = f.docker.runs.length;
   for (const bad of [
     { type: 'workspace_import_commits', workspace_id: workspace, conflict_base_sha: base },
     { type: 'workspace_import_commits', workspace_id: workspace, commits: [], conflict_base_sha: 'not-a-sha' },
     { type: 'workspace_verify_merge', workspace_id: workspace, base_sha: base, head_sha: 'bad', head_tree_sha: tree },
+    { type: 'workspace_git_inspect', workspace_id: workspace, ref: '--upload-pack=evil' },
+    { type: 'workspace_git_inspect', workspace_id: workspace, ref: 'HEAD', have_commits: [base] },
+    { type: 'workspace_git_export_pack', workspace_id: workspace, sha: 'bad', pack_id: 'e'.repeat(48), offset: 0 },
+    { type: 'workspace_git_export_pack', workspace_id: workspace, sha: head, pack_id: 'e'.repeat(48), offset: 0, have_commits: ['not-a-sha'] },
+    { type: 'workspace_git_export_pack', workspace_id: workspace, sha: head, pack_id: 'e'.repeat(48), offset: 0, limit: 5 * 1024 * 1024 },
     { type: 'workspace_command', workspace_id: workspace, command: 'true', conflict_base_sha: base },
     { type: 'workspace_command', workspace_id: workspace, command: 'true', base_sha: base },
+    { type: 'workspace_command', workspace_id: workspace, command: 'true', ref: 'HEAD' },
   ]) await assert.rejects(f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request: bad }), /invalid_runner_request/, JSON.stringify(bad));
   assert.equal(f.docker.runs.length, count);
   assert.equal(f.projects.get('101').state, 'ready');
